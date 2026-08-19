@@ -1,0 +1,12 @@
+{
+  "name": "tams",
+  "version": "1.0.0",
+  "description": "Travel Agency Management System — multi-tenant with Claude AI ticket extraction",
+  "private": true,
+  "scripts": {
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm start",
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "db:init": "psql $DATABASE_URL -f server/config/schema.sql"
+  }
+}
