@@ -66,6 +66,15 @@ const INITIAL = {
   agent_name: "",
   agent_phone: "",
   source_file_url: "",
+  // International travel documents. The database requires a passport number
+  // on any INTERNATIONAL ticket, so this is not optional detail — without it
+  // the booking is rejected outright.
+  passport_number: "",
+  nationality: "",
+  date_of_birth: "",
+  passport_expiry_date: "",
+  visa_type: "",
+  visa_expiry_date: "",
 };
 
 // ─── Booked By Search ─────────────────────────────────────────────────────────
@@ -217,6 +226,15 @@ export default function TicketForm({
     agent_id: initial.agent_id || "",
     agent_name: initial.agent_name_commission || "",
     agent_phone: initial.agent_phone || "",
+    // Travel documents. The date fields go through toDateInput for the same
+    // reason flight_date does — a raw value from the API won't populate a
+    // <input type="date"> and would silently blank the field on save.
+    passport_number: initial.passport_number || "",
+    nationality: initial.nationality || "",
+    visa_type: initial.visa_type || "",
+    date_of_birth: toDateInput(initial.date_of_birth),
+    passport_expiry_date: toDateInput(initial.passport_expiry_date),
+    visa_expiry_date: toDateInput(initial.visa_expiry_date),
   });
 
   // Commission is the exception, not the rule — keep it out of the way until
@@ -353,12 +371,29 @@ export default function TicketForm({
   // ── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // Caught here rather than left to the database, which enforces the same
+    // rule but can only report it as a constraint name nobody can act on.
+    if (
+      form.ticket_type === "INTERNATIONAL" &&
+      !String(form.passport_number || "").trim()
+    ) {
+      return toast.error(
+        "International tickets need a passport number. Add it under Travel documents.",
+      );
+    }
+
     setLoading(true);
     try {
       const payload = {
         ...form,
         payment_status: paymentStatus,
         booked_by_customer_id: bookedByCustomerId || null,
+        // Empty date inputs must go as null, not "". Postgres rejects an
+        // empty string for a DATE column.
+        date_of_birth: form.date_of_birth || null,
+        passport_expiry_date: form.passport_expiry_date || null,
+        visa_expiry_date: form.visa_expiry_date || null,
       };
 
       if (mode === "create") {
@@ -462,6 +497,57 @@ export default function TicketForm({
           </Select>
         )}
       </div>
+
+      {/* ── Travel documents (international only) ── */}
+      {form.ticket_type === "INTERNATIONAL" && (
+        <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 p-4">
+          <h3 className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide mb-3">
+            Travel documents
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input
+              label="Passport number *"
+              value={form.passport_number}
+              onChange={set("passport_number")}
+              placeholder="A12345678"
+            />
+            <Input
+              label="Nationality"
+              value={form.nationality}
+              onChange={set("nationality")}
+              placeholder="Somali"
+            />
+            <Input
+              label="Date of birth"
+              type="date"
+              value={form.date_of_birth}
+              onChange={set("date_of_birth")}
+            />
+            <Input
+              label="Passport expiry"
+              type="date"
+              value={form.passport_expiry_date}
+              onChange={set("passport_expiry_date")}
+            />
+            <Input
+              label="Visa type"
+              value={form.visa_type}
+              onChange={set("visa_type")}
+              placeholder="Tourist, work, transit…"
+            />
+            <Input
+              label="Visa expiry"
+              type="date"
+              value={form.visa_expiry_date}
+              onChange={set("visa_expiry_date")}
+            />
+          </div>
+          <p className="text-xs text-blue-600 dark:text-blue-400 mt-3">
+            Only the passport number is required. The rest is useful for the
+            manifest and for spotting a document that expires before the trip.
+          </p>
+        </div>
+      )}
 
       {/* ── Passenger ── */}
       <div>

@@ -20,10 +20,24 @@ const calcPaymentStatus = (amountPaid, sellingPrice) => {
   return "partial";
 };
 
+/** "" and "   " both mean "not supplied" for an optional column. */
+const nullIfBlank = (v) => {
+  const s = String(v ?? "").trim();
+  return s === "" ? null : s;
+};
+
 const ticketValidation = [
   body("ticket_type")
     .isIn(["LOCAL", "INTERNATIONAL"])
     .withMessage("ticket_type must be LOCAL or INTERNATIONAL"),
+  // The database enforces this too, via chk_international_fields. Checking
+  // here as well is what turns an unreadable constraint-violation error into
+  // a sentence telling the user which box to fill in.
+  body("passport_number")
+    .if(body("ticket_type").equals("INTERNATIONAL"))
+    .trim()
+    .notEmpty()
+    .withMessage("Passport number is required for international tickets"),
   body("passenger_name")
     .trim()
     .notEmpty()
@@ -132,6 +146,12 @@ const createTicket = async (req, res, next) => {
       amount_paid,
       payment_method,
       booked_by_customer_id,
+      passport_number,
+      nationality,
+      date_of_birth,
+      passport_expiry_date,
+      visa_type,
+      visa_expiry_date,
     } = req.body;
 
     const paid = parseFloat(amount_paid) || 0;
@@ -228,8 +248,11 @@ const createTicket = async (req, res, next) => {
           base_price, tax, surcharge,
           source_file_url,
           trip_type, return_date, agent_commission,
-          amount_paid, payment_status, booked_by_customer_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+          amount_paid, payment_status, booked_by_customer_id,
+          passport_number, nationality, date_of_birth,
+          passport_expiry_date, visa_type, visa_expiry_date
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+                  $24,$25,$26,$27,$28,$29)
         RETURNING *`,
         [
           businessId,
@@ -255,6 +278,15 @@ const createTicket = async (req, res, next) => {
           paid,
           paymentStatus,
           booked_by_customer_id || null,
+          // Empty strings must become null: DATE columns reject "", and a
+          // blank passport_number would satisfy the NOT NULL check while
+          // meaning nothing.
+          nullIfBlank(passport_number),
+          nullIfBlank(nationality),
+          nullIfBlank(date_of_birth),
+          nullIfBlank(passport_expiry_date),
+          nullIfBlank(visa_type),
+          nullIfBlank(visa_expiry_date),
         ],
       );
 
@@ -566,6 +598,12 @@ const updateTicket = async (req, res, next) => {
       agent_commission,
       amount_paid,
       booked_by_customer_id,
+      passport_number,
+      nationality,
+      date_of_birth,
+      passport_expiry_date,
+      visa_type,
+      visa_expiry_date,
     } = req.body;
 
     const tripType = trip_type === "round_trip" ? "round_trip" : "one_way";
@@ -586,7 +624,9 @@ const updateTicket = async (req, res, next) => {
         trip_type=$15, return_date=$16,
         agent_commission=$17,
         amount_paid=$18, payment_status=$19,
-        booked_by_customer_id=COALESCE($20, booked_by_customer_id)
+        booked_by_customer_id=COALESCE($20, booked_by_customer_id),
+        passport_number=$23, nationality=$24, date_of_birth=$25,
+        passport_expiry_date=$26, visa_type=$27, visa_expiry_date=$28
        WHERE id=$21 AND business_id=$22 RETURNING *`,
       [
         ticket_type,
@@ -611,6 +651,12 @@ const updateTicket = async (req, res, next) => {
         booked_by_customer_id || null,
         req.params.id,
         req.businessId,
+        nullIfBlank(passport_number),
+        nullIfBlank(nationality),
+        nullIfBlank(date_of_birth),
+        nullIfBlank(passport_expiry_date),
+        nullIfBlank(visa_type),
+        nullIfBlank(visa_expiry_date),
       ],
     );
 

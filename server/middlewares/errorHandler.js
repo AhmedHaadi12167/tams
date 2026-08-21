@@ -16,6 +16,21 @@ const errorHandler = (err, req, res, next) => {
   if (err.code === '22P02') {
     return response.error(res, 'Invalid ID format', 400);
   }
+  // 23514 = check constraint violated. Postgres reports the constraint's
+  // name, which means nothing to the person who just clicked Save, so each
+  // one gets a sentence saying what to do about it.
+  if (err.code === '23514') {
+    const CONSTRAINT_MESSAGES = {
+      chk_international_fields:
+        'International tickets need a passport number. Add it under Travel documents.',
+    };
+    return response.error(
+      res,
+      CONSTRAINT_MESSAGES[err.constraint] ||
+        'Some required information is missing or inconsistent. Please check the form.',
+      400,
+    );
+  }
   // Missing table / column almost always means a migration hasn't been run.
   if (err.code === '42P01' || err.code === '42703') {
     console.error(
