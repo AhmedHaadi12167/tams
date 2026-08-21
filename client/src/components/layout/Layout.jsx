@@ -23,6 +23,11 @@ import {
   UserRound,
 } from "lucide-react";
 
+// The super admin runs the platform; they do not run an agency. Tickets,
+// visas, packages, airlines, agents, reports and financials all belong to
+// one particular business, and a super admin has no business_id — so those
+// screens had nothing meaningful to show them anyway. Restricting the menu
+// to Dashboard and Businesses matches what the role actually does.
 const NAV_ITEMS = [
   {
     path: "/dashboard",
@@ -59,37 +64,37 @@ const NAV_ITEMS = [
     path: "/visas",
     label: "Visas",
     icon: Stamp,
-    roles: ["super_admin", "admin", "agent", "accountant"],
+    roles: ["admin", "agent", "accountant"],
   },
   {
     path: "/packages",
     label: "Packages",
     icon: Luggage,
-    roles: ["super_admin", "admin", "agent", "accountant"],
+    roles: ["admin", "agent", "accountant"],
   },
   {
     path: "/airlines",
     label: "Airlines",
     icon: Plane,
-    roles: ["super_admin", "admin", "agent", "accountant"],
+    roles: ["admin", "agent", "accountant"],
   },
   {
     path: "/agents",
     label: "Agents",
     icon: UserRound,
-    roles: ["super_admin", "admin", "accountant"],
+    roles: ["admin", "accountant"],
   },
   {
     path: "/reports",
     label: "Reports",
     icon: BarChart3,
-    roles: ["super_admin", "admin", "accountant"],
+    roles: ["admin", "accountant"],
   },
   {
     path: "/financials",
     label: "Financials",
     icon: Wallet,
-    roles: ["super_admin", "admin", "accountant"],
+    roles: ["admin", "accountant"],
   },
   { path: "/users", label: "Team", icon: Settings, roles: ["admin"] },
 ];
@@ -129,8 +134,11 @@ export const Layout = ({ children }) => {
 
   const visibleItems = NAV_ITEMS.filter((item) => hasRole(...item.roles));
 
-  const handleLogout = () => {
-    logout();
+  // Await the server call so the session is actually retired before we
+  // navigate away — otherwise the request can be cancelled mid-flight and
+  // the old token would survive.
+  const handleLogout = async () => {
+    await logout();
     navigate("/login");
   };
 

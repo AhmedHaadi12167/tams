@@ -37,7 +37,20 @@ const errorHandler = (err, req, res, next) => {
   }
 
   const statusCode = err.statusCode || 500;
-  const message = err.message || 'Internal server error';
+
+  // An unexpected 500 carries a message written for developers — file paths,
+  // SQL fragments, library internals. In production that is free
+  // reconnaissance for anyone probing the system, so only errors we raised
+  // deliberately are allowed to speak for themselves. The full detail still
+  // goes to the log above, where it is actually useful.
+  const isDeliberate = statusCode < 500 || err.expose === true;
+  const message =
+    isDeliberate && err.message
+      ? err.message
+      : process.env.NODE_ENV === 'production'
+        ? 'Something went wrong. Please try again.'
+        : err.message || 'Internal server error';
+
   return response.error(res, message, statusCode);
 };
 

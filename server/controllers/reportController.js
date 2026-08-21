@@ -4,6 +4,7 @@ const {
   generatePDFReport,
   generateExcelReport,
 } = require("../services/reportService");
+const { uuidOrThrow } = require("../utils/sqlSafe");
 
 /**
  * GET /api/reports/dashboard
@@ -52,13 +53,23 @@ const getDashboard = async (req, res, next) => {
       return Math.round(((a - b) / b) * 1000) / 10;
     };
 
-    // Super admin = no business filter, regular = scoped
+    // Super admin = no business filter, regular = scoped.
+    //
+    // These fragments are inlined rather than bound, because each is reused
+    // across a dozen queries with different parameter lists. uuidOrThrow is
+    // what makes that safe: it proves the value is hex digits and hyphens
+    // before it is ever concatenated, so it cannot carry a quote or any
+    // other character with meaning in SQL. See utils/sqlSafe.js.
+    const safeBusinessId = isSuperAdmin
+      ? null
+      : uuidOrThrow(businessId, "business id");
+
     const tWhere = isSuperAdmin
       ? `1=1 ${tFilter}`
-      : `t.business_id = '${businessId}' ${tFilter}`;
+      : `t.business_id = '${safeBusinessId}' ${tFilter}`;
     const cWhere = isSuperAdmin
       ? `1=1 ${cFilter}`
-      : `cs.business_id = '${businessId}' ${cFilter}`;
+      : `cs.business_id = '${safeBusinessId}' ${cFilter}`;
 
     if (isSuperAdmin) {
       // ── SUPER ADMIN DASHBOARD ──────────────────────────────
@@ -238,7 +249,9 @@ const getDashboard = async (req, res, next) => {
       // ── REGULAR BUSINESS DASHBOARD ─────────────────────────
       // If agent, scope all ticket stats to their own tickets only
       const agentFilter =
-        req.user.role === "agent" ? `AND t.created_by = '${req.user.id}'` : "";
+        req.user.role === "agent"
+          ? `AND t.created_by = '${uuidOrThrow(req.user.id, "user id")}'`
+          : "";
 
       const [
         ticketSummary,

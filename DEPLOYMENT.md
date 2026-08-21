@@ -69,7 +69,7 @@ fallocate -l 2G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile
 swapon /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 free -h        # Swap should now show 2.0Gi
 ```
 

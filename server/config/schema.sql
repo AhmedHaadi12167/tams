@@ -55,6 +55,13 @@ CREATE TABLE users (
     role            user_role NOT NULL DEFAULT 'agent',
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     last_login      TIMESTAMPTZ,
+    -- One active session per account. Set on login, cleared on logout, and
+    -- matched against the same value carried inside the JWT. Logging in
+    -- elsewhere overwrites it, which retires the previous token.
+    session_id      UUID,
+    -- Consecutive failed logins, and the time a lockout expires.
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -62,6 +69,25 @@ CREATE TABLE users (
 CREATE INDEX idx_users_business_id ON users(business_id);
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_role ON users(role);
+
+-- ============================================================
+-- login_audit — every attempt to sign in, successful or not.
+-- Holds no password material: who, when, from where, what happened.
+-- ============================================================
+CREATE TABLE login_audit (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+    email       VARCHAR(255),
+    success     BOOLEAN NOT NULL,
+    reason      VARCHAR(64),
+    ip_address  VARCHAR(64),
+    user_agent  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_login_audit_email   ON login_audit(email, created_at DESC);
+CREATE INDEX idx_login_audit_user    ON login_audit(user_id, created_at DESC);
+CREATE INDEX idx_login_audit_created ON login_audit(created_at DESC);
 
 -- ============================================================
 -- customers

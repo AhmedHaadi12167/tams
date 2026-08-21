@@ -13,8 +13,41 @@ const PORT = process.env.PORT || 5000;
 // Trust proxy (fixes rate-limit X-Forwarded-For warning)
 app.set("trust proxy", 1);
 
-// Security middleware
-app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+// ── Security headers ────────────────────────────────────────────────────
+//
+// Worth being clear about the division of labour: in production Nginx
+// serves index.html and the static bundle, so the headers that protect the
+// *page* — Content-Security-Policy above all — must be set there. Express
+// only ever returns JSON and uploaded files, so what matters here is that
+// those can't be coaxed into executing as something else.
+app.use(
+  helmet({
+    // Uploaded ticket PDFs and cargo photos are fetched by the app itself.
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+
+    // Tell browsers to refuse plain HTTP for this host for a year. Set only
+    // in production: emitting it from a local dev server would poison the
+    // browser's cache for localhost across every other project.
+    hsts:
+      process.env.NODE_ENV === "production"
+        ? { maxAge: 31536000, includeSubDomains: true, preload: false }
+        : false,
+
+    // No API response is ever a document, so nothing served from here
+    // should be treated as one.
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'none'"],
+        formAction: ["'none'"],
+      },
+    },
+
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  }),
+);
+
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -22,13 +55,45 @@ app.use(
   }),
 );
 
-// Rate limiting
+// ── Rate limiting ───────────────────────────────────────────────────────
+//
+// Password guessing is now stopped by the per-account lockout in
+// loginSecurity.js, which is the defence that actually works — an attacker
+// can change IP address far more easily than they can guess a password.
+//
+// These limits exist for the other half of the problem: one address making
+// an unreasonable number of requests. `skipSuccessfulRequests` matters more
+// than it looks. A travel agency's staff all share one office IP, so
+// counting *every* login would have five people locking each other out by
+// mid-morning. Only failures count against the limit.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  skipSuccessfulRequests: true,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many failed attempts from this address. Try again shortly.",
+  },
+});
+
+app.use("/api/auth/login", loginLimiter);
+app.use("/api/auth/forgot-password", loginLimiter);
+app.use("/api/auth/verify-otp", loginLimiter);
+app.use("/api/auth/reset-password", loginLimiter);
+
+// A backstop against scraping and runaway loops. Set high enough that
+// ordinary use — an office of staff working steadily all day — never
+// approaches it.
 app.use(
-  "/api/auth",
+  "/api",
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 20,
-    message: "Too many requests, please try again later.",
+    limit: 1500,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { success: false, message: "Too many requests. Please slow down." },
   }),
 );
 

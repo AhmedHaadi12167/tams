@@ -24,8 +24,16 @@ const notFound = (res, message = 'Resource not found') => {
   return error(res, message, 404);
 };
 
-const unauthorized = (res, message = 'Unauthorized') => {
-  return error(res, message, 401);
+/**
+ * `code` is a stable machine-readable reason the client can branch on.
+ * The message is for people and may be reworded freely; the code is not.
+ * Used to tell "your session ended because you signed in elsewhere" apart
+ * from "your session simply expired".
+ */
+const unauthorized = (res, message = 'Unauthorized', code = null) => {
+  const body = { success: false, message };
+  if (code) body.code = code;
+  return res.status(401).json(body);
 };
 
 const forbidden = (res, message = 'Access denied') => {

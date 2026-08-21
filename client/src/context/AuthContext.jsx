@@ -30,7 +30,23 @@ export const AuthProvider = ({ children }) => {
     return userData;
   };
 
-  const logout = () => {
+  /**
+   * Tell the server first, so it clears the stored session and the token
+   * stops working everywhere — not just in this browser. Forgetting the
+   * token locally is not the same as retiring it; a copy taken beforehand
+   * would otherwise stay valid until it expired on its own.
+   *
+   * The local clear happens either way. If the network call fails there is
+   * nothing useful to say about it, and refusing to sign someone out
+   * because the server was briefly unreachable would be worse than the
+   * problem it solves.
+   */
+  const logout = async () => {
+    try {
+      await authAPI.logout();
+    } catch {
+      /* sign out locally regardless */
+    }
     localStorage.removeItem('tams_token');
     setUser(null);
   };

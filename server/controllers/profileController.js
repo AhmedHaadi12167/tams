@@ -3,6 +3,7 @@ const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
 const { sendOTPEmail } = require("../services/emailService");
+const { sessionsReady, lockoutReady } = require("../services/loginSecurity");
 
 // In-memory OTP store { email: { otp, expiresAt, name } }
 const otpStore = new Map();
@@ -76,11 +77,21 @@ const changePassword = async (req, res, next) => {
       return response.error(res, "Current password is incorrect", 400);
 
     const hash = await bcrypt.hash(new_password, 12);
-    await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [
-      hash,
-      req.user.id,
-    ]);
-    return response.success(res, null, "Password changed successfully");
+    // Clearing session_id signs out every device, including this one.
+    // A password change that leaves old sessions alive is barely a change
+    // at all — anyone holding a stolen token would keep their access.
+    await query(
+      `UPDATE users
+          SET password_hash = $1
+              ${(await sessionsReady()) ? ", session_id = NULL" : ""}
+        WHERE id = $2`,
+      [hash, req.user.id],
+    );
+    return response.success(
+      res,
+      null,
+      "Password changed. Please sign in again with your new password.",
+    );
   } catch (err) {
     next(err);
   }
@@ -186,10 +197,17 @@ const resetPassword = async (req, res, next) => {
     }
 
     const hash = await bcrypt.hash(new_password, 12);
-    await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [
-      hash,
-      stored.userId,
-    ]);
+    // A reset is the one moment we most need to evict whoever might already
+    // be in. Also clears any lockout — the person proved control of the
+    // mailbox, so making them wait out a freeze serves nobody.
+    await query(
+      `UPDATE users
+          SET password_hash = $1
+              ${(await sessionsReady()) ? ", session_id = NULL" : ""}
+              ${(await lockoutReady()) ? ", failed_attempts = 0, locked_until = NULL" : ""}
+        WHERE id = $2`,
+      [hash, stored.userId],
+    );
     otpStore.delete(email.toLowerCase());
 
     return response.success(

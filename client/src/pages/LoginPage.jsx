@@ -1,19 +1,37 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Button, Input, Card } from "../components/ui";
+import { SESSION_MESSAGE_KEY } from "../services/api";
 import toast from "react-hot-toast";
-import { Plane } from "lucide-react";
+import { Plane, Info } from "lucide-react";
 
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({ email: "", password: "" });
   const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState(null);
+
+  // If we were sent here by an ended session, say why. Being told "you
+  // signed in on another device" is the difference between a system that
+  // seems broken and one that seems careful.
+  useEffect(() => {
+    try {
+      const msg = sessionStorage.getItem(SESSION_MESSAGE_KEY);
+      if (msg) {
+        setNotice(msg);
+        sessionStorage.removeItem(SESSION_MESSAGE_KEY);
+      }
+    } catch {
+      /* storage unavailable — no notice to show */
+    }
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setNotice(null);
     try {
       await login(form.email, form.password);
       toast.success("Welcome back!");
@@ -44,6 +62,14 @@ export default function LoginPage() {
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-6">
             Sign in to your account
           </h2>
+          {notice && (
+            <div className="flex gap-2 items-start mb-5 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2.5">
+              <Info className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+              <p className="text-sm text-amber-800 dark:text-amber-200">
+                {notice}
+              </p>
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input
               label="Email address"

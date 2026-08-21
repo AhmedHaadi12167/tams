@@ -75,6 +75,7 @@ router.get("/profile", profileController.getProfile);
 router.put("/profile", profileController.updateProfile);
 router.put("/profile/change-password", profileController.changePassword);
 router.get("/auth/me", authController.getMe);
+router.post("/auth/logout", authController.logout);
 
 // ── Business Management (super_admin only) ────────────────
 router.post(

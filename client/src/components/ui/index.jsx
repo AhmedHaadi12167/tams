@@ -1,5 +1,5 @@
 import React from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, Eye, EyeOff } from "lucide-react";
 
 // ── Button ─────────────────────────────────────────────────
 export const Button = ({
@@ -40,26 +40,69 @@ export const Button = ({
 };
 
 // ── Input ──────────────────────────────────────────────────
+//
+// Password fields get a reveal toggle for free. Typing a long password
+// blind is how people end up choosing short ones, so letting them check
+// what they typed is a security feature, not a convenience.
+//
+// The toggle only ever affects this field's own `type` — the value is
+// never copied anywhere, and the button is skipped in tab order so it
+// can't interrupt typing your password and pressing Enter.
 export const Input = React.forwardRef(
-  ({ label, error, className = "", ...props }, ref) => (
-    <div className="flex flex-col gap-1">
-      {label && (
-        <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-          {label}
-        </label>
-      )}
-      <input
-        ref={ref}
-        className={`px-3 py-2 rounded-lg border text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+  ({ label, error, className = "", type = "text", ...props }, ref) => {
+    const isPassword = type === "password";
+    const [revealed, setRevealed] = React.useState(false);
+
+    const inputClass = `px-3 py-2 rounded-lg border text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
         border-gray-300 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500
         placeholder-gray-400 dark:placeholder-gray-500
         ${error ? "border-red-400 focus:ring-red-400" : ""}
-        ${className}`}
+        ${isPassword ? "w-full pr-10" : ""}
+        ${className}`;
+
+    const field = (
+      <input
+        ref={ref}
+        type={isPassword && revealed ? "text" : type}
+        className={inputClass}
         {...props}
       />
-      {error && <p className="text-xs text-red-500">{error}</p>}
-    </div>
-  ),
+    );
+
+    return (
+      <div className="flex flex-col gap-1">
+        {label && (
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            {label}
+          </label>
+        )}
+        {isPassword ? (
+          <div className="relative">
+            {field}
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={() => setRevealed((v) => !v)}
+              aria-label={revealed ? "Hide password" : "Show password"}
+              title={revealed ? "Hide password" : "Show password"}
+              className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400
+                hover:text-gray-600 dark:hover:text-gray-200 focus:outline-none
+                focus:text-blue-600 rounded-r-lg"
+            >
+              {revealed ? (
+                <EyeOff className="w-4 h-4" />
+              ) : (
+                <Eye className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+        ) : (
+          field
+        )}
+        {error && <p className="text-xs text-red-500">{error}</p>}
+      </div>
+    );
+  },
 );
 Input.displayName = "Input";
 

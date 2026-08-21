@@ -8,12 +8,59 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/**
+ * Endpoints where a 401 is an *answer*, not an expired session.
+ *
+ * A wrong password legitimately returns 401. Treating that as "your session
+ * ended" used to wipe the token and hard-navigate to /login, which threw
+ * away the error message before the user could read it — so a locked-out
+ * account looked like a page that simply refreshed itself.
+ */
+const AUTH_ENDPOINTS = [
+  "/auth/login",
+  "/auth/forgot-password",
+  "/auth/verify-otp",
+  "/auth/reset-password",
+];
+
+/**
+ * Why the session ended, handed to the login page so it can say something
+ * more useful than "please sign in". sessionStorage rather than a query
+ * string: it survives the navigation but never ends up in a shared link.
+ */
+export const SESSION_MESSAGE_KEY = "tams_session_message";
+
+const SESSION_MESSAGES = {
+  SESSION_REPLACED:
+    "You were signed out because this account signed in on another device.",
+  SESSION_ENDED: "You have been signed out. Please sign in again.",
+  TOKEN_EXPIRED: "Your session expired. Please sign in again.",
+};
+
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const url = err.config?.url || "";
+    const isAuthCall = AUTH_ENDPOINTS.some((p) => url.startsWith(p));
+
+    if (err.response?.status === 401 && !isAuthCall) {
+      const code = err.response?.data?.code;
+      const message =
+        SESSION_MESSAGES[code] || err.response?.data?.message || null;
+
+      if (message) {
+        try {
+          sessionStorage.setItem(SESSION_MESSAGE_KEY, message);
+        } catch {
+          /* private browsing can refuse storage; the redirect still works */
+        }
+      }
+
       localStorage.removeItem("tams_token");
-      window.location.href = "/login";
+      // Don't stack redirects if several requests fail at once.
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(err);
   },
@@ -22,6 +69,7 @@ api.interceptors.response.use(
 export const authAPI = {
   createBusiness: (data) => api.post("/auth/create-business", data),
   login: (data) => api.post("/auth/login", data),
+  logout: () => api.post("/auth/logout"),
   me: () => api.get("/auth/me"),
 };
 

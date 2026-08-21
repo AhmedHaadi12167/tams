@@ -111,7 +111,7 @@ function AppRoutes() {
       <Route
         path="/reports"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "accountant"]}>
+          <ProtectedRoute roles={["admin", "accountant"]}>
             <ReportsPage />
           </ProtectedRoute>
         }
@@ -119,7 +119,7 @@ function AppRoutes() {
       <Route
         path="/airlines"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "agent", "accountant"]}>
+          <ProtectedRoute roles={["admin", "agent", "accountant"]}>
             <AirlinesPage />
           </ProtectedRoute>
         }
@@ -127,7 +127,7 @@ function AppRoutes() {
       <Route
         path="/financials"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "accountant"]}>
+          <ProtectedRoute roles={["admin", "accountant"]}>
             <FinancialsPage />
           </ProtectedRoute>
         }
@@ -135,7 +135,7 @@ function AppRoutes() {
       <Route
         path="/agents"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "accountant"]}>
+          <ProtectedRoute roles={["admin", "accountant"]}>
             <AgentsPage />
           </ProtectedRoute>
         }
@@ -143,7 +143,7 @@ function AppRoutes() {
       <Route
         path="/visas"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "agent", "accountant"]}>
+          <ProtectedRoute roles={["admin", "agent", "accountant"]}>
             <VisaPage />
           </ProtectedRoute>
         }
@@ -151,7 +151,7 @@ function AppRoutes() {
       <Route
         path="/packages"
         element={
-          <ProtectedRoute roles={["super_admin", "admin", "agent", "accountant"]}>
+          <ProtectedRoute roles={["admin", "agent", "accountant"]}>
             <PackagesPage />
           </ProtectedRoute>
         }
