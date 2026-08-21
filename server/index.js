@@ -56,8 +56,14 @@ app.use((req, res) => {
 // Error handler
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`🚀 TAMS Server running on port ${PORT}`);
+// Bind to loopback by default. In production Nginx is the only thing that
+// should reach the API, so there is nothing to gain from listening on a
+// public interface — and plenty to lose, since it would let anyone bypass
+// HTTPS by hitting the port directly. Set HOST=0.0.0.0 to override.
+const HOST = process.env.HOST || "127.0.0.1";
+
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 TAMS Server running on ${HOST}:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || "development"}`);
 });
 
