@@ -16,6 +16,9 @@ import CustomersPage from "./pages/CustomersPage";
 import ReportsPage from "./pages/ReportsPage";
 import AirlinesPage from "./pages/AirlinesPage";
 import FinancialsPage from "./pages/FinancialsPage";
+import AgentsPage from "./pages/AgentsPage";
+import VisaPage from "./pages/VisaPage";
+import PackagesPage from "./pages/PackagesPage";
 import UsersPage from "./pages/UsersPage";
 import BusinessesPage from "./pages/BusinessesPage";
 import ProfilePage from "./pages/ProfilePage";
@@ -126,6 +129,30 @@ function AppRoutes() {
         element={
           <ProtectedRoute roles={["super_admin", "admin", "accountant"]}>
             <FinancialsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/agents"
+        element={
+          <ProtectedRoute roles={["super_admin", "admin", "accountant"]}>
+            <AgentsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/visas"
+        element={
+          <ProtectedRoute roles={["super_admin", "admin", "agent", "accountant"]}>
+            <VisaPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/packages"
+        element={
+          <ProtectedRoute roles={["super_admin", "admin", "agent", "accountant"]}>
+            <PackagesPage />
           </ProtectedRoute>
         }
       />

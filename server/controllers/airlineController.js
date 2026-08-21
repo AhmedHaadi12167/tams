@@ -15,6 +15,7 @@ const {
   aliasTableExists,
   findAirlineMatch,
 } = require("../services/airlineService");
+const { hasTable, hasColumn } = require("../services/schemaInfo");
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
 
@@ -77,26 +78,24 @@ const getAirlines = async (req, res, next) => {
     const businessId = req.businessId;
     const { where, params } = buildFilters(req);
 
-    const [rankedRes, allNamesRes, totalsRes] = await Promise.all([
+    const [rankedRes, allNamesRes, totalsRes, accountRes] = await Promise.all([
+      // Airline view is a PAYABLES view: what we owe the carrier, not what
+      // the customer owes us. Customer-side money lives in Reports.
       query(
         `SELECT
            t.airline_name,
+           MAX(t.airline_id::TEXT)                                        AS airline_id,
            COUNT(*)                                                       AS tickets,
            COUNT(*) FILTER (WHERE t.ticket_type = 'LOCAL')                AS local_tickets,
            COUNT(*) FILTER (WHERE t.ticket_type = 'INTERNATIONAL')        AS international_tickets,
            COUNT(DISTINCT t.passenger_name)                               AS passengers,
            COUNT(DISTINCT (t.from_city || ' → ' || t.to_city))            AS routes,
-           COALESCE(SUM(t.selling_price), 0)                              AS total_sales,
            COALESCE(SUM(t.cost_price), 0)                                 AS total_cost,
-           COALESCE(SUM(t.revenue), 0)                                    AS total_revenue,
-           COALESCE(SUM(t.amount_paid), 0)                                AS total_collected,
-           COALESCE(SUM(t.selling_price - t.amount_paid), 0)              AS total_balance,
-           COUNT(*) FILTER (WHERE t.payment_status <> 'paid')             AS unpaid_tickets,
            MAX(t.flight_date)                                             AS last_flight_date
          FROM tickets t
          WHERE ${where}
          GROUP BY t.airline_name
-         ORDER BY tickets DESC, total_revenue DESC`,
+         ORDER BY total_cost DESC, tickets DESC`,
         [businessId, ...params],
       ),
       // Master list when it exists, otherwise the distinct names on tickets
@@ -120,37 +119,69 @@ const getAirlines = async (req, res, next) => {
         `SELECT
            COUNT(*)                             AS tickets,
            COUNT(DISTINCT t.airline_name)       AS airlines,
-           COALESCE(SUM(t.selling_price), 0)    AS total_sales,
-           COALESCE(SUM(t.revenue), 0)          AS total_revenue
+           COALESCE(SUM(t.cost_price), 0)       AS total_cost
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
       ),
+      // Account balances are all-time by nature — a settlement isn't tied
+      // to the date range you happen to be looking at.
+      (await accountTableExists())
+        ? query(
+            `SELECT airline_id, airline_name, total_cost, total_paid, balance
+             FROM v_airline_account WHERE business_id = $1`,
+            [businessId],
+          )
+        : Promise.resolve({ rows: [] }),
     ]);
 
     const totals = totalsRes.rows[0];
+    const accByName = new Map(
+      accountRes.rows.map((a) => [String(a.airline_name).toLowerCase(), a]),
+    );
 
-    return response.success(res, {
-      airlines: rankedRes.rows.map((r) => ({
+    const airlines = rankedRes.rows.map((r) => {
+      const acc = accByName.get(String(r.airline_name).toLowerCase());
+      return {
         airline_name: r.airline_name,
+        airline_id: r.airline_id || acc?.airline_id || null,
         tickets: parseInt(r.tickets),
         local_tickets: parseInt(r.local_tickets),
         international_tickets: parseInt(r.international_tickets),
         passengers: parseInt(r.passengers),
         routes: parseInt(r.routes),
-        total_sales: round2(r.total_sales),
         total_cost: round2(r.total_cost),
-        total_revenue: round2(r.total_revenue),
-        total_collected: round2(r.total_collected),
-        total_balance: round2(r.total_balance),
-        unpaid_tickets: parseInt(r.unpaid_tickets),
         last_flight_date: r.last_flight_date,
-      })),
+        // account (all-time)
+        account_cost: acc ? round2(acc.total_cost) : null,
+        account_paid: acc ? round2(acc.total_paid) : null,
+        account_balance: acc ? round2(acc.balance) : null,
+      };
+    });
+
+    const accountTotals = accountRes.rows.reduce(
+      (a, r) => ({
+        total_cost: a.total_cost + Number(r.total_cost || 0),
+        total_paid: a.total_paid + Number(r.total_paid || 0),
+        total_balance: a.total_balance + Number(r.balance || 0),
+        airlines_owing: a.airlines_owing + (Number(r.balance || 0) > 0 ? 1 : 0),
+      }),
+      { total_cost: 0, total_paid: 0, total_balance: 0, airlines_owing: 0 },
+    );
+
+    return response.success(res, {
+      airlines,
       airline_names: allNamesRes.rows.map((r) => r.airline_name),
       totals: {
         tickets: parseInt(totals.tickets),
         airlines: parseInt(totals.airlines),
-        total_sales: round2(totals.total_sales),
-        total_revenue: round2(totals.total_revenue),
+        total_cost: round2(totals.total_cost),
+      },
+      account: {
+        total_cost: round2(accountTotals.total_cost),
+        total_paid: round2(accountTotals.total_paid),
+        total_balance: round2(accountTotals.total_balance),
+        airlines_owing: accountTotals.airlines_owing,
+        available: accountRes.rows.length > 0 || (await accountTableExists()),
       },
     });
   } catch (err) {
@@ -173,6 +204,12 @@ const getAirlinePassengers = async (req, res, next) => {
     const { where, params, nextIdx } = buildFilters(req);
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
+    // Settlement columns only exist after migration v9
+    const perTicket = await hasColumn("tickets", "airline_paid");
+    const settleCols = perTicket
+      ? "t.airline_paid, (t.cost_price - t.airline_paid) AS airline_balance,"
+      : "0::NUMERIC AS airline_paid, t.cost_price AS airline_balance,";
+
     const [countRes, summaryRes, routesRes, listRes] = await Promise.all([
       query(`SELECT COUNT(*) FROM tickets t WHERE ${where}`, [
         businessId,
@@ -180,13 +217,15 @@ const getAirlinePassengers = async (req, res, next) => {
       ]),
       query(
         `SELECT
-           COUNT(*)                                            AS tickets,
-           COUNT(DISTINCT t.passenger_name)                    AS passengers,
-           COALESCE(SUM(t.selling_price), 0)                   AS total_sales,
-           COALESCE(SUM(t.cost_price), 0)                      AS total_cost,
-           COALESCE(SUM(t.revenue), 0)                          AS total_revenue,
-           COALESCE(SUM(t.amount_paid), 0)                     AS total_collected,
-           COALESCE(SUM(t.selling_price - t.amount_paid), 0)   AS total_balance
+           COUNT(*)                          AS tickets,
+           COUNT(DISTINCT t.passenger_name)  AS passengers,
+           COALESCE(SUM(t.cost_price), 0)    AS total_cost,
+           ${perTicket
+             ? `COALESCE(SUM(t.airline_paid), 0) AS cost_paid,
+                COALESCE(SUM(t.cost_price - t.airline_paid), 0) AS cost_unpaid,
+                COUNT(*) FILTER (WHERE t.cost_price > t.airline_paid) AS unsettled`
+             : `0::NUMERIC AS cost_paid, COALESCE(SUM(t.cost_price), 0) AS cost_unpaid,
+                COUNT(*) AS unsettled`}
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
       ),
@@ -195,7 +234,7 @@ const getAirlinePassengers = async (req, res, next) => {
            t.from_city, t.to_city,
            t.from_city || ' → ' || t.to_city   AS route,
            COUNT(*)                            AS tickets,
-           COALESCE(SUM(t.revenue), 0)         AS revenue
+           COALESCE(SUM(t.cost_price), 0)      AS cost
          FROM tickets t WHERE ${where}
          GROUP BY t.from_city, t.to_city
          ORDER BY tickets DESC LIMIT 15`,
@@ -204,11 +243,10 @@ const getAirlinePassengers = async (req, res, next) => {
       query(
         `SELECT
            t.id, t.passenger_name, t.contact_number, t.passport_number,
-           t.ticket_type, t.trip_type, t.status, t.payment_status,
+           t.ticket_type, t.trip_type, t.status,
            t.from_city, t.to_city, t.flight_date, t.return_date,
-           t.ticket_reference, t.cost_price, t.selling_price,
-           t.agent_commission, t.revenue, t.amount_paid,
-           (t.selling_price - t.amount_paid) AS balance,
+           t.ticket_reference, t.cost_price,
+           ${settleCols}
            t.created_at AS booked_date,
            u.name AS agent_name,
            c.phone AS customer_phone
@@ -227,14 +265,11 @@ const getAirlinePassengers = async (req, res, next) => {
       return response.success(res, {
         airline_name: airlineName,
         summary: {
-          tickets: 0,
-          passengers: 0,
-          total_sales: 0,
-          total_cost: 0,
-          total_revenue: 0,
-          total_collected: 0,
-          total_balance: 0,
+          tickets: 0, passengers: 0, total_cost: 0,
+          cost_paid: 0, cost_unpaid: 0, unsettled: 0,
+          per_ticket_settlement: perTicket,
         },
+        account: null,
         routes: [],
         passengers: [],
         meta: { page: 1, limit: parseInt(limit), total: 0, totalPages: 0 },
@@ -242,23 +277,44 @@ const getAirlinePassengers = async (req, res, next) => {
     }
 
     const s = summaryRes.rows[0];
+
+    // All-time account for this carrier, so the Pay button has a balance
+    let account = null;
+    if (await accountTableExists()) {
+      const accRes = await query(
+        `SELECT airline_id, total_cost, total_paid, balance
+         FROM v_airline_account
+         WHERE business_id = $1 AND LOWER(airline_name) = LOWER($2)`,
+        [businessId, airlineName],
+      );
+      if (accRes.rows.length > 0) {
+        account = {
+          airline_id: accRes.rows[0].airline_id,
+          total_cost: round2(accRes.rows[0].total_cost),
+          total_paid: round2(accRes.rows[0].total_paid),
+          balance: round2(accRes.rows[0].balance),
+        };
+      }
+    }
+
     return response.success(res, {
       airline_name: airlineName,
       summary: {
         tickets: parseInt(s.tickets),
         passengers: parseInt(s.passengers),
-        total_sales: round2(s.total_sales),
         total_cost: round2(s.total_cost),
-        total_revenue: round2(s.total_revenue),
-        total_collected: round2(s.total_collected),
-        total_balance: round2(s.total_balance),
+        cost_paid: round2(s.cost_paid),
+        cost_unpaid: round2(s.cost_unpaid),
+        unsettled: parseInt(s.unsettled),
+        per_ticket_settlement: perTicket,
       },
+      account,
       routes: routesRes.rows.map((r) => ({
         route: r.route,
         from_city: r.from_city,
         to_city: r.to_city,
         tickets: parseInt(r.tickets),
-        revenue: round2(r.revenue),
+        cost: round2(r.cost),
       })),
       passengers: listRes.rows,
       meta: {
@@ -289,20 +345,14 @@ const exportAirlinePDF = async (req, res, next) => {
         `SELECT
            COUNT(*) AS tickets,
            COUNT(DISTINCT t.passenger_name) AS passengers,
-           COALESCE(SUM(t.selling_price), 0) AS total_sales,
-           COALESCE(SUM(t.cost_price), 0) AS total_cost,
-           COALESCE(SUM(t.revenue), 0) AS total_revenue,
-           COALESCE(SUM(t.amount_paid), 0) AS total_collected,
-           COALESCE(SUM(t.selling_price - t.amount_paid), 0) AS total_balance
+           COALESCE(SUM(t.cost_price), 0) AS total_cost
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
       ),
       query(
         `SELECT t.passenger_name, t.contact_number, t.from_city, t.to_city,
                 t.flight_date, t.return_date, t.trip_type, t.ticket_type,
-                t.ticket_reference, t.selling_price, t.amount_paid,
-                (t.selling_price - t.amount_paid) AS balance,
-                t.revenue, t.payment_status, u.name AS agent_name
+                t.ticket_reference, t.cost_price, u.name AS agent_name
          FROM tickets t
          LEFT JOIN users u ON u.id = t.created_by
          WHERE ${where}
@@ -312,18 +362,29 @@ const exportAirlinePDF = async (req, res, next) => {
       query(
         `SELECT t.from_city || ' → ' || t.to_city AS route,
                 COUNT(*) AS tickets,
-                COALESCE(SUM(t.revenue), 0) AS revenue
+                COALESCE(SUM(t.cost_price), 0) AS cost
          FROM tickets t WHERE ${where}
          GROUP BY 1 ORDER BY tickets DESC LIMIT 15`,
         [businessId, ...params],
       ),
     ]);
 
+    let account = null;
+    if (await accountTableExists()) {
+      const accRes = await query(
+        `SELECT total_cost, total_paid, balance FROM v_airline_account
+         WHERE business_id = $1 AND LOWER(airline_name) = LOWER($2)`,
+        [businessId, airlineName],
+      );
+      account = accRes.rows[0] || null;
+    }
+
     generateAirlinePDF(
       res,
       {
         airline_name: airlineName,
         summary: summaryRes.rows[0],
+        account,
         passengers: listRes.rows,
         routes: routesRes.rows,
       },
@@ -679,6 +740,336 @@ const deleteAlias = async (req, res, next) => {
   }
 };
 
+// ─── Payables: what the agency owes each carrier ─────────────────────────────
+
+const accountTableExists = () => hasTable("airline_payments");
+
+const PAYABLES_MIGRATION_MSG =
+  "Airline payments need a database update. Run migration_v8.sql.";
+
+/**
+ * GET /api/airlines/payables
+ * Running account per carrier: cost owed, settled, balance.
+ */
+const getPayables = async (req, res, next) => {
+  try {
+    if (!(await accountTableExists()))
+      return response.error(res, PAYABLES_MIGRATION_MSG, 503);
+
+    const { only_due } = req.query;
+    const having = only_due === "true" || only_due === "1" ? "WHERE balance > 0" : "";
+
+    const [rowsRes, totalsRes] = await Promise.all([
+      query(
+        `SELECT * FROM v_airline_account
+         WHERE business_id = $1 ${having ? "AND balance > 0" : ""}
+         ORDER BY balance DESC, airline_name`,
+        [req.businessId],
+      ),
+      query(
+        `SELECT
+           COALESCE(SUM(total_cost), 0)  AS total_cost,
+           COALESCE(SUM(total_paid), 0)  AS total_paid,
+           COALESCE(SUM(balance), 0)     AS total_balance,
+           COUNT(*) FILTER (WHERE balance > 0) AS airlines_owing
+         FROM v_airline_account WHERE business_id = $1`,
+        [req.businessId],
+      ),
+    ]);
+
+    const t = totalsRes.rows[0];
+    return response.success(res, {
+      airlines: rowsRes.rows.map((r) => ({
+        ...r,
+        ticket_count: parseInt(r.ticket_count),
+        total_cost: round2(r.total_cost),
+        total_paid: round2(r.total_paid),
+        balance: round2(r.balance),
+      })),
+      totals: {
+        total_cost: round2(t.total_cost),
+        total_paid: round2(t.total_paid),
+        total_balance: round2(t.total_balance),
+        airlines_owing: parseInt(t.airlines_owing),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/airlines/:id/payments   { amount, method, reference, note }
+ * Settle any amount against a carrier. Omit amount to clear the balance.
+ */
+const payAirline = async (req, res, next) => {
+  try {
+    if (!(await accountTableExists()))
+      return response.error(res, PAYABLES_MIGRATION_MSG, 503);
+
+    const acc = await query(
+      `SELECT airline_name, balance FROM v_airline_account
+       WHERE airline_id = $1 AND business_id = $2`,
+      [req.params.id, req.businessId],
+    );
+    if (acc.rows.length === 0)
+      return response.notFound(res, "Airline not found");
+
+    const balance = round2(acc.rows[0].balance);
+    // No amount given means "settle the whole balance"
+    const amount =
+      req.body.amount === undefined || req.body.amount === null || req.body.amount === ""
+        ? balance
+        : round2(req.body.amount);
+
+    if (!(amount > 0))
+      return response.error(res, "Amount must be greater than 0", 400);
+    if (balance <= 0)
+      return response.error(
+        res,
+        `Nothing outstanding for ${acc.rows[0].airline_name}.`,
+        400,
+      );
+    if (amount > balance + 0.001)
+      return response.error(
+        res,
+        `Amount exceeds the outstanding balance ($${balance.toFixed(2)}).`,
+        400,
+      );
+
+    // Spread the payment over the oldest unsettled tickets, so the account
+    // balance and the per-passenger balances can never disagree.
+    const result = await withTransaction(async (client) => {
+      const perTicket = await hasColumn("tickets", "airline_paid");
+      const rows = [];
+      let remaining = amount;
+
+      if (perTicket) {
+        const open = await client.query(
+          `SELECT id, cost_price, airline_paid
+           FROM tickets
+           WHERE business_id = $1 AND airline_id = $2 AND status <> 'cancelled'
+             AND cost_price > airline_paid
+           ORDER BY created_at`,
+          [req.businessId, req.params.id],
+        );
+
+        for (const t of open.rows) {
+          if (remaining <= 0.001) break;
+          const owed = round2(Number(t.cost_price) - Number(t.airline_paid));
+          const take = Math.min(remaining, owed);
+          if (take <= 0) continue;
+
+          await client.query(
+            `UPDATE tickets SET airline_paid = airline_paid + $1 WHERE id = $2`,
+            [take, t.id],
+          );
+          const ins = await client.query(
+            `INSERT INTO airline_payments
+               (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+            [
+              req.businessId, req.params.id, t.id, req.user.id, take,
+              req.body.method || "cash", req.body.reference || null,
+              req.body.note || null,
+            ],
+          );
+          rows.push(ins.rows[0]);
+          remaining = round2(remaining - take);
+        }
+      }
+
+      // Anything left over (or the pre-v9 case) is recorded unallocated
+      if (remaining > 0.001 || rows.length === 0) {
+        const ins = await client.query(
+          `INSERT INTO airline_payments
+             (business_id, airline_id, paid_by, amount, method, reference, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [
+            req.businessId, req.params.id, req.user.id,
+            rows.length === 0 ? amount : remaining,
+            req.body.method || "cash", req.body.reference || null,
+            req.body.note || null,
+          ],
+        );
+        rows.push(ins.rows[0]);
+      }
+      return rows;
+    });
+
+    const after = await query(
+      `SELECT balance FROM v_airline_account WHERE airline_id = $1 AND business_id = $2`,
+      [req.params.id, req.businessId],
+    );
+
+    return response.created(
+      res,
+      {
+        payments: result,
+        tickets_settled: result.filter((r) => r.ticket_id).length,
+        balance: round2(after.rows[0].balance),
+      },
+      `Paid $${amount.toFixed(2)} to ${acc.rows[0].airline_name}`,
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** GET /api/airlines/:id/payments — settlement history */
+const getAirlinePayments = async (req, res, next) => {
+  try {
+    if (!(await accountTableExists())) return response.success(res, []);
+    const r = await query(
+      `SELECT p.*, u.name AS paid_by_name
+       FROM airline_payments p
+       JOIN users u ON u.id = p.paid_by
+       WHERE p.airline_id = $1 AND p.business_id = $2
+       ORDER BY p.created_at DESC`,
+      [req.params.id, req.businessId],
+    );
+    return response.success(res, r.rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/airlines/tickets/pay   { ticket_ids: [...], method, reference, note }
+ *
+ * Settle the airline cost of specific passengers. Each ticket gets its own
+ * payment row, so the account balance and the per-ticket balances stay equal.
+ */
+const payTickets = async (req, res, next) => {
+  try {
+    if (!(await accountTableExists()))
+      return response.error(res, PAYABLES_MIGRATION_MSG, 503);
+    if (!(await hasColumn("tickets", "airline_paid"))) {
+      return response.error(
+        res,
+        "Paying individual passengers needs a database update. Run migration_v9.sql.",
+        503,
+      );
+    }
+
+    const ids = Array.isArray(req.body.ticket_ids)
+      ? req.body.ticket_ids.filter(Boolean)
+      : [];
+    if (ids.length === 0)
+      return response.error(res, "Select at least one passenger", 400);
+
+    const open = await query(
+      `SELECT id, passenger_name, airline_id, cost_price, airline_paid
+       FROM tickets
+       WHERE business_id = $1 AND id = ANY($2::uuid[]) AND status <> 'cancelled'`,
+      [req.businessId, ids],
+    );
+    if (open.rows.length === 0)
+      return response.notFound(res, "No matching tickets found");
+
+    const payable = open.rows.filter(
+      (t) => t.airline_id && Number(t.cost_price) - Number(t.airline_paid) > 0.001,
+    );
+    if (payable.length === 0)
+      return response.error(
+        res,
+        "Those passengers are already settled with the airline.",
+        400,
+      );
+
+    // A single amount, when given, is split across the chosen passengers
+    const requested =
+      req.body.amount === undefined || req.body.amount === null || req.body.amount === ""
+        ? null
+        : round2(req.body.amount);
+    const totalOwed = round2(
+      payable.reduce(
+        (a, t) => a + (Number(t.cost_price) - Number(t.airline_paid)),
+        0,
+      ),
+    );
+    if (requested !== null && requested > totalOwed + 0.001) {
+      return response.error(
+        res,
+        `Amount exceeds what those passengers owe ($${totalOwed.toFixed(2)}).`,
+        400,
+      );
+    }
+
+    const result = await withTransaction(async (client) => {
+      let remaining = requested === null ? totalOwed : requested;
+      const rows = [];
+
+      for (const t of payable) {
+        if (remaining <= 0.001) break;
+        const owed = round2(Number(t.cost_price) - Number(t.airline_paid));
+        const take = round2(Math.min(remaining, owed));
+        if (take <= 0) continue;
+
+        await client.query(
+          `UPDATE tickets SET airline_paid = airline_paid + $1 WHERE id = $2`,
+          [take, t.id],
+        );
+        const ins = await client.query(
+          `INSERT INTO airline_payments
+             (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [
+            req.businessId, t.airline_id, t.id, req.user.id, take,
+            req.body.method || "cash", req.body.reference || null,
+            req.body.note || `Settled ${t.passenger_name}`,
+          ],
+        );
+        rows.push({ ...ins.rows[0], passenger_name: t.passenger_name });
+        remaining = round2(remaining - take);
+      }
+      return rows;
+    });
+
+    const paid = round2(result.reduce((a, r) => a + Number(r.amount), 0));
+    return response.created(
+      res,
+      { payments: result, tickets_settled: result.length, total_paid: paid },
+      `Paid $${paid.toFixed(2)} for ${result.length} passenger${result.length === 1 ? "" : "s"}`,
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** DELETE /api/airlines/payments/:paymentId — undo a mistaken settlement */
+const deleteAirlinePayment = async (req, res, next) => {
+  try {
+    if (!(await accountTableExists()))
+      return response.error(res, PAYABLES_MIGRATION_MSG, 503);
+    const reversed = await withTransaction(async (client) => {
+      const r = await client.query(
+        `DELETE FROM airline_payments WHERE id = $1 AND business_id = $2
+         RETURNING id, ticket_id, amount`,
+        [req.params.paymentId, req.businessId],
+      );
+      if (r.rows.length === 0) return null;
+
+      // Put the money back on the ticket it was allocated to
+      const row = r.rows[0];
+      if (row.ticket_id && (await hasColumn("tickets", "airline_paid"))) {
+        await client.query(
+          `UPDATE tickets
+           SET airline_paid = GREATEST(airline_paid - $1, 0)
+           WHERE id = $2 AND business_id = $3`,
+          [row.amount, row.ticket_id, req.businessId],
+        );
+      }
+      return row;
+    });
+
+    if (!reversed) return response.notFound(res, "Payment not found");
+    return response.success(res, null, "Payment reversed");
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAirlines,
   getAirlinePassengers,
@@ -692,4 +1083,9 @@ module.exports = {
   getAliases,
   addAlias,
   deleteAlias,
+  getPayables,
+  payAirline,
+  payTickets,
+  getAirlinePayments,
+  deleteAirlinePayment,
 };

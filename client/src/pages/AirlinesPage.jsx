@@ -12,6 +12,7 @@ import {
   Pagination,
   EmptyState,
 } from "../components/ui";
+import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   BarChart,
@@ -36,21 +37,15 @@ import {
   Pencil,
   Tags,
   X,
+  Banknote,
+  Wallet,
 } from "lucide-react";
-import { format } from "date-fns";
+import { fmtDate } from "../utils/date";
 
 const COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#06b6d4"];
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtDate = (d) => {
-  if (!d) return "—";
-  try {
-    return format(new Date(d), "dd MMM yyyy");
-  } catch {
-    return "—";
-  }
-};
 
 const EMPTY_FILTERS = {
   from_date: "",
@@ -82,20 +77,38 @@ const Tile = ({ label, value, tone = "gray" }) => {
 
 // ── Passenger drill-down ─────────────────────────────────────────────────────
 
-function AirlineDetail({ airline, filters, onBack }) {
+function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [exporting, setExporting] = useState(false);
+  const [selected, setSelected] = useState([]);
+  const [paying, setPaying] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     setLoading(true);
     airlinesAPI
       .passengers(airline, { ...filters, page, limit: 50 })
-      .then((res) => setData(res.data.data))
+      .then((res) => { setData(res.data.data); setSelected([]); })
       .catch(() => toast.error("Failed to load airline detail"))
       .finally(() => setLoading(false));
   }, [airline, filters, page]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const settleTickets = async (ids) => {
+    if (ids.length === 0) return;
+    setPaying(true);
+    try {
+      const res = await airlinesAPI.payTickets({ ticket_ids: ids });
+      toast.success(res.data.message);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Payment failed");
+    } finally {
+      setPaying(false);
+    }
+  };
 
   const exportPDF = async () => {
     setExporting(true);
@@ -121,8 +134,14 @@ function AirlineDetail({ airline, filters, onBack }) {
     );
 
   const s = data?.summary || {};
+  const account = data?.account || null;
   const passengers = data?.passengers || [];
   const routes = data?.routes || [];
+  const owed = Number(account?.balance) || 0;
+  const owingIds = passengers.filter((p) => Number(p.airline_balance) > 0).map((p) => p.id);
+  const selectedOwed = passengers
+    .filter((p) => selected.includes(p.id))
+    .reduce((a, p) => a + (Number(p.airline_balance) || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -141,19 +160,30 @@ function AirlineDetail({ airline, filters, onBack }) {
             </p>
           </div>
         </div>
-        <Button variant="outline" loading={exporting} onClick={exportPDF}>
-          <FileText className="w-4 h-4" /> Export PDF
-        </Button>
+        <div className="flex gap-2">
+          {canPay && owed > 0 && (
+            <Button onClick={() => onPay({ airline_id: account.airline_id, airline_name: airline, balance: owed })}>
+              <Banknote className="w-4 h-4" /> Pay {money(owed)}
+            </Button>
+          )}
+          <Button variant="outline" loading={exporting} onClick={exportPDF}>
+            <FileText className="w-4 h-4" /> Export PDF
+          </Button>
+        </div>
       </div>
 
       {/* Summary */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Tile label="Tickets" value={s.tickets ?? 0} tone="blue" />
         <Tile label="Passengers" value={s.passengers ?? 0} />
-        <Tile label="Total Sales" value={money(s.total_sales)} />
-        <Tile label="Airline Cost" value={money(s.total_cost)} tone="orange" />
-        <Tile label="Revenue" value={money(s.total_revenue)} tone="green" />
-        <Tile label="Balance Due" value={money(s.total_balance)} tone="red" />
+        <Tile label="Cost (period)" value={money(s.total_cost)} tone="orange" />
+        <Tile label="Owed all time" value={money(account?.total_cost)} />
+        <Tile label="Paid to airline" value={money(account?.total_paid)} tone="green" />
+        <Tile
+          label="Balance owed"
+          value={money(account?.balance)}
+          tone={Number(account?.balance) > 0 ? "red" : "green"}
+        />
       </div>
 
       {/* Routes */}
@@ -167,7 +197,7 @@ function AirlineDetail({ airline, filters, onBack }) {
           </div>
           <ResponsiveContainer width="100%" height={Math.max(180, routes.length * 32)}>
             <BarChart
-              data={routes.map((r) => ({ name: r.route, tickets: r.tickets, revenue: r.revenue }))}
+              data={routes.map((r) => ({ name: r.route, tickets: r.tickets, cost: r.cost }))}
               layout="vertical"
               margin={{ left: 10, right: 20 }}
             >
@@ -176,7 +206,7 @@ function AirlineDetail({ airline, filters, onBack }) {
               <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
               <Tooltip
                 contentStyle={{ borderRadius: "10px", border: "none", fontSize: "12px", boxShadow: "0 4px 20px rgba(0,0,0,0.12)" }}
-                formatter={(v, n) => (n === "revenue" ? [money(v), "Revenue"] : [v, "Tickets"])}
+                formatter={(v, n) => (n === "cost" ? [money(v), "Cost"] : [v, "Tickets"])}
               />
               <Bar dataKey="tickets" name="tickets" radius={[0, 6, 6, 0]} barSize={16}>
                 {routes.map((_, i) => (
@@ -190,11 +220,24 @@ function AirlineDetail({ airline, filters, onBack }) {
 
       {/* Passengers */}
       <Card>
-        <div className="flex items-center gap-2 px-6 pt-6 pb-4">
-          <Users className="w-4 h-4 text-blue-600" />
-          <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
-            Passengers
-          </h2>
+        <div className="flex items-center justify-between gap-3 px-6 pt-6 pb-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Users className="w-4 h-4 text-blue-600" />
+            <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
+              Passengers
+            </h2>
+            {s.unsettled > 0 && (
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                · {s.unsettled} unsettled ({money(s.cost_unpaid)})
+              </span>
+            )}
+          </div>
+          {canPay && selected.length > 0 && (
+            <Button loading={paying} onClick={() => settleTickets(selected)}>
+              <Banknote className="w-4 h-4" />
+              Pay {selected.length} selected · {money(selectedOwed)}
+            </Button>
+          )}
         </div>
         {loading ? (
           <div className="flex justify-center py-16">
@@ -211,6 +254,21 @@ function AirlineDetail({ airline, filters, onBack }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200 dark:border-gray-700">
+                  {canPay && (
+                    <th className="px-4 py-3 w-8">
+                      <input
+                        type="checkbox"
+                        checked={owingIds.length > 0 && selected.length === owingIds.length}
+                        ref={(el) => {
+                          if (el) el.indeterminate = selected.length > 0 && selected.length < owingIds.length;
+                        }}
+                        onChange={(e) => setSelected(e.target.checked ? owingIds : [])}
+                        disabled={owingIds.length === 0}
+                        className="rounded cursor-pointer"
+                        title="Select unsettled passengers"
+                      />
+                    </th>
+                  )}
                   {[
                     "Passenger",
                     "Phone",
@@ -218,12 +276,11 @@ function AirlineDetail({ airline, filters, onBack }) {
                     "Flight Date",
                     "Type",
                     "Ref",
-                    "Total",
+                    "Airline cost",
                     "Paid",
-                    "Balance",
-                    "Revenue",
-                    "Agent",
-                    "Payment",
+                    "Owed",
+                    "Booked by",
+                    "",
                   ].map((h) => (
                     <th
                       key={h}
@@ -235,8 +292,27 @@ function AirlineDetail({ airline, filters, onBack }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
-                {passengers.map((p) => (
+                {passengers.map((p) => {
+                  const owed = Number(p.airline_balance) || 0;
+                  return (
                   <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                    {canPay && (
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(p.id)}
+                          disabled={owed <= 0}
+                          onChange={() =>
+                            setSelected((prev) =>
+                              prev.includes(p.id)
+                                ? prev.filter((x) => x !== p.id)
+                                : [...prev, p.id],
+                            )
+                          }
+                          className="rounded cursor-pointer disabled:opacity-30"
+                        />
+                      </td>
+                    )}
                     <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
                       {p.passenger_name}
                     </td>
@@ -260,38 +336,28 @@ function AirlineDetail({ airline, filters, onBack }) {
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {p.ticket_reference || "—"}
                     </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
-                      {money(p.selling_price)}
+                    <td className="px-4 py-3 font-semibold text-orange-600 dark:text-orange-400">
+                      {money(p.cost_price)}
                     </td>
                     <td className="px-4 py-3 text-green-600 dark:text-green-400">
-                      {money(p.amount_paid)}
+                      {money(p.airline_paid)}
                     </td>
-                    <td
-                      className={`px-4 py-3 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
-                    >
-                      {money(p.balance)}
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-green-600 dark:text-green-400">
-                      {money(p.revenue)}
+                    <td className={`px-4 py-3 font-semibold ${owed > 0 ? "text-red-600" : "text-gray-400"}`}>
+                      {owed > 0 ? money(owed) : "Settled"}
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
                       {p.agent_name || "—"}
                     </td>
                     <td className="px-4 py-3">
-                      <Badge
-                        variant={
-                          p.payment_status === "paid"
-                            ? "success"
-                            : p.payment_status === "partial"
-                              ? "warning"
-                              : "danger"
-                        }
-                      >
-                        {p.payment_status}
-                      </Badge>
+                      {canPay && owed > 0 && (
+                        <Button size="sm" loading={paying} onClick={() => settleTickets([p.id])}>
+                          <Banknote className="w-3.5 h-3.5" /> Pay
+                        </Button>
+                      )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -617,11 +683,128 @@ function ManageModal({ open, onClose, onChanged }) {
   );
 }
 
+// ── Settle an airline account ────────────────────────────────────────────────
+
+function PayAirlineModal({ open, onClose, target, onPaid }) {
+  const [amount, setAmount] = useState("");
+  const [method, setMethod] = useState("cash");
+  const [reference, setReference] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [history, setHistory] = useState([]);
+  const balance = Number(target?.account_balance ?? target?.balance) || 0;
+  const airlineId = target?.airline_id;
+
+  useEffect(() => {
+    if (!open || !airlineId) return;
+    setAmount(balance > 0 ? balance.toFixed(2) : "");
+    setMethod("cash");
+    setReference("");
+    airlinesAPI
+      .payments(airlineId)
+      .then((r) => setHistory(r.data.data || []))
+      .catch(() => setHistory([]));
+  }, [open, airlineId, balance]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const val = parseFloat(amount);
+    if (!val || val <= 0) return toast.error("Enter a valid amount");
+    if (val > balance + 0.001)
+      return toast.error(`Amount exceeds what is owed (${money(balance)})`);
+    setSaving(true);
+    try {
+      const res = await airlinesAPI.pay(airlineId, {
+        amount: val,
+        method,
+        reference: reference || undefined,
+      });
+      toast.success(res.data.message);
+      onPaid();
+      onClose();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Payment failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!target) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} title="Pay airline">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 text-center">
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            {target.airline_name}
+          </p>
+          <p className="text-2xl font-bold text-red-600 mt-1">{money(balance)}</p>
+          <p className="text-xs text-gray-400 mt-0.5">outstanding ticket cost</p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input
+            label="Amount to pay *"
+            type="number"
+            min="0.01"
+            step="0.01"
+            max={balance}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+          <Select label="Method" value={method} onChange={(e) => setMethod(e.target.value)}>
+            {PAYMENT_METHODS.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </Select>
+        </div>
+        <Input
+          label="Reference (optional)"
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          placeholder="Invoice or transfer number"
+        />
+        <p className="text-xs text-gray-400">
+          Defaults to the full balance — change it to settle part of the account.
+        </p>
+
+        {history.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              Recent settlements
+            </p>
+            <div className="border border-gray-200 dark:border-gray-700 rounded-xl divide-y divide-gray-100 dark:divide-gray-700 max-h-40 overflow-y-auto">
+              {history.slice(0, 8).map((h) => (
+                <div key={h.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                  <span className="text-gray-500 dark:text-gray-400">
+                    {fmtDate(h.created_at)} · {h.method}
+                  </span>
+                  <span className="font-semibold text-green-600 dark:text-green-400">
+                    {money(h.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="submit" loading={saving}>
+            <Banknote className="w-4 h-4" /> Pay {amount ? money(amount) : ""}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 // ── Main page ────────────────────────────────────────────────────────────────
 
 export default function AirlinesPage() {
   const { hasRole } = useAuth();
   const canManage = hasRole("admin", "super_admin");
+  const canPay = hasRole("admin", "super_admin", "accountant");
+  const [payTarget, setPayTarget] = useState(null);
   const [manageOpen, setManageOpen] = useState(false);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [data, setData] = useState(null);
@@ -656,15 +839,26 @@ export default function AirlinesPage() {
 
   if (selected)
     return (
-      <AirlineDetail
-        airline={selected}
-        filters={filters}
-        onBack={() => setSelected(null)}
-      />
+      <>
+        <AirlineDetail
+          airline={selected}
+          filters={filters}
+          onBack={() => setSelected(null)}
+          canPay={canPay}
+          onPay={setPayTarget}
+        />
+        <PayAirlineModal
+          open={Boolean(payTarget)}
+          target={payTarget}
+          onClose={() => setPayTarget(null)}
+          onPaid={() => { setPayTarget(null); setSelected(null); load(); }}
+        />
+      </>
     );
 
   const airlines = data?.airlines || [];
   const totals = data?.totals || {};
+  const account = data?.account || { total_cost: 0, total_paid: 0, total_balance: 0, airlines_owing: 0 };
   const names = data?.airline_names || [];
   const maxTickets = airlines.length ? airlines[0].tickets : 1;
 
@@ -677,7 +871,7 @@ export default function AirlinesPage() {
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
             {totals.airlines || 0} airline{totals.airlines === 1 ? "" : "s"} ·{" "}
-            {totals.tickets || 0} tickets · {money(totals.total_revenue)} revenue
+            {totals.tickets || 0} tickets · {money(account.total_balance)} owed to carriers
           </p>
         </div>
         {canManage && (
@@ -692,6 +886,26 @@ export default function AirlinesPage() {
         onClose={() => setManageOpen(false)}
         onChanged={load}
       />
+
+      <PayAirlineModal
+        open={Boolean(payTarget)}
+        target={payTarget}
+        onClose={() => setPayTarget(null)}
+        onPaid={() => { setPayTarget(null); load(); }}
+      />
+
+      {account.total_balance > 0 && (
+        <Card className="p-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <Wallet className="w-5 h-5 text-red-500 shrink-0" />
+            <p className="text-sm text-gray-600 dark:text-gray-400 flex-1 min-w-48">
+              You owe <strong className="text-red-600 dark:text-red-400">{money(account.total_balance)}</strong>{" "}
+              across {account.airlines_owing} airline{account.airlines_owing === 1 ? "" : "s"}.
+              {" "}Settled so far: {money(account.total_paid)} of {money(account.total_cost)}.
+            </p>
+          </div>
+        </Card>
+      )}
 
       {/* Filters */}
       <Card className="p-4">
@@ -799,9 +1013,9 @@ export default function AirlinesPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-xl font-bold text-green-600">
-                    {money(airlines[0].total_revenue)}
+                    {money(airlines[0].total_cost)}
                   </p>
-                  <p className="text-xs text-gray-500">revenue</p>
+                  <p className="text-xs text-gray-500">cost</p>
                 </div>
               </div>
             </div>
@@ -820,7 +1034,7 @@ export default function AirlinesPage() {
                 data={airlines.map((a) => ({
                   name: a.airline_name,
                   tickets: a.tickets,
-                  revenue: a.total_revenue,
+                  cost: a.total_cost,
                 }))}
                 layout="vertical"
                 margin={{ left: 10, right: 20 }}
@@ -830,7 +1044,7 @@ export default function AirlinesPage() {
                 <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
                 <Tooltip
                   contentStyle={{ borderRadius: "10px", border: "none", fontSize: "12px", boxShadow: "0 4px 20px rgba(0,0,0,0.12)" }}
-                  formatter={(v, n) => (n === "revenue" ? [money(v), "Revenue"] : [v, "Tickets"])}
+                  formatter={(v, n) => (n === "cost" ? [money(v), "Cost"] : [v, "Tickets"])}
                 />
                 <Bar dataKey="tickets" name="tickets" radius={[0, 6, 6, 0]} barSize={18}>
                   {airlines.map((_, i) => (
@@ -854,11 +1068,11 @@ export default function AirlinesPage() {
                       "Local / Intl",
                       "Passengers",
                       "Routes",
-                      "Sales",
-                      "Cost",
-                      "Revenue",
-                      "Collected",
+                      "Cost (period)",
+                      "Owed",
+                      "Paid",
                       "Balance",
+                      "",
                       "",
                     ].map((h, i) => (
                       <th
@@ -911,22 +1125,26 @@ export default function AirlinesPage() {
                       <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                         {a.routes}
                       </td>
-                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
-                        {money(a.total_sales)}
-                      </td>
                       <td className="px-4 py-3 text-orange-600 dark:text-orange-400">
                         {money(a.total_cost)}
                       </td>
-                      <td className="px-4 py-3 font-semibold text-green-600 dark:text-green-400">
-                        {money(a.total_revenue)}
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                        {a.account_cost === null ? "—" : money(a.account_cost)}
                       </td>
                       <td className="px-4 py-3 text-green-600 dark:text-green-400">
-                        {money(a.total_collected)}
+                        {a.account_paid === null ? "—" : money(a.account_paid)}
                       </td>
                       <td
-                        className={`px-4 py-3 font-semibold ${a.total_balance > 0 ? "text-red-600" : "text-gray-400"}`}
+                        className={`px-4 py-3 font-semibold ${Number(a.account_balance) > 0 ? "text-red-600" : "text-gray-400"}`}
                       >
-                        {money(a.total_balance)}
+                        {a.account_balance === null ? "—" : money(a.account_balance)}
+                      </td>
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        {canPay && Number(a.account_balance) > 0 && a.airline_id && (
+                          <Button size="sm" onClick={() => setPayTarget(a)}>
+                            <Banknote className="w-3.5 h-3.5" /> Pay
+                          </Button>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-gray-400">
                         <ChevronRight className="w-4 h-4" />

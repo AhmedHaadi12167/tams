@@ -17,11 +17,22 @@
 
 const { query } = require("../config/db");
 const response = require("../utils/response");
+const { hasTable } = require("../services/schemaInfo");
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 const n = (v) => Number(v || 0);
 const round2 = (v) => Math.round(n(v) * 100) / 100;
+
+/**
+ * Run a query only if its table exists, otherwise hand back a row of zeros.
+ * Lets the statements stay correct on a database where migration_v8 has not
+ * been run yet, instead of 500ing on a missing relation.
+ */
+const optional = async (table, sql, params, zeros) => {
+  if (!(await hasTable(table))) return { rows: [zeros] };
+  return query(sql, params);
+};
 
 /** Requires a concrete business scope (super_admin must pass ?business_id=). */
 const requireBusiness = (req, res) => {
@@ -68,9 +79,18 @@ const getProfitLoss = async (req, res, next) => {
     const tRange = dateRange("t.created_at::DATE", from_date, to_date, 2);
     const cRange = dateRange("cs.created_at::DATE", from_date, to_date, 2);
     const eRange = dateRange("e.expense_date", from_date, to_date, 2);
+    const vRange = dateRange("v.created_at::DATE", from_date, to_date, 2);
+    const pRange = dateRange("pk.created_at::DATE", from_date, to_date, 2);
 
-    const [ticketRes, cargoRes, expenseRes, categoryRes, trendRes] =
-      await Promise.all([
+    const [
+      ticketRes,
+      cargoRes,
+      expenseRes,
+      categoryRes,
+      trendRes,
+      visaRes,
+      packageRes,
+    ] = await Promise.all([
         query(
           `SELECT
              COUNT(*)                                 AS ticket_count,
@@ -118,16 +138,44 @@ const getProfitLoss = async (req, res, next) => {
            WHERE m.business_id = $1
              AND m.month >= DATE_TRUNC('month', NOW() - INTERVAL '11 months')::DATE
            ORDER BY m.month`,
-          [businessId],
-        ),
-      ]);
+        [businessId],
+      ),
+      optional(
+        "visa_applications",
+        `SELECT COUNT(*) AS visa_count,
+                COALESCE(SUM(v.selling_price), 0) AS gross_sales,
+                COALESCE(SUM(v.cost_price), 0)    AS cost_of_sales,
+                COALESCE(SUM(v.amount_paid), 0)   AS collected
+         FROM visa_applications v
+         WHERE v.business_id = $1 AND v.status <> 'cancelled'${vRange.clause}`,
+        [businessId, ...vRange.params],
+        { visa_count: 0, gross_sales: 0, cost_of_sales: 0, collected: 0 },
+      ),
+      optional(
+        "packages",
+        `SELECT COUNT(*) AS package_count,
+                COALESCE(SUM(pk.selling_price), 0) AS gross_sales,
+                COALESCE(SUM(pk.total_cost), 0)    AS cost_of_sales,
+                COALESCE(SUM(pk.amount_paid), 0)   AS collected
+         FROM packages pk
+         WHERE pk.business_id = $1 AND pk.status <> 'cancelled'${pRange.clause}`,
+        [businessId, ...pRange.params],
+        { package_count: 0, gross_sales: 0, cost_of_sales: 0, collected: 0 },
+      ),
+    ]);
 
     const t = ticketRes.rows[0];
     const c = cargoRes.rows[0];
     const e = expenseRes.rows[0];
+    const v = visaRes.rows[0];
+    const pk = packageRes.rows[0];
 
-    const grossSales = round2(n(t.gross_sales) + n(c.gross_sales));
-    const costOfSales = round2(t.cost_of_sales);
+    const grossSales = round2(
+      n(t.gross_sales) + n(c.gross_sales) + n(v.gross_sales) + n(pk.gross_sales),
+    );
+    const costOfSales = round2(
+      n(t.cost_of_sales) + n(v.cost_of_sales) + n(pk.cost_of_sales),
+    );
     const grossProfit = round2(grossSales - costOfSales);
     const commission = round2(t.agent_commission);
     const recordedExpenses = round2(e.total_expenses);
@@ -139,12 +187,18 @@ const getProfitLoss = async (req, res, next) => {
       revenue: {
         ticket_sales: round2(t.gross_sales),
         cargo_sales: round2(c.gross_sales),
+        visa_sales: round2(v.gross_sales),
+        package_sales: round2(pk.gross_sales),
         gross_sales: grossSales,
         ticket_count: parseInt(t.ticket_count),
         shipment_count: parseInt(c.shipment_count),
+        visa_count: parseInt(v.visa_count),
+        package_count: parseInt(pk.package_count),
       },
       cost_of_sales: {
-        airline_tickets: costOfSales,
+        airline_tickets: round2(t.cost_of_sales),
+        visa_fees: round2(v.cost_of_sales),
+        package_suppliers: round2(pk.cost_of_sales),
         total: costOfSales,
       },
       gross_profit: grossProfit,
@@ -162,8 +216,13 @@ const getProfitLoss = async (req, res, next) => {
       net_profit: netProfit,
       net_margin_pct: grossSales > 0 ? round2((netProfit / grossSales) * 100) : 0,
       cash: {
-        collected: round2(n(t.collected) + n(c.collected)),
-        outstanding: round2(grossSales - (n(t.collected) + n(c.collected))),
+        collected: round2(
+          n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected),
+        ),
+        outstanding: round2(
+          grossSales -
+            (n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected)),
+        ),
       },
       trend: trendRes.rows.map((r) => ({
         month: r.month,
@@ -190,7 +249,16 @@ const getBalanceSheet = async (req, res, next) => {
     const asOfExpClause = as_of ? ` AND expense_date <= $2` : "";
     const p = as_of ? [businessId, as_of] : [businessId];
 
-    const [bizRes, ticketRes, cargoRes, expenseRes] = await Promise.all([
+    const [
+      bizRes,
+      ticketRes,
+      cargoRes,
+      expenseRes,
+      visaRes,
+      packageRes,
+      airlinePaidRes,
+      agentPaidRes,
+    ] = await Promise.all([
       query(
         `SELECT name, opening_cash, fixed_assets, liabilities, owner_capital, financials_start
          FROM businesses WHERE id = $1`,
@@ -219,32 +287,88 @@ const getBalanceSheet = async (req, res, next) => {
          FROM expenses WHERE business_id = $1${asOfExpClause}`,
         p,
       ),
+      optional(
+        "visa_applications",
+        `SELECT COALESCE(SUM(selling_price), 0) AS gross_sales,
+                COALESCE(SUM(cost_price), 0)    AS cost,
+                COALESCE(SUM(amount_paid), 0)   AS collected
+         FROM visa_applications
+         WHERE business_id = $1 AND status <> 'cancelled'${asOfClause}`,
+        p,
+        { gross_sales: 0, cost: 0, collected: 0 },
+      ),
+      optional(
+        "packages",
+        `SELECT COALESCE(SUM(selling_price), 0) AS gross_sales,
+                COALESCE(SUM(total_cost), 0)    AS cost,
+                COALESCE(SUM(amount_paid), 0)   AS collected
+         FROM packages
+         WHERE business_id = $1 AND status <> 'cancelled'${asOfClause}`,
+        p,
+        { gross_sales: 0, cost: 0, collected: 0 },
+      ),
+      optional(
+        "airline_payments",
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM airline_payments WHERE business_id = $1${asOfClause}`,
+        p,
+        { total: 0 },
+      ),
+      optional(
+        "agent_payments",
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM agent_payments WHERE business_id = $1${asOfClause}`,
+        p,
+        { total: 0 },
+      ),
     ]);
 
     const biz = bizRes.rows[0] || {};
     const t = ticketRes.rows[0];
     const c = cargoRes.rows[0];
+    const v = visaRes.rows[0];
+    const pk = packageRes.rows[0];
+    const airlinePaid = round2(airlinePaidRes.rows[0].total);
+    const agentPaid = round2(agentPaidRes.rows[0].total);
 
     const openingCash = round2(biz.opening_cash);
     const fixedAssets = round2(biz.fixed_assets);
     const manualLiabilities = round2(biz.liabilities);
 
-    const grossSales = round2(n(t.gross_sales) + n(c.gross_sales));
-    const collected = round2(n(t.collected) + n(c.collected));
-    const costOfSales = round2(t.cost_of_sales);
+    const grossSales = round2(
+      n(t.gross_sales) + n(c.gross_sales) + n(v.gross_sales) + n(pk.gross_sales),
+    );
+    const collected = round2(
+      n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected),
+    );
+    const airlineCost = round2(t.cost_of_sales);
+    // Visa fees and package suppliers are settled when the work is done —
+    // TAMS keeps no account for them, so they leave cash immediately.
+    const directPaidCost = round2(n(v.cost) + n(pk.cost));
+    const costOfSales = round2(airlineCost + directPaidCost);
     const commission = round2(t.commission);
     const expensesPaid = round2(expenseRes.rows[0].total);
 
     // ── Assets ──────────────────────────────────────────────
-    const cash = round2(openingCash + collected - expensesPaid);
+    const cash = round2(
+      openingCash +
+        collected -
+        expensesPaid -
+        airlinePaid -
+        agentPaid -
+        directPaidCost,
+    );
     const receivables = round2(grossSales - collected);
     const totalAssets = round2(cash + receivables + fixedAssets);
 
     // ── Liabilities ─────────────────────────────────────────
-    // Airline costs and agent commission are accrued at booking but this
-    // system doesn't record paying them out, so they sit as payables.
-    const supplierPayable = round2(costOfSales + commission);
-    const totalLiabilities = round2(supplierPayable + manualLiabilities);
+    // Only what is genuinely still owed: airline cost not yet settled and
+    // commission not yet paid out.
+    const airlinePayable = round2(airlineCost - airlinePaid);
+    const commissionPayable = round2(commission - agentPaid);
+    const totalLiabilities = round2(
+      airlinePayable + commissionPayable + manualLiabilities,
+    );
 
     // ── Equity ──────────────────────────────────────────────
     const retainedEarnings = round2(
@@ -269,10 +393,15 @@ const getBalanceSheet = async (req, res, next) => {
         total: totalAssets,
       },
       liabilities: {
-        payable_to_airlines: round2(costOfSales),
-        agent_commission_payable: commission,
+        payable_to_airlines: airlinePayable,
+        agent_commission_payable: commissionPayable,
         other_liabilities: manualLiabilities,
         total: totalLiabilities,
+      },
+      settled: {
+        paid_to_airlines: airlinePaid,
+        paid_to_agents: agentPaid,
+        visa_and_package_suppliers: directPaidCost,
       },
       equity: {
         owner_capital: ownerCapital,
@@ -283,8 +412,10 @@ const getBalanceSheet = async (req, res, next) => {
       balanced: Math.abs(difference) < 0.01,
       difference,
       notes: [
-        "Cash = opening cash + money collected − expenses paid.",
-        "Airline costs and agent commission are shown as payables because supplier payouts are not recorded in TAMS.",
+        "Cash = opening cash + money collected − expenses − airline settlements − agent payouts − visa and package supplier costs.",
+        "Payable to airlines is the ticket cost you have not settled yet. Pay it from the Airlines page.",
+        "Agent commission payable is what agents have earned but not been paid. Pay it from the Agents page.",
+        "Visa fees and package supplier costs are treated as paid when the work is done, since TAMS keeps no account for those suppliers.",
         "Set opening cash, fixed assets, liabilities and owner capital on the business record for an accurate opening position.",
       ],
     });
@@ -314,8 +445,22 @@ const getCashFlow = async (req, res, next) => {
       2 + pRange.params.length,
     );
 
-    const [inflowRes, cargoInRes, outflowRes, dailyRes, methodRes] =
-      await Promise.all([
+    const vpRange = dateRange("vp.created_at::DATE", from_date, to_date, 2);
+    const ppRange = dateRange("pp.created_at::DATE", from_date, to_date, 2);
+    const apRange = dateRange("ap.created_at::DATE", from_date, to_date, 2);
+    const gpRange = dateRange("gp.created_at::DATE", from_date, to_date, 2);
+
+    const [
+      inflowRes,
+      cargoInRes,
+      outflowRes,
+      dailyRes,
+      methodRes,
+      visaInRes,
+      packageInRes,
+      airlineOutRes,
+      agentOutRes,
+    ] = await Promise.all([
         query(
           `SELECT COALESCE(SUM(p.amount), 0) AS total, COUNT(*) AS entries
            FROM ticket_payments p
@@ -345,25 +490,61 @@ const getCashFlow = async (req, res, next) => {
            GROUP BY day ORDER BY day`,
           [businessId, ...pRange.params, ...eRangeShifted.params],
         ),
-        query(
-          `SELECT p.method, COALESCE(SUM(p.amount), 0) AS total
-           FROM ticket_payments p
-           WHERE p.business_id = $1${pRange.clause}
-           GROUP BY p.method ORDER BY total DESC`,
-          [businessId, ...pRange.params],
-        ),
-      ]);
+      query(
+        `SELECT p.method, COALESCE(SUM(p.amount), 0) AS total
+         FROM ticket_payments p
+         WHERE p.business_id = $1${pRange.clause}
+         GROUP BY p.method ORDER BY total DESC`,
+        [businessId, ...pRange.params],
+      ),
+      optional(
+        "visa_payments",
+        `SELECT COALESCE(SUM(vp.amount), 0) AS total
+         FROM visa_payments vp WHERE vp.business_id = $1${vpRange.clause}`,
+        [businessId, ...vpRange.params],
+        { total: 0 },
+      ),
+      optional(
+        "package_payments",
+        `SELECT COALESCE(SUM(pp.amount), 0) AS total
+         FROM package_payments pp WHERE pp.business_id = $1${ppRange.clause}`,
+        [businessId, ...ppRange.params],
+        { total: 0 },
+      ),
+      optional(
+        "airline_payments",
+        `SELECT COALESCE(SUM(ap.amount), 0) AS total, COUNT(*) AS entries
+         FROM airline_payments ap WHERE ap.business_id = $1${apRange.clause}`,
+        [businessId, ...apRange.params],
+        { total: 0, entries: 0 },
+      ),
+      optional(
+        "agent_payments",
+        `SELECT COALESCE(SUM(gp.amount), 0) AS total, COUNT(*) AS entries
+         FROM agent_payments gp WHERE gp.business_id = $1${gpRange.clause}`,
+        [businessId, ...gpRange.params],
+        { total: 0, entries: 0 },
+      ),
+    ]);
 
     const ticketIn = round2(inflowRes.rows[0].total);
     const cargoIn = round2(cargoInRes.rows[0].total);
-    const totalIn = round2(ticketIn + cargoIn);
-    const totalOut = round2(outflowRes.rows[0].total);
+    const visaIn = round2(visaInRes.rows[0].total);
+    const packageIn = round2(packageInRes.rows[0].total);
+    const totalIn = round2(ticketIn + cargoIn + visaIn + packageIn);
+
+    const expensesOut = round2(outflowRes.rows[0].total);
+    const airlineOut = round2(airlineOutRes.rows[0].total);
+    const agentOut = round2(agentOutRes.rows[0].total);
+    const totalOut = round2(expensesOut + airlineOut + agentOut);
 
     return response.success(res, {
       period: { from: from_date || null, to: to_date || null },
       inflow: {
         ticket_payments: ticketIn,
         cargo_payments: cargoIn,
+        visa_payments: visaIn,
+        package_payments: packageIn,
         total: totalIn,
         entries: parseInt(inflowRes.rows[0].entries),
         by_method: methodRes.rows.map((r) => ({
@@ -372,9 +553,14 @@ const getCashFlow = async (req, res, next) => {
         })),
       },
       outflow: {
-        expenses: totalOut,
+        expenses: expensesOut,
+        airline_settlements: airlineOut,
+        agent_commission: agentOut,
         total: totalOut,
-        entries: parseInt(outflowRes.rows[0].entries),
+        entries:
+          parseInt(outflowRes.rows[0].entries) +
+          parseInt(airlineOutRes.rows[0].entries || 0) +
+          parseInt(agentOutRes.rows[0].entries || 0),
       },
       net_cash_flow: round2(totalIn - totalOut),
       daily: dailyRes.rows.map((r) => ({

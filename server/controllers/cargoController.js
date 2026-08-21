@@ -227,7 +227,7 @@ const updateCargo = async (req, res, next) => {
         item_description=$1, weight_kg=$2, price_per_kg=$3,
         sender_name=$4, sender_contact=$5, from_city=$6,
         receiver_name=$7, receiver_contact=$8, to_city=$9,
-        notes=$10, cargo_status=COALESCE($11, cargo_status),
+        notes=$10, cargo_status=COALESCE($11::cargo_status, cargo_status),
         amount_paid=$12, payment_status=$13,
         photo_url=$16
        WHERE id=$14 AND business_id=$15

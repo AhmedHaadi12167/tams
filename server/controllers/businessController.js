@@ -106,7 +106,7 @@ const updateBusiness = async (req, res, next) => {
         email       = COALESCE($2, email),
         phone       = COALESCE($3, phone),
         address     = COALESCE($4, address),
-        status      = COALESCE($5, status)
+        status      = COALESCE($5::business_status, status)
        WHERE id = $6
        RETURNING *`,
       [

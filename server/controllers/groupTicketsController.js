@@ -81,9 +81,11 @@ const createGroupBooking = async (req, res, next) => {
       notes,
       tickets,
       amount_paid, // group-level payment from the customer/company who booked
+      payment_method,
     } = req.body;
 
     const groupPaid = Math.max(parseFloat(amount_paid) || 0, 0);
+    const groupMethod = (payment_method || "cash").trim() || "cash";
 
     // ── Verify customer before opening transaction ────────────────────────────
     const customerCheck = await query(
@@ -273,8 +275,8 @@ const createGroupBooking = async (req, res, next) => {
 
           await client.query(
             `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note)
-             VALUES ($1, $2, $3, $4, 'cash', 'Group booking payment')`,
-            [businessId, ticket.id, createdBy, pay],
+             VALUES ($1, $2, $3, $4, $5, 'Group booking payment')`,
+            [businessId, ticket.id, createdBy, pay, groupMethod],
           );
           remaining -= pay;
         }

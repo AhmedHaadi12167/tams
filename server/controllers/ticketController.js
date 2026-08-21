@@ -7,6 +7,9 @@ const {
   findAirlineMatch,
   knownAirlineNames,
 } = require("../services/airlineService");
+const { hasColumn } = require("../services/schemaInfo");
+const { resolveAgent } = require("../services/agentService");
+const { phoneMatches } = require("../services/phoneMatch");
 
 // Compute payment status from amounts
 const calcPaymentStatus = (amountPaid, sellingPrice) => {
@@ -127,12 +130,24 @@ const createTicket = async (req, res, next) => {
       return_date,
       agent_commission,
       amount_paid,
+      payment_method,
       booked_by_customer_id,
     } = req.body;
 
     const paid = parseFloat(amount_paid) || 0;
     const paymentStatus = calcPaymentStatus(paid, selling_price);
     const tripType = trip_type === "round_trip" ? "round_trip" : "one_way";
+    const method = (payment_method || "cash").trim() || "cash";
+    // Commission agent — created inline from the name/phone typed on the
+    // booking form, so nobody has to visit the Agents page first.
+    let commissionAgentId = null;
+    if (
+      (parseFloat(agent_commission) || 0) > 0 &&
+      (await hasColumn("tickets", "agent_id"))
+    ) {
+      const agent = await resolveAgent(req.body, businessId);
+      commissionAgentId = agent.id;
+    }
 
     // Force uppercase on names
     const passenger_name = req.body.passenger_name?.toUpperCase().trim();
@@ -175,10 +190,16 @@ const createTicket = async (req, res, next) => {
     // phone, the ticket goes to that customer (no duplicates)
     let finalCustomerId = customer_id || null;
     if (!finalCustomerId && contact_number) {
-      const byPhone = await query(
-        `SELECT id FROM customers WHERE business_id = $1 AND phone = $2 LIMIT 1`,
-        [businessId, contact_number.trim()],
-      );
+      // Match on the national number, so '0612345678' and '+252 61 234 5678'
+      // land on the same customer instead of creating a second record.
+      const digits = String(contact_number).replace(/[^0-9]/g, "");
+      const byPhone = digits
+        ? await query(
+            `SELECT id FROM customers
+             WHERE business_id = $1 AND ${phoneMatches("phone", 2)} LIMIT 1`,
+            [businessId, digits],
+          )
+        : { rows: [] };
       if (byPhone.rows.length > 0) finalCustomerId = byPhone.rows[0].id;
     }
     if (!finalCustomerId && passenger_name) {
@@ -247,12 +268,21 @@ const createTicket = async (req, res, next) => {
         result.rows[0].airline_id = airline.id;
       }
 
+      // Commission agent — column arrives with migration_v8
+      if (commissionAgentId) {
+        await client.query(`UPDATE tickets SET agent_id = $1 WHERE id = $2`, [
+          commissionAgentId,
+          result.rows[0].id,
+        ]);
+        result.rows[0].agent_id = commissionAgentId;
+      }
+
       // Log the initial collection so the payment history is complete
       if (paid > 0) {
         await client.query(
           `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note)
-           VALUES ($1, $2, $3, $4, 'cash', 'Initial payment at booking')`,
-          [businessId, result.rows[0].id, req.user.id, paid],
+           VALUES ($1, $2, $3, $4, $5, 'Initial payment at booking')`,
+          [businessId, result.rows[0].id, req.user.id, paid, method],
         );
       }
 
@@ -294,21 +324,22 @@ const getTickets = async (req, res, next) => {
       params.push(`%${search}%`);
       pi++;
 
-      // Phone search: strip everything that isn't a digit on both sides so
-      // "+252 61 234 5678", "0612345678" and "612345678" all match. Looks at
-      // the number typed on the ticket AND the linked customer's phone.
+      // Phone search. The same person is written as '+252 61 234 5678',
+      // '252612345678' and '0612345678' — as digit strings none of those
+      // contains the others, so a plain substring match misses. Comparing
+      // the last nine digits ignores the country code and the trunk zero,
+      // while the substring test still supports partial numbers.
       const digits = String(search).replace(/[^0-9]/g, "");
       if (digits.length >= 3) {
-        const phoneMatch = `(
-          regexp_replace(COALESCE(t.contact_number, ''), '[^0-9]', '', 'g') LIKE $${pi}
+        const phoneMatch = `(${phoneMatches("t.contact_number", pi)}
           OR EXISTS (
             SELECT 1 FROM customers pc
             WHERE pc.business_id = t.business_id
               AND (pc.id = t.customer_id OR pc.id = t.booked_by_customer_id)
-              AND regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g') LIKE $${pi}
+              AND ${phoneMatches("pc.phone", pi)}
           )
         )`;
-        params.push(`%${digits}%`);
+        params.push(digits);
         pi++;
         conditions.push(`(${textMatch} OR ${phoneMatch})`);
       } else {
@@ -352,6 +383,14 @@ const getTickets = async (req, res, next) => {
     }
 
     const where = conditions.join(" AND ");
+
+    // The commission agent's details only exist after migration v8
+    const withAgents = await hasColumn("tickets", "agent_id");
+    const agentCols = withAgents
+      ? ", ag.name AS agent_name_commission, ag.phone AS agent_phone"
+      : "";
+    const agentJoin = withAgents ? " LEFT JOIN agents ag ON ag.id = t.agent_id" : "";
+
     const countResult = await query(
       `SELECT COUNT(*) FROM tickets t WHERE ${where}`,
       params,
@@ -361,10 +400,10 @@ const getTickets = async (req, res, next) => {
     const dataResult = await query(
       `SELECT t.*, u.name AS agent_name,
               COALESCE(t.contact_number, c.phone) AS display_phone,
-              c.phone AS customer_phone
+              c.phone AS customer_phone${agentCols}
        FROM tickets t
        LEFT JOIN users u     ON u.id = t.created_by
-       LEFT JOIN customers c ON c.id = t.customer_id
+       LEFT JOIN customers c ON c.id = t.customer_id${agentJoin}
        WHERE ${where} ORDER BY t.created_at DESC
        LIMIT $${pi} OFFSET $${pi + 1}`,
       [...params, parseInt(limit), offset],
@@ -377,13 +416,118 @@ const getTickets = async (req, res, next) => {
 };
 
 /**
+ * GET /api/tickets/manifest?when=tomorrow|today|date&date=YYYY-MM-DD
+ *
+ * Who is flying, and how to reach them. Departures only — a return leg
+ * on the same date is a different journey and would double-count the
+ * passenger on the call list.
+ */
+const getManifest = async (req, res, next) => {
+  try {
+    const { when = "tomorrow", date, include_returns } = req.query;
+
+    let target;
+    if (when === "today") target = "CURRENT_DATE";
+    else if (when === "tomorrow") target = "CURRENT_DATE + 1";
+    else target = null;
+
+    const params = [req.businessId];
+    let pi = 2;
+    let dateClause;
+
+    if (target) {
+      dateClause = `t.flight_date = ${target}`;
+    } else {
+      if (!date) return response.error(res, "A date is required", 400);
+      dateClause = `t.flight_date = $${pi}`;
+      params.push(date);
+      pi++;
+    }
+
+    // Optionally also list people whose RETURN leg is that day
+    let returnClause = "";
+    if (include_returns === "true" || include_returns === "1") {
+      returnClause = target
+        ? ` OR t.return_date = ${target}`
+        : ` OR t.return_date = $${pi - 1}`;
+    }
+
+    const conditions = [
+      "t.business_id = $1",
+      "t.status <> 'cancelled'",
+      `(${dateClause}${returnClause})`,
+    ];
+    if (req.user.role === "agent") {
+      conditions.push(`t.created_by = $${pi}`);
+      params.push(req.user.id);
+      pi++;
+    }
+
+    const where = conditions.join(" AND ");
+
+    const [rowsRes, summaryRes] = await Promise.all([
+      query(
+        `SELECT t.id, t.passenger_name, t.ticket_type, t.trip_type,
+                t.from_city, t.to_city, t.flight_date, t.return_date,
+                t.airline_name, t.ticket_reference, t.passport_number,
+                t.selling_price, t.amount_paid,
+                (t.selling_price - t.amount_paid) AS balance,
+                t.payment_status,
+                COALESCE(NULLIF(TRIM(t.contact_number), ''), c.phone) AS phone,
+                u.name AS booked_by
+         FROM tickets t
+         LEFT JOIN customers c ON c.id = t.customer_id
+         LEFT JOIN users u     ON u.id = t.created_by
+         WHERE ${where}
+         ORDER BY t.airline_name, t.flight_date, t.passenger_name`,
+        params,
+      ),
+      query(
+        `SELECT COUNT(*) AS passengers,
+                COUNT(DISTINCT t.airline_name) AS airlines,
+                COUNT(*) FILTER (WHERE t.payment_status <> 'paid') AS unpaid,
+                COALESCE(SUM(t.selling_price - t.amount_paid), 0) AS balance_due,
+                COUNT(*) FILTER (WHERE COALESCE(NULLIF(TRIM(t.contact_number), ''),
+                                 (SELECT phone FROM customers c2 WHERE c2.id = t.customer_id)) IS NULL)
+                  AS missing_phone
+         FROM tickets t WHERE ${where}`,
+        params,
+      ),
+    ]);
+
+    const s = summaryRes.rows[0];
+    return response.success(res, {
+      when,
+      flight_date:
+        when === "date" ? date : null,
+      passengers: rowsRes.rows,
+      summary: {
+        passengers: parseInt(s.passengers),
+        airlines: parseInt(s.airlines),
+        unpaid: parseInt(s.unpaid),
+        balance_due: Math.round(Number(s.balance_due) * 100) / 100,
+        missing_phone: parseInt(s.missing_phone),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * GET /api/tickets/:id
  */
 const getTicket = async (req, res, next) => {
   try {
+    const withAgents = await hasColumn("tickets", "agent_id");
     const result = await query(
-      `SELECT t.*, u.name AS agent_name FROM tickets t
-       LEFT JOIN users u ON u.id = t.created_by
+      `SELECT t.*, u.name AS agent_name${
+        withAgents ? ", ag.name AS agent_name_commission, ag.phone AS agent_phone" : ""
+      }
+       FROM tickets t
+       LEFT JOIN users u ON u.id = t.created_by${
+         withAgents ? " LEFT JOIN agents ag ON ag.id = t.agent_id" : ""
+       }
        WHERE t.id = $1 AND t.business_id = $2`,
       [req.params.id, req.businessId],
     );
@@ -438,7 +582,7 @@ const updateTicket = async (req, res, next) => {
         airline_name=$7, ticket_reference=$8,
         cost_price=$9, selling_price=$10,
         base_price=$11, tax=$12, surcharge=$13,
-        status=COALESCE($14, status),
+        status=COALESCE($14::ticket_status, status),
         trip_type=$15, return_date=$16,
         agent_commission=$17,
         amount_paid=$18, payment_status=$19,
@@ -479,6 +623,18 @@ const updateTicket = async (req, res, next) => {
         req.params.id,
       ]);
       result.rows[0].airline_id = airline.id;
+    }
+
+    if (await hasColumn("tickets", "agent_id")) {
+      const wantsCommission = (parseFloat(agent_commission) || 0) > 0;
+      const agent = wantsCommission
+        ? await resolveAgent(req.body, req.businessId)
+        : { id: null };
+      await query(
+        `UPDATE tickets SET agent_id = $1 WHERE id = $2 AND business_id = $3`,
+        [agent.id, req.params.id, req.businessId],
+      );
+      result.rows[0].agent_id = agent.id;
     }
 
     return response.success(res, result.rows[0], "Ticket updated successfully");
@@ -589,6 +745,7 @@ module.exports = {
   createTicket,
   ticketValidation,
   getTickets,
+  getManifest,
   getTicket,
   updateTicket,
   deleteTicket,

@@ -25,8 +25,12 @@ import {
   Filter,
   Banknote,
   Loader2,
+  ClipboardList,
+  Printer,
+  Plane,
 } from "lucide-react";
 import { format } from "date-fns";
+import { fmtDate } from "../utils/date";
 
 const statusVariant = {
   active: "success",
@@ -132,6 +136,192 @@ function CollectPaymentForm({ ticket, onDone, onCancel }) {
   );
 }
 
+// ─── Flight Manifest ─────────────────────────────────────────────────────────
+// Who is flying and how to reach them. Defaults to tomorrow, because that is
+// the call list you make at the end of today.
+
+const printManifest = (rows, summary, label) => {
+  const body = rows
+    .map(
+      (p, i) => `<tr>
+        <td>${i + 1}</td>
+        <td>${p.passenger_name}</td>
+        <td>${p.phone || "—"}</td>
+        <td>${p.from_city} → ${p.to_city}</td>
+        <td>${p.airline_name}</td>
+        <td>${p.ticket_reference || "—"}</td>
+        <td>${p.ticket_type === "INTERNATIONAL" ? "INTL" : "LOCAL"}</td>
+        <td class="${Number(p.balance) > 0 ? "due" : ""}">$${Number(p.balance).toFixed(2)}</td>
+      </tr>`,
+    )
+    .join("");
+  const html = `<!DOCTYPE html><html><head><title>Flight manifest — ${label}</title><style>
+    body{font-family:Arial,sans-serif;margin:28px;color:#111}
+    h1{font-size:19px;margin:0 0 4px;text-align:center}
+    .sub{text-align:center;color:#666;font-size:12px;margin-bottom:18px}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th{background:#1d4ed8;color:#fff;text-align:left;padding:6px}
+    td{padding:6px;border-bottom:1px solid #e5e7eb}
+    tr:nth-child(even) td{background:#f8faff}
+    .due{color:#b91c1c;font-weight:bold}
+    @media print{body{margin:10mm}}
+  </style></head><body>
+    <h1>Flight manifest</h1>
+    <p class="sub">${label} · ${summary.passengers} passenger(s) · ${summary.airlines} airline(s)
+      ${summary.balance_due > 0 ? ` · $${Number(summary.balance_due).toFixed(2)} still to collect` : ""}</p>
+    <table><thead><tr><th>#</th><th>Passenger</th><th>Phone</th><th>Route</th><th>Airline</th><th>Ref</th><th>Type</th><th>Balance</th></tr></thead>
+    <tbody>${body}</tbody></table>
+    <script>window.onload=function(){window.print()}</script>
+  </body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) return toast.error("Allow pop-ups to print the manifest");
+  win.document.write(html);
+  win.document.close();
+};
+
+function ManifestModal({ open, onClose }) {
+  const [when, setWhen] = useState("tomorrow");
+  const [date, setDate] = useState("");
+  const [includeReturns, setIncludeReturns] = useState(false);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(() => {
+    if (when === "date" && !date) return;
+    setLoading(true);
+    ticketsAPI
+      .manifest({ when, date, include_returns: includeReturns })
+      .then((r) => setData(r.data.data))
+      .catch((err) =>
+        toast.error(err.response?.data?.message || "Failed to load manifest"),
+      )
+      .finally(() => setLoading(false));
+  }, [when, date, includeReturns]);
+
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
+
+  const rows = data?.passengers || [];
+  const summary = data?.summary || {};
+  const label =
+    when === "today"
+      ? `Today, ${format(new Date(), "dd MMM yyyy")}`
+      : when === "tomorrow"
+        ? `Tomorrow, ${format(new Date(Date.now() + 86400000), "dd MMM yyyy")}`
+        : date
+          ? fmtDate(date)
+          : "Pick a date";
+
+  return (
+    <Modal open={open} onClose={onClose} title="Flight manifest" size="xl">
+      <div className="space-y-4">
+        <div className="flex flex-wrap gap-3 items-end">
+          <Select value={when} onChange={(e) => setWhen(e.target.value)} className="w-40">
+            <option value="tomorrow">Tomorrow</option>
+            <option value="today">Today</option>
+            <option value="date">Pick a date</option>
+          </Select>
+          {when === "date" && (
+            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          )}
+          <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 pb-2">
+            <input
+              type="checkbox"
+              checked={includeReturns}
+              onChange={(e) => setIncludeReturns(e.target.checked)}
+              className="rounded"
+            />
+            Include return legs
+          </label>
+          <div className="flex-1" />
+          <Button
+            variant="outline"
+            disabled={rows.length === 0}
+            onClick={() => printManifest(rows, summary, label)}
+          >
+            <Printer className="w-4 h-4" /> Print
+          </Button>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-16"><Spinner size="lg" /></div>
+        ) : rows.length === 0 ? (
+          <div className="py-14 text-center">
+            <Plane className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto mb-3" />
+            <p className="text-gray-500 dark:text-gray-400 font-medium">
+              No flights on {label.toLowerCase()}
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                ["Passengers", summary.passengers, "text-gray-900 dark:text-white"],
+                ["Airlines", summary.airlines, "text-gray-900 dark:text-white"],
+                ["Not fully paid", summary.unpaid, summary.unpaid > 0 ? "text-red-600" : "text-gray-400"],
+                ["To collect", `$${Number(summary.balance_due || 0).toFixed(2)}`, summary.balance_due > 0 ? "text-red-600" : "text-gray-400"],
+              ].map(([l, v, cls]) => (
+                <div key={l} className="px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-700/40">
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">{l}</p>
+                  <p className={`text-lg font-bold ${cls}`}>{v}</p>
+                </div>
+              ))}
+            </div>
+
+            {summary.missing_phone > 0 && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                {summary.missing_phone} passenger(s) have no phone number on file.
+              </p>
+            )}
+
+            <div className="overflow-x-auto max-h-[50vh] overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-xl">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white dark:bg-gray-800">
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    {["Passenger", "Phone", "Route", "Airline", "Ref", "Type", "Balance"].map((h) => (
+                      <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+                  {rows.map((p) => (
+                    <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                      <td className="px-4 py-2.5 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                        {p.passenger_name}
+                      </td>
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        {p.phone ? (
+                          <a href={`tel:${p.phone}`} className="text-blue-600 hover:underline">{p.phone}</a>
+                        ) : (
+                          <span className="text-amber-600">missing</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {p.from_city} → {p.to_city}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">{p.airline_name}</td>
+                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">{p.ticket_reference || "—"}</td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant={typeVariant[p.ticket_type]}>{p.ticket_type}</Badge>
+                      </td>
+                      <td className={`px-4 py-2.5 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                        ${Number(p.balance).toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 export default function TicketsPage() {
   const { canWrite } = useAuth();
   const [tickets, setTickets] = useState([]);
@@ -148,6 +338,7 @@ export default function TicketsPage() {
   const [modal, setModal] = useState({ open: false, mode: null, ticket: null });
   const [payModal, setPayModal] = useState(null); // ticket being paid
   const [payments, setPayments] = useState([]); // history in view modal
+  const [manifestOpen, setManifestOpen] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -209,11 +400,16 @@ export default function TicketsPage() {
             {meta.total} total tickets
           </p>
         </div>
-        {canWrite() && (
-          <Button onClick={openCreate} size="lg">
-            <Plus className="w-4 h-4" /> New Ticket
+        <div className="flex gap-2">
+          <Button variant="outline" size="lg" onClick={() => setManifestOpen(true)}>
+            <ClipboardList className="w-4 h-4" /> Manifest
           </Button>
-        )}
+          {canWrite() && (
+            <Button onClick={openCreate} size="lg">
+              <Plus className="w-4 h-4" /> New Ticket
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Filters */}
@@ -347,7 +543,7 @@ export default function TicketsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {ticket.flight_date
-                        ? format(new Date(ticket.flight_date), "dd MMM yyyy")
+                        ? fmtDate(ticket.flight_date, "dd MMM yyyy")
                         : "—"}
                       {ticket.trip_type === "round_trip" &&
                         ticket.return_date && (
@@ -499,7 +695,7 @@ export default function TicketsPage() {
               [
                 "Flight Date",
                 modal.ticket.flight_date
-                  ? format(new Date(modal.ticket.flight_date), "dd MMMM yyyy")
+                  ? fmtDate(modal.ticket.flight_date, "dd MMMM yyyy")
                   : "—",
               ],
               [
@@ -624,6 +820,8 @@ export default function TicketsPage() {
           </div>
         )}
       </Modal>
+
+      <ManifestModal open={manifestOpen} onClose={() => setManifestOpen(false)} />
     </div>
   );
 }

@@ -2,13 +2,21 @@ const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
 const { generateCustomerStatementPDF } = require("../services/reportService");
+const { hasTable } = require("../services/schemaInfo");
+const { phoneMatches } = require("../services/phoneMatch");
 
 /**
  * Shared query: everything a customer owes / has paid.
  * Includes tickets they are the passenger on AND tickets they
  * booked for family members / friends (booked_by_customer_id).
  */
-const fetchStatementData = async (customerId, businessId) => {
+const fetchStatementData = async (
+  customerId,
+  businessId,
+  ticketIds = null,
+  visaIds = null,
+  packageIds = null,
+) => {
   const customerResult = await query(
     `SELECT * FROM customers WHERE id = $1 AND business_id = $2`,
     [customerId, businessId],
@@ -37,7 +45,7 @@ const fetchStatementData = async (customerId, businessId) => {
   );
 
   const paymentsResult = await query(
-    `SELECT p.amount, p.method, p.note, p.created_at,
+    `SELECT p.amount, p.method, p.note, p.created_at, p.ticket_id,
             u.name AS collected_by_name, t.passenger_name
      FROM ticket_payments p
      JOIN users u ON u.id = p.collected_by
@@ -48,28 +56,144 @@ const fetchStatementData = async (customerId, businessId) => {
     [customerId, businessId],
   );
 
-  const tickets = ticketsResult.rows;
-  const totals = tickets.reduce(
-    (acc, t) => {
-      acc.total_amount += parseFloat(t.selling_price) || 0;
-      acc.total_paid += parseFloat(t.amount_paid) || 0;
-      acc.total_balance += parseFloat(t.balance) || 0;
-      return acc;
-    },
-    { total_amount: 0, total_paid: 0, total_balance: 0 },
-  );
+  // Visa services and packages the customer also owes on. Both are optional
+  // features, so a database without them simply returns nothing.
+  const [visaResult, packageResult] = await Promise.all([
+    (await hasTable("visa_applications"))
+      ? query(
+          `SELECT v.id, v.applicant_name, v.destination_country, v.visa_type,
+                  v.reference, v.applied_date, v.status,
+                  v.cost_price, v.selling_price, v.revenue, v.amount_paid,
+                  (v.selling_price - v.amount_paid) AS balance,
+                  v.payment_status, v.created_at AS issued_date,
+                  u.name AS created_by_name
+           FROM visa_applications v
+           LEFT JOIN users u ON u.id = v.created_by
+           WHERE v.business_id = $2
+             AND v.status <> 'cancelled'
+             AND (v.customer_id = $1
+                  OR LOWER(TRIM(v.applicant_name)) = LOWER(TRIM($3)))
+           ORDER BY v.created_at DESC`,
+          [customerId, businessId, customerName],
+        )
+      : Promise.resolve({ rows: [] }),
+    (await hasTable("packages"))
+      ? query(
+          `SELECT p.id, p.label, p.package_type, p.lead_name, p.pilgrim_count,
+                  p.departure_date, p.status,
+                  p.total_cost, p.selling_price, p.revenue, p.amount_paid,
+                  (p.selling_price - p.amount_paid) AS balance,
+                  p.payment_status, p.created_at AS issued_date,
+                  u.name AS created_by_name
+           FROM packages p
+           LEFT JOIN users u ON u.id = p.created_by
+           WHERE p.business_id = $2
+             AND p.status <> 'cancelled'
+             AND (p.customer_id = $1
+                  OR LOWER(TRIM(COALESCE(p.lead_name, ''))) = LOWER(TRIM($3)))
+           ORDER BY p.created_at DESC`,
+          [customerId, businessId, customerName],
+        )
+      : Promise.resolve({ rows: [] }),
+  ]);
+
+  // A customer may want an invoice for only some passengers — say three of
+  // the seven they booked. Everything below is scoped to that selection.
+  const allTickets = ticketsResult.rows;
+  const allVisas = visaResult.rows;
+  const allPackages = packageResult.rows;
+
+  // A selection of [] means "none of this kind"; null means "all of them"
+  const pick = (rows, ids) => {
+    if (!Array.isArray(ids)) return rows;
+    const keep = new Set(ids.map(String));
+    return rows.filter((r) => keep.has(String(r.id)));
+  };
+
+  const tickets = pick(allTickets, ticketIds);
+  const visas = pick(allVisas, visaIds);
+  const packages = pick(allPackages, packageIds);
+
+  const partial =
+    Array.isArray(ticketIds) || Array.isArray(visaIds) || Array.isArray(packageIds);
+
+  const visibleIds = new Set(tickets.map((t) => String(t.id)));
+  const payments = Array.isArray(ticketIds)
+    ? paymentsResult.rows.filter((p) => visibleIds.has(String(p.ticket_id)))
+    : paymentsResult.rows;
+
+  const sum = (rows) =>
+    rows.reduce(
+      (acc, r) => {
+        acc.total_amount += parseFloat(r.selling_price) || 0;
+        acc.total_paid += parseFloat(r.amount_paid) || 0;
+        acc.total_balance += parseFloat(r.balance) || 0;
+        return acc;
+      },
+      { total_amount: 0, total_paid: 0, total_balance: 0 },
+    );
+
+  const tTot = sum(tickets);
+  const vTot = sum(visas);
+  const pTot = sum(packages);
+  const totals = {
+    total_amount: tTot.total_amount + vTot.total_amount + pTot.total_amount,
+    total_paid: tTot.total_paid + vTot.total_paid + pTot.total_paid,
+    total_balance: tTot.total_balance + vTot.total_balance + pTot.total_balance,
+  };
+
+  const money = (v) => Number(v || 0).toFixed(2);
 
   return {
     customer: customerResult.rows[0],
     tickets,
-    payments: paymentsResult.rows,
+    visas,
+    packages,
+    payments,
+    selection: {
+      partial,
+      selected_count: tickets.length + visas.length + packages.length,
+      available_count:
+        allTickets.length + allVisas.length + allPackages.length,
+    },
+    breakdown: {
+      tickets: {
+        count: tickets.length,
+        total: money(tTot.total_amount),
+        paid: money(tTot.total_paid),
+        balance: money(tTot.total_balance),
+      },
+      visas: {
+        count: visas.length,
+        total: money(vTot.total_amount),
+        paid: money(vTot.total_paid),
+        balance: money(vTot.total_balance),
+      },
+      packages: {
+        count: packages.length,
+        total: money(pTot.total_amount),
+        paid: money(pTot.total_paid),
+        balance: money(pTot.total_balance),
+      },
+    },
     summary: {
       ticket_count: tickets.length,
-      total_amount: totals.total_amount.toFixed(2),
-      total_paid: totals.total_paid.toFixed(2),
-      total_balance: totals.total_balance.toFixed(2),
+      visa_count: visas.length,
+      package_count: packages.length,
+      item_count: tickets.length + visas.length + packages.length,
+      total_amount: money(totals.total_amount),
+      total_paid: money(totals.total_paid),
+      total_balance: money(totals.total_balance),
     },
   };
+};
+
+/** Accepts ?ticket_ids=a,b,c or repeated ?ticket_ids=a&ticket_ids=b */
+const parseTicketIds = (raw) => {
+  if (raw === undefined) return null;              // absent -> everything
+  if (raw === "" || raw === null) return [];       // present but empty -> none
+  const list = Array.isArray(raw) ? raw : String(raw).split(",");
+  return list.map((s) => String(s).trim()).filter(Boolean);
 };
 
 /**
@@ -77,7 +201,13 @@ const fetchStatementData = async (customerId, businessId) => {
  */
 const getCustomerStatement = async (req, res, next) => {
   try {
-    const data = await fetchStatementData(req.params.id, req.businessId);
+    const data = await fetchStatementData(
+      req.params.id,
+      req.businessId,
+      parseTicketIds(req.query.ticket_ids),
+      parseTicketIds(req.query.visa_ids),
+      parseTicketIds(req.query.package_ids),
+    );
     if (!data) return response.notFound(res, "Customer not found");
     return response.success(res, data);
   } catch (err) {
@@ -90,7 +220,13 @@ const getCustomerStatement = async (req, res, next) => {
  */
 const exportCustomerStatementPDF = async (req, res, next) => {
   try {
-    const data = await fetchStatementData(req.params.id, req.businessId);
+    const data = await fetchStatementData(
+      req.params.id,
+      req.businessId,
+      parseTicketIds(req.query.ticket_ids),
+      parseTicketIds(req.query.visa_ids),
+      parseTicketIds(req.query.package_ids),
+    );
     if (!data) return response.notFound(res, "Customer not found");
     generateCustomerStatementPDF(res, data);
   } catch (err) {
@@ -121,11 +257,19 @@ const getCustomers = async (req, res, next) => {
     const conditions = ["c.business_id = $1"];
 
     if (search) {
-      conditions.push(
-        `(c.name ILIKE $${pi} OR c.passport_number ILIKE $${pi} OR c.phone ILIKE $${pi})`,
-      );
+      const textMatch = `(c.name ILIKE $${pi} OR c.passport_number ILIKE $${pi} OR c.phone ILIKE $${pi})`;
       params.push(`%${search}%`);
       pi++;
+
+      // Phone numbers are written many ways — match on the national number
+      const digits = String(search).replace(/[^0-9]/g, "");
+      if (digits.length >= 3) {
+        conditions.push(`(${textMatch} OR ${phoneMatches("c.phone", pi)})`);
+        params.push(digits);
+        pi++;
+      } else {
+        conditions.push(textMatch);
+      }
     }
 
     // What each customer still owes — on their own tickets and on any they

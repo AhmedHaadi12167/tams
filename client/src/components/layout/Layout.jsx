@@ -18,6 +18,9 @@ import {
   Building2,
   Users2,
   Wallet,
+  Stamp,
+  Luggage,
+  UserRound,
 } from "lucide-react";
 
 const NAV_ITEMS = [
@@ -53,10 +56,28 @@ const NAV_ITEMS = [
     roles: ["admin", "agent"],
   },
   {
+    path: "/visas",
+    label: "Visas",
+    icon: Stamp,
+    roles: ["super_admin", "admin", "agent", "accountant"],
+  },
+  {
+    path: "/packages",
+    label: "Packages",
+    icon: Luggage,
+    roles: ["super_admin", "admin", "agent", "accountant"],
+  },
+  {
     path: "/airlines",
     label: "Airlines",
     icon: Plane,
     roles: ["super_admin", "admin", "agent", "accountant"],
+  },
+  {
+    path: "/agents",
+    label: "Agents",
+    icon: UserRound,
+    roles: ["super_admin", "admin", "accountant"],
   },
   {
     path: "/reports",

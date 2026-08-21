@@ -1,5 +1,20 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+/**
+ * Keep DATE columns as plain 'YYYY-MM-DD' strings.
+ *
+ * By default node-postgres turns a DATE into a JS Date at LOCAL midnight.
+ * JSON.stringify then serialises that as UTC, so in UTC+3 a flight_date of
+ * 2026-09-01 reaches the browser as '2026-08-31T21:00:00.000Z' — and taking
+ * the first ten characters gives the wrong day. Loading a record and saving
+ * it again walked every date backwards one day at a time.
+ *
+ * A calendar date has no timezone, so the honest representation is the text
+ * Postgres already stores. 1082 = date, 1182 = date[].
+ */
+types.setTypeParser(1082, (v) => v);
+types.setTypeParser(1182, (v) => v);
 
 const pool = new Pool({
   host: process.env.DB_HOST,

@@ -13,6 +13,7 @@ import {
   Modal,
   RowsPerPage,
 } from "../components/ui";
+import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   Users,
@@ -31,6 +32,7 @@ import {
   Download,
 } from "lucide-react";
 import { format } from "date-fns";
+import { fmtDate } from "../utils/date";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -43,6 +45,9 @@ const EMPTY_TICKET = {
   return_date: "",
   airline_name: "",
   ticket_reference: "",
+  base_price: "",
+  tax: "",
+  surcharge: "",
   cost_price: "",
   selling_price: "",
   contact_number: "",
@@ -104,8 +109,23 @@ function TicketRow({
   const isInt = ticket.ticket_type === "INTERNATIONAL";
   const [expanded, setExpanded] = useState(true);
 
-  const set = (field) => (e) =>
-    onChange(index, { ...ticket, [field]: e.target.value });
+  // Same pricing rule as the single-ticket form:
+  //   cost    = base + tax          (what we pay the airline)
+  //   selling = base + tax + surcharge  (what the customer pays)
+  const set = (field) => (e) => {
+    const val = e.target.value;
+    const updated = { ...ticket, [field]: val };
+
+    if (["base_price", "tax", "surcharge"].includes(field)) {
+      const base = parseFloat(field === "base_price" ? val : updated.base_price) || 0;
+      const tax = parseFloat(field === "tax" ? val : updated.tax) || 0;
+      const surcharge = parseFloat(field === "surcharge" ? val : updated.surcharge) || 0;
+      updated.cost_price = (base + tax).toFixed(2);
+      updated.selling_price = (base + tax + surcharge).toFixed(2);
+    }
+
+    onChange(index, updated);
+  };
 
   return (
     <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
@@ -245,49 +265,102 @@ function TicketRow({
             />
           </div>
 
-          <div>
-            <label className="field-label">Cost Price *</label>
-            <Input
-              type="number"
-              min="0"
-              step="0.01"
-              value={ticket.cost_price}
-              onChange={set("cost_price")}
-              placeholder="0.00"
-            />
-          </div>
-          <div>
-            <label className="field-label">Selling Price *</label>
-            <Input
-              type="number"
-              min="0"
-              step="0.01"
-              value={ticket.selling_price}
-              onChange={set("selling_price")}
-              placeholder="0.00"
-            />
-          </div>
+          {/* ── Pricing (same breakdown as single ticket booking) ── */}
+          <div className="col-span-2 md:col-span-3 mt-1">
+            <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
+              Pricing
+            </p>
 
-          {/* Revenue preview */}
-          {ticket.cost_price && ticket.selling_price && (
-            <div className="flex items-end">
-              <span
-                className={`text-sm font-semibold ${
-                  parseFloat(ticket.selling_price) -
-                    parseFloat(ticket.cost_price) >=
-                  0
-                    ? "text-green-600 dark:text-green-400"
-                    : "text-red-500"
-                }`}
-              >
-                Revenue:{" "}
-                {formatMoney(
-                  parseFloat(ticket.selling_price || 0) -
-                    parseFloat(ticket.cost_price || 0),
-                )}
-              </span>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+              <div>
+                <label className="field-label">Base price</label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ticket.base_price}
+                  onChange={set("base_price")}
+                  placeholder="200"
+                />
+              </div>
+              <div>
+                <label className="field-label">Tax</label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ticket.tax}
+                  onChange={set("tax")}
+                  placeholder="10"
+                />
+              </div>
+              <div>
+                <label className="field-label">Surcharge</label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ticket.surcharge}
+                  onChange={set("surcharge")}
+                  placeholder="10"
+                />
+              </div>
+              <div>
+                <label className="field-label">Total</label>
+                <div className="px-3 py-2 rounded-lg border bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-sm text-gray-600 dark:text-gray-300">
+                  ${ticket.selling_price || "0.00"}
+                </div>
+              </div>
             </div>
-          )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="field-label">Cost price (Base + Tax) *</label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ticket.cost_price}
+                  onChange={set("cost_price")}
+                  placeholder="210.00"
+                />
+              </div>
+              <div>
+                <label className="field-label">Selling price (Total) *</label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={ticket.selling_price}
+                  onChange={set("selling_price")}
+                  placeholder="220.00"
+                />
+              </div>
+              <div>
+                <label className="field-label">Revenue (profit)</label>
+                <div
+                  className={`px-3 py-2 rounded-lg border text-sm font-semibold ${
+                    parseFloat(ticket.selling_price || 0) -
+                      parseFloat(ticket.cost_price || 0) >
+                    0
+                      ? "bg-green-50 border-green-200 text-green-700 dark:bg-green-900/20 dark:border-green-800 dark:text-green-400"
+                      : parseFloat(ticket.selling_price || 0) -
+                            parseFloat(ticket.cost_price || 0) <
+                          0
+                        ? "bg-red-50 border-red-200 text-red-700"
+                        : "bg-gray-50 border-gray-200 text-gray-500 dark:bg-gray-700 dark:border-gray-600"
+                  }`}
+                >
+                  {ticket.cost_price && ticket.selling_price
+                    ? formatMoney(
+                        parseFloat(ticket.selling_price || 0) -
+                          parseFloat(ticket.cost_price || 0),
+                      )
+                    : "$—"}
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* International fields */}
           {isInt && (
@@ -437,7 +510,7 @@ function GroupStatementModal({ group, onClose }) {
           [
             "Date",
             group.flight_date
-              ? format(new Date(group.flight_date), "dd MMM yyyy")
+              ? fmtDate(group.flight_date, "dd MMM yyyy")
               : "—",
           ],
           ["Airline", group.airline_name || "—"],
@@ -501,11 +574,11 @@ function GroupStatementModal({ group, onClose }) {
                   </td>
                   <td className="px-3 py-2 text-gray-500">
                     {p.flight_date
-                      ? format(new Date(p.flight_date), "dd MMM yy")
+                      ? fmtDate(p.flight_date, "dd MMM yy")
                       : "—"}
                     {p.return_date && (
                       <p className="text-gray-400">
-                        ⇄ {format(new Date(p.return_date), "dd MMM yy")}
+                        ⇄ {fmtDate(p.return_date, "dd MMM yy")}
                       </p>
                     )}
                   </td>
@@ -629,6 +702,8 @@ function GroupBookingForm({ onSave, onCancel }) {
   const [tickets, setTickets] = useState([{ ...EMPTY_TICKET }]);
   const [sharedRoute, setSharedRoute] = useState(true);
   const [amountPaid, setAmountPaid] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // Load customers for the dropdown
@@ -637,6 +712,55 @@ function GroupBookingForm({ onSave, onCancel }) {
       .list({ search: customerSearch, limit: 30 })
       .then((r) => setCustomers(r.data.data || []))
       .catch(console.error);
+  }, [customerSearch]);
+
+  // Search and pick in one action: an exact phone match wins, otherwise a
+  // single result is selected outright. Only ambiguous searches need the list.
+  const runCustomerSearch = useCallback(async () => {
+    const term = customerSearch.trim();
+    if (!term) return toast.error("Type a name or phone number first");
+
+    setSearching(true);
+    try {
+      const res = await customersAPI.list({ search: term, limit: 30 });
+      const found = res.data.data || [];
+      setCustomers(found);
+
+      if (found.length === 0) {
+        toast.error(`No customer found for "${term}"`);
+        setCustomerId("");
+        return;
+      }
+
+      const digits = term.replace(/[^0-9]/g, "");
+      const byPhone =
+        digits.length >= 3
+          ? found.filter(
+              (c) => (c.phone || "").replace(/[^0-9]/g, "") === digits,
+            )
+          : [];
+
+      const pick =
+        byPhone.length === 1
+          ? byPhone[0]
+          : found.length === 1
+            ? found[0]
+            : null;
+
+      if (pick) {
+        setCustomerId(pick.id);
+        toast.success(`Selected ${pick.company_name || pick.name}`);
+      } else {
+        setCustomerId("");
+        toast(`${found.length} matches — pick one from the list`, {
+          icon: "🔎",
+        });
+      }
+    } catch {
+      toast.error("Customer search failed");
+    } finally {
+      setSearching(false);
+    }
   }, [customerSearch]);
 
   // When shared route is on, sync route fields from ticket[0] to all others
@@ -737,6 +861,7 @@ function GroupBookingForm({ onSave, onCancel }) {
         group_label: groupLabel || undefined,
         notes: notes || undefined,
         amount_paid: paidNow,
+        payment_method: paymentMethod,
         tickets,
       });
       toast.success(`Group booking created — ${tickets.length} ticket(s)`);
@@ -792,14 +917,31 @@ function GroupBookingForm({ onSave, onCancel }) {
               ? "Company / Customer *"
               : "Lead Customer *"}
           </label>
-          <div className="relative mb-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <Input
-              className="pl-8"
-              placeholder="Search customers..."
-              value={customerSearch}
-              onChange={(e) => setCustomerSearch(e.target.value)}
-            />
+          <div className="flex gap-2 mb-1">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Input
+                className="pl-8 w-full"
+                placeholder="Type a phone number or name, then Search"
+                value={customerSearch}
+                onChange={(e) => setCustomerSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    runCustomerSearch();
+                  }
+                }}
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={runCustomerSearch}
+              disabled={searching || !customerSearch.trim()}
+            >
+              {searching ? <Spinner size="sm" /> : <Search className="w-4 h-4" />}
+              Search
+            </Button>
           </div>
           <Select
             value={customerId}
@@ -911,7 +1053,7 @@ function GroupBookingForm({ onSave, onCancel }) {
           </div>
 
           {/* Payment from the customer/company who booked */}
-          <div className="grid grid-cols-2 gap-4 items-end border-t border-gray-200 dark:border-gray-700 pt-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end border-t border-gray-200 dark:border-gray-700 pt-4">
             <div>
               <label className="field-label">
                 Amount paid now (by customer/company)
@@ -925,6 +1067,20 @@ function GroupBookingForm({ onSave, onCancel }) {
                 onChange={(e) => setAmountPaid(e.target.value)}
                 placeholder="0.00"
               />
+            </div>
+            <div>
+              <label className="field-label">Payment method</label>
+              <Select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+                disabled={!(parseFloat(amountPaid) > 0)}
+              >
+                {PAYMENT_METHODS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </Select>
             </div>
             <div className="text-center">
               <p className="text-gray-400 text-xs uppercase tracking-wide">
@@ -1157,7 +1313,7 @@ export default function GroupBookingsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {g.flight_date
-                        ? format(new Date(g.flight_date), "dd MMM yyyy")
+                        ? fmtDate(g.flight_date, "dd MMM yyyy")
                         : "—"}
                     </td>
                     <td className="px-4 py-3">

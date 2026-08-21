@@ -806,7 +806,7 @@ const generateGroupBookingPDF = (res, group) => {
  * Landscape A4 (842 x 595) so the passenger table has room.
  */
 const generateAirlinePDF = (res, data, filters = {}) => {
-  const { airline_name, summary, passengers, routes } = data;
+  const { airline_name, summary, account, passengers, routes } = data;
   const M = 40;
   const doc = new PDFDocument({ margin: M, size: "A4", layout: "landscape" });
 
@@ -852,11 +852,11 @@ const generateAirlinePDF = (res, data, filters = {}) => {
   const boxes = [
     ["Tickets", summary.tickets, "#1d4ed8"],
     ["Passengers", summary.passengers, "#1d4ed8"],
-    ["Total Sales", money(summary.total_sales), "#111827"],
-    ["Airline Cost", money(summary.total_cost), "#b45309"],
-    ["Revenue", money(summary.total_revenue), "#15803d"],
-    ["Collected", money(summary.total_collected), "#15803d"],
-    ["Balance Due", money(summary.total_balance), "#b91c1c"],
+    ["Cost (period)", money(summary.total_cost), "#b45309"],
+    ["Owed (all time)", money(account ? account.total_cost : 0), "#111827"],
+    ["Paid to airline", money(account ? account.total_paid : 0), "#15803d"],
+    ["Balance owed", money(account ? account.balance : 0), "#b91c1c"],
+    ["Generated", new Date().toLocaleDateString("en-GB"), "#6b7280"],
   ];
   boxes.forEach(([label, value, color], i) => {
     const bx = M + i * (boxW + 8);
@@ -891,7 +891,7 @@ const generateAirlinePDF = (res, data, filters = {}) => {
       const col = i % perRow;
       const rowY = y + Math.floor(i / perRow) * 13;
       doc.text(
-        `${r.route}  —  ${r.tickets} ticket${Number(r.tickets) === 1 ? "" : "s"}  ·  ${money(r.revenue)}`,
+        `${r.route}  —  ${r.tickets} ticket${Number(r.tickets) === 1 ? "" : "s"}  ·  ${money(r.cost)}`,
         M + col * (pageW / perRow),
         rowY,
         { width: pageW / perRow - 10, lineBreak: false },
@@ -909,18 +909,15 @@ const generateAirlinePDF = (res, data, filters = {}) => {
   y += 16;
 
   const cols = [
-    ["#", M, 22],
-    ["Passenger", 62, 118],
-    ["Contact", 180, 78],
-    ["Route", 258, 118],
-    ["Flight Date", 376, 62],
-    ["Type", 438, 54],
-    ["Ref", 492, 52],
-    ["Total", 544, 54],
-    ["Paid", 598, 54],
-    ["Balance", 652, 54],
-    ["Status", 706, 50],
-    ["Agent", 756, 46],
+    ["#", M, 26],
+    ["Passenger", 66, 150],
+    ["Contact", 216, 96],
+    ["Route", 312, 150],
+    ["Flight Date", 462, 76],
+    ["Type", 538, 56],
+    ["Ref", 594, 66],
+    ["Airline Cost", 660, 72],
+    ["Booked By", 732, 70],
   ];
 
   y = drawTableHeader(doc, cols, y, pageW, M);
@@ -942,33 +939,22 @@ const generateAirlinePDF = (res, data, filters = {}) => {
 
     const row = [
       String(i + 1),
-      trunc(p.passenger_name, 24),
-      trunc(p.contact_number || "—", 15),
-      trunc(`${p.from_city} - ${p.to_city}`, 24),
+      trunc(p.passenger_name, 30),
+      trunc(p.contact_number || "—", 19),
+      trunc(`${p.from_city} - ${p.to_city}`, 30),
       flightLabel,
       p.ticket_type === "INTERNATIONAL" ? "INTL" : "LOCAL",
-      trunc(p.ticket_reference || "—", 10),
-      money(p.selling_price),
-      money(p.amount_paid),
-      money(p.balance),
-      p.payment_status || "unpaid",
-      trunc(p.agent_name || "—", 9),
+      trunc(p.ticket_reference || "—", 13),
+      money(p.cost_price),
+      trunc(p.agent_name || "—", 13),
     ];
 
     row.forEach((val, ci) => {
       const [, x, w] = cols[ci];
-      const isStatus = ci === 10;
-      const isBalance = ci === 9;
       doc
-        .fillColor(
-          isStatus
-            ? statusColor(p.payment_status)
-            : isBalance && Number(p.balance) > 0
-              ? "#b91c1c"
-              : "#111827",
-        )
+        .fillColor(ci === 7 ? "#b45309" : "#111827")
         .fontSize(7.5)
-        .font(isStatus ? "Helvetica-Bold" : "Helvetica")
+        .font(ci === 7 ? "Helvetica-Bold" : "Helvetica")
         .text(String(val), x + 2, y, { width: w - 4, lineBreak: false });
     });
     y += 14;
@@ -993,17 +979,9 @@ const generateAirlinePDF = (res, data, filters = {}) => {
   }
   doc.rect(M, y, pageW, 18).fill("#eef2ff");
   doc.fillColor("#1d4ed8").fontSize(8).font("Helvetica-Bold");
-  doc.text("TOTAL", M + 4, y + 5, { lineBreak: false });
-  doc.text(money(summary.total_sales), cols[7][1] + 2, y + 5, {
+  doc.text("TOTAL COST OWED", M + 4, y + 5, { lineBreak: false });
+  doc.text(money(summary.total_cost), cols[7][1] + 2, y + 5, {
     width: cols[7][2] - 4,
-    lineBreak: false,
-  });
-  doc.text(money(summary.total_collected), cols[8][1] + 2, y + 5, {
-    width: cols[8][2] - 4,
-    lineBreak: false,
-  });
-  doc.text(money(summary.total_balance), cols[9][1] + 2, y + 5, {
-    width: cols[9][2] - 4,
     lineBreak: false,
   });
 

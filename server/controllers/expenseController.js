@@ -209,7 +209,7 @@ const updateExpense = async (req, res, next) => {
 
     const result = await query(
       `UPDATE expenses SET
-        category       = COALESCE($1, category),
+        category       = COALESCE($1::expense_category, category),
         description    = $2,
         amount         = $3,
         expense_date   = COALESCE($4, expense_date),

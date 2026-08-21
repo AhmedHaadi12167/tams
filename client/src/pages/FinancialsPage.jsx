@@ -45,6 +45,7 @@ import {
   EyeOff,
 } from "lucide-react";
 import { format } from "date-fns";
+import { fmtDate } from "../utils/date";
 
 const COLORS = [
   "#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
@@ -59,14 +60,6 @@ const label = (s) =>
     .split("_")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
-const fmtDate = (d) => {
-  if (!d) return "—";
-  try {
-    return format(new Date(d), "dd MMM yyyy");
-  } catch {
-    return "—";
-  }
-};
 const fmtMonth = (d) => {
   try {
     return format(new Date(d), "MMM yy");

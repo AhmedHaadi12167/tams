@@ -7,6 +7,7 @@ import {
   AlertCircle, ListFilter, X, TrendingUp, Receipt,
 } from 'lucide-react';
 import { format } from 'date-fns';
+import { fmtDate } from '../utils/date';
 
 const money = (v) => `$${Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -284,9 +285,9 @@ export default function ReportsPage() {
                         <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{t.from_city} → {t.to_city}</td>
                         <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{t.airline_name}</td>
                         <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                          {t.flight_date ? format(new Date(t.flight_date), 'dd MMM yyyy') : '—'}
+                          {fmtDate(t.flight_date)}
                           {t.trip_type === 'round_trip' && t.return_date && (
-                            <p className="text-xs text-gray-400">⇄ {format(new Date(t.return_date), 'dd MMM yyyy')}</p>
+                            <p className="text-xs text-gray-400">⇄ {fmtDate(t.return_date)}</p>
                           )}
                         </td>
                         <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">

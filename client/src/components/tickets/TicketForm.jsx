@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { ticketsAPI, customersAPI, airlinesAPI } from "../../services/api";
+import { toDateInput } from "../../utils/date";
+import { ticketsAPI, customersAPI, airlinesAPI, agentsAPI } from "../../services/api";
 import { Button, Input, Select } from "../ui";
 import toast from "react-hot-toast";
 import {
@@ -21,6 +22,16 @@ const calcPaymentStatus = (amountPaid, sellingPrice) => {
   if (paid >= total) return "paid";
   return "partial";
 };
+
+// Same list the Collect Payment dialog uses, so payment history is consistent
+export const PAYMENT_METHODS = [
+  { value: "cash", label: "Cash" },
+  { value: "evc", label: "EVC Plus" },
+  { value: "edahab", label: "eDahab" },
+  { value: "bank", label: "Bank transfer" },
+  { value: "card", label: "Card" },
+  { value: "other", label: "Other" },
+];
 
 const STATUS_STYLES = {
   unpaid:
@@ -49,7 +60,11 @@ const INITIAL = {
   cost_price: "",
   selling_price: "",
   amount_paid: "",
+  payment_method: "cash",
   agent_commission: "",
+  agent_id: "",
+  agent_name: "",
+  agent_phone: "",
   source_file_url: "",
 };
 
@@ -167,7 +182,6 @@ function BookedBySearch({ value, onChange }) {
 
 // ─── Main Form ────────────────────────────────────────────────────────────────
 
-const toDateInput = (v) => (v ? String(v).slice(0, 10) : "");
 
 export default function TicketForm({
   initial = {},
@@ -178,11 +192,17 @@ export default function TicketForm({
   // Existing airlines, so agents pick instead of retyping a new variant.
   // Typing something new is always allowed — it gets created on save.
   const [airlineOptions, setAirlineOptions] = useState([]);
+  const [agents, setAgents] = useState([]);
   useEffect(() => {
     airlinesAPI
       .master()
       .then((res) => setAirlineOptions((res.data.data || []).map((a) => a.name)))
       .catch(() => {});
+    // Empty list is fine — the agents table only exists after migration v8
+    agentsAPI
+      .simple()
+      .then((res) => setAgents(res.data.data || []))
+      .catch(() => setAgents([]));
   }, []);
 
   const [form, setForm] = useState({
@@ -192,11 +212,39 @@ export default function TicketForm({
     return_date: toDateInput(initial.return_date),
     trip_type: initial.trip_type || "one_way",
     amount_paid: initial.amount_paid ?? "",
+    payment_method: initial.payment_method || "cash",
     agent_commission: initial.agent_commission ?? "",
+    agent_id: initial.agent_id || "",
+    agent_name: initial.agent_name_commission || "",
+    agent_phone: initial.agent_phone || "",
   });
+
+  // Commission is the exception, not the rule — keep it out of the way until
+  // it's actually needed. Editing a ticket that already has one opens it.
+  const [hasCommission, setHasCommission] = useState(
+    Number(initial.agent_commission) > 0,
+  );
   const [bookedByCustomerId, setBookedByCustomerId] = useState(
     initial.booked_by_customer_id || null,
   );
+  const matchedAgent = agents.find(
+    (a) => a.name.toLowerCase() === (form.agent_name || "").trim().toLowerCase(),
+  );
+
+  // Picking a known agent fills in their number so it can't be mistyped
+  const onAgentNameChange = (e) => {
+    const val = e.target.value;
+    const hit = agents.find(
+      (a) => a.name.toLowerCase() === val.trim().toLowerCase(),
+    );
+    setForm((f) => ({
+      ...f,
+      agent_name: val,
+      agent_id: hit ? hit.id : "",
+      agent_phone: hit && hit.phone ? hit.phone : f.agent_phone,
+    }));
+  };
+
   const [loading, setLoading] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -637,7 +685,7 @@ export default function TicketForm({
         </div>
 
         {/* Payment */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <Input
             label="Amount paid *"
             type="number"
@@ -648,6 +696,18 @@ export default function TicketForm({
             placeholder="0.00"
             required
           />
+          <Select
+            label="Payment method"
+            value={form.payment_method}
+            onChange={set("payment_method")}
+            disabled={!(parseFloat(form.amount_paid) > 0)}
+          >
+            {PAYMENT_METHODS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </Select>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
               Balance
@@ -683,21 +743,103 @@ export default function TicketForm({
         <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
           Agent Commission (optional)
         </h3>
-        <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
-          Commission is subtracted from revenue (Revenue = Selling − Cost −
-          Commission).
-        </p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Input
-            label="Commission amount"
-            type="number"
-            min="0"
-            step="0.01"
-            value={form.agent_commission}
-            onChange={set("agent_commission")}
-            placeholder="0.00"
-          />
-        </div>
+        {!hasCommission ? (
+          <label className="flex items-center gap-2.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={false}
+              onChange={() => setHasCommission(true)}
+              className="rounded cursor-pointer"
+            />
+            <span className="text-sm text-gray-600 dark:text-gray-300">
+              An agent earns commission on this booking
+            </span>
+          </label>
+        ) : (
+          <>
+            <label className="flex items-center gap-2.5 cursor-pointer select-none mb-3">
+              <input
+                type="checkbox"
+                checked
+                onChange={() => {
+                  setHasCommission(false);
+                  // Clearing the amount keeps revenue honest
+                  setForm((f) => ({
+                    ...f,
+                    agent_commission: "",
+                    agent_id: "",
+                    agent_name: "",
+                    agent_phone: "",
+                  }));
+                }}
+                className="rounded cursor-pointer"
+              />
+              <span className="text-sm text-gray-600 dark:text-gray-300">
+                An agent earns commission on this booking
+              </span>
+            </label>
+
+            <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
+              Commission is subtracted from revenue (Revenue = Selling − Cost −
+              Commission). A new agent is created automatically from the name
+              and phone below.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <Input
+                label="Commission amount *"
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.agent_commission}
+                onChange={set("agent_commission")}
+                placeholder="0.00"
+              />
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Agent name *
+                </label>
+                <input
+                  list="tams-agent-options"
+                  value={form.agent_name}
+                  onChange={onAgentNameChange}
+                  placeholder="Pick one, or type a new agent"
+                  autoComplete="off"
+                  className="px-3 py-2 rounded-lg border text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+                    border-gray-300 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500
+                    placeholder-gray-400 dark:placeholder-gray-500"
+                />
+                <datalist id="tams-agent-options">
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.name}>
+                      {a.phone || ""}
+                    </option>
+                  ))}
+                </datalist>
+              </div>
+              <Input
+                label="Agent phone"
+                value={form.agent_phone}
+                onChange={set("agent_phone")}
+                placeholder="+252 61 234 5678"
+              />
+            </div>
+
+            {form.agent_name.trim() && (
+              <p
+                className={`text-xs mt-2 ${
+                  matchedAgent
+                    ? "text-green-600 dark:text-green-400"
+                    : "text-amber-600 dark:text-amber-400"
+                }`}
+              >
+                {matchedAgent
+                  ? `Existing agent — commission added to ${matchedAgent.name}'s balance.`
+                  : `New agent — "${form.agent_name.trim()}" will be added to your agents list.`}
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       {/* ── Booked By ── */}

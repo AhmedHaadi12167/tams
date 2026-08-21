@@ -26,16 +26,20 @@ import {
   Download,
   Banknote,
   Wallet,
+  Stamp,
+  Luggage,
 } from "lucide-react";
 import { format } from "date-fns";
+import { fmtDate } from "../utils/date";
 
-const fmtDate = (d, f = "dd MMM yyyy") => (d ? format(new Date(d), f) : "—");
 const money = (v) => `$${Number(v || 0).toFixed(2)}`;
 const payBadge = { paid: "success", partial: "warning", unpaid: "danger" };
 
 // ─── Printable statement (opens browser print dialog) ────────────────────────
 const printStatement = (data) => {
   const { customer, tickets, payments, summary } = data;
+  const visas = data.visas || [];
+  const packages = data.packages || [];
   const rows = tickets
     .map(
       (t, i) => `<tr>
@@ -90,18 +94,47 @@ const printStatement = (data) => {
       ${customer.email ? " · Email: " + customer.email : ""}
       ${customer.passport_number ? " · Passport: " + customer.passport_number : ""}</p>
     <div class="boxes">
-      <div class="box"><div class="l">Tickets</div><div class="v">${summary.ticket_count}</div></div>
+      <div class="box"><div class="l">Items</div><div class="v">${summary.item_count ?? summary.ticket_count}</div>
+        <div style="font-size:9px;color:#666">${summary.ticket_count} tickets · ${summary.visa_count || 0} visas · ${summary.package_count || 0} packages</div></div>
       <div class="box"><div class="l">Total Amount</div><div class="v">${money(summary.total_amount)}</div></div>
       <div class="box"><div class="l">Total Paid</div><div class="v" style="color:#15803d">${money(summary.total_paid)}</div></div>
       <div class="box"><div class="l">Balance Due</div><div class="v" style="color:#b91c1c">${money(summary.total_balance)}</div></div>
     </div>
-    <h2>Tickets</h2>
+    <h2>Flight Tickets</h2>
     <table><thead><tr><th>#</th><th>Passenger</th><th>Route</th><th>Flight</th><th>Booked</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
     <tbody>${rows}</tbody></table>
     ${
       tickets.some((t) => !t.is_self)
         ? '<p class="note">* booked by this customer for a family member / friend &nbsp;·&nbsp; ⇄ round trip</p>'
         : '<p class="note">⇄ round trip</p>'
+    }
+    ${
+      visas.length
+        ? `<h2>Visa Services</h2>
+    <table><thead><tr><th>#</th><th>Applicant</th><th>Country</th><th>Type</th><th>Applied</th><th>Status</th><th>Total</th><th>Paid</th><th>Balance</th></tr></thead>
+    <tbody>${visas
+      .map((v, i) => `<tr>
+        <td>${i + 1}</td><td>${v.applicant_name}</td><td>${v.destination_country}</td>
+        <td>${v.visa_type || "—"}</td><td>${fmtDate(v.applied_date)}</td>
+        <td>${String(v.status || "").toUpperCase()}</td>
+        <td>${money(v.selling_price)}</td><td>${money(v.amount_paid)}</td>
+        <td>${money(v.balance)}</td></tr>`)
+      .join("")}</tbody></table>`
+        : ""
+    }
+    ${
+      packages.length
+        ? `<h2>Hajj &amp; Umrah Packages</h2>
+    <table><thead><tr><th>#</th><th>Package</th><th>Type</th><th>Travellers</th><th>Departs</th><th>Status</th><th>Total</th><th>Paid</th><th>Balance</th></tr></thead>
+    <tbody>${packages
+      .map((p, i) => `<tr>
+        <td>${i + 1}</td><td>${p.label}</td><td>${String(p.package_type || "").toUpperCase()}</td>
+        <td>${p.pilgrim_count}</td><td>${fmtDate(p.departure_date)}</td>
+        <td>${String(p.status || "").toUpperCase()}</td>
+        <td>${money(p.selling_price)}</td><td>${money(p.amount_paid)}</td>
+        <td>${money(p.balance)}</td></tr>`)
+      .join("")}</tbody></table>`
+        : ""
     }
     ${
       payments.length
@@ -117,6 +150,55 @@ const printStatement = (data) => {
   if (!win) return toast.error("Allow pop-ups to print the statement");
   win.document.write(html);
   win.document.close();
+};
+
+/**
+ * Narrow a statement to the ticked passengers, recomputing the totals so the
+ * printed page never shows figures that disagree with its own rows.
+ */
+const filterStatement = (data, ticketIds, visaIds, packageIds) => {
+  if (!data) return data;
+  const allT = (data.tickets || []).length === ticketIds.length;
+  const allV = (data.visas || []).length === (visaIds || []).length;
+  const allP = (data.packages || []).length === (packageIds || []).length;
+  if (allT && allV && allP) return data;
+
+  const kT = new Set(ticketIds);
+  const kV = new Set(visaIds || []);
+  const kP = new Set(packageIds || []);
+
+  const tickets = (data.tickets || []).filter((t) => kT.has(t.id));
+  const visas = (data.visas || []).filter((v) => kV.has(v.id));
+  const packages = (data.packages || []).filter((p) => kP.has(p.id));
+  const payments = (data.payments || []).filter((p) => kT.has(p.ticket_id));
+
+  const sum = (rows) =>
+    rows.reduce(
+      (a, r) => ({
+        amount: a.amount + (parseFloat(r.selling_price) || 0),
+        paid: a.paid + (parseFloat(r.amount_paid) || 0),
+        balance: a.balance + (parseFloat(r.balance) || 0),
+      }),
+      { amount: 0, paid: 0, balance: 0 },
+    );
+  const t = sum(tickets), v = sum(visas), p = sum(packages);
+
+  return {
+    ...data,
+    tickets,
+    visas,
+    packages,
+    payments,
+    summary: {
+      ticket_count: tickets.length,
+      visa_count: visas.length,
+      package_count: packages.length,
+      item_count: tickets.length + visas.length + packages.length,
+      total_amount: (t.amount + v.amount + p.amount).toFixed(2),
+      total_paid: (t.paid + v.paid + p.paid).toFixed(2),
+      total_balance: (t.balance + v.balance + p.balance).toFixed(2),
+    },
+  };
 };
 
 // ─── Collect Payment (from statement) ────────────────────────────────────────
@@ -195,16 +277,55 @@ function CollectForm({ ticket, onDone, onCancel }) {
 }
 
 // ─── Statement Modal ─────────────────────────────────────────────────────────
-function StatementModal({ data, downloading, onPrint, onDownload, onCollect }) {
+function StatementModal({
+  data, downloading, onPrint, onDownload, onCollect,
+  selectedIds, selectedVisaIds, selectedPackageIds,
+  onToggle, onToggleVisa, onTogglePackage, onSelectAll, onClearAll,
+}) {
   const { customer, tickets, payments, summary } = data;
+  const visas = data.visas || [];
+  const packages = data.packages || [];
+
+  const totalItems = tickets.length + visas.length + packages.length;
+  const totalSelected =
+    selectedIds.length + selectedVisaIds.length + selectedPackageIds.length;
+  const allSelected = totalItems > 0 && totalSelected === totalItems;
+  const partial = totalSelected > 0 && !allSelected;
+
+  // Totals follow the ticks, so the figures always match what will be sent
+  const addUp = (rows, ids) =>
+    rows
+      .filter((r) => ids.includes(r.id))
+      .reduce(
+        (a, r) => ({
+          total: a.total + (parseFloat(r.selling_price) || 0),
+          paid: a.paid + (parseFloat(r.amount_paid) || 0),
+          balance: a.balance + (parseFloat(r.balance) || 0),
+        }),
+        { total: 0, paid: 0, balance: 0 },
+      );
+  const st = addUp(tickets, selectedIds);
+  const sv = addUp(visas, selectedVisaIds);
+  const sp = addUp(packages, selectedPackageIds);
+  const sel = {
+    total: st.total + sv.total + sp.total,
+    paid: st.paid + sv.paid + sp.paid,
+    balance: st.balance + sv.balance + sp.balance,
+  };
+
   return (
     <div className="space-y-5">
       {/* Actions */}
-      <div className="flex gap-2 justify-end">
-        <Button variant="outline" size="sm" onClick={onPrint}>
+      <div className="flex gap-2 justify-end items-center flex-wrap">
+        {partial && (
+          <span className="text-xs font-medium text-blue-600 dark:text-blue-400 mr-auto">
+            Invoicing {totalSelected} of {totalItems} items
+          </span>
+        )}
+        <Button variant="outline" size="sm" onClick={onPrint} disabled={totalSelected === 0}>
           <Printer className="w-4 h-4" /> Print
         </Button>
-        <Button size="sm" onClick={onDownload} disabled={downloading}>
+        <Button size="sm" onClick={onDownload} disabled={downloading || totalSelected === 0}>
           <Download className="w-4 h-4" />
           {downloading ? "Preparing..." : "Download PDF"}
         </Button>
@@ -213,10 +334,10 @@ function StatementModal({ data, downloading, onPrint, onDownload, onCollect }) {
       {/* Summary */}
       <div className="grid grid-cols-4 gap-3 text-center">
         {[
-          ["Tickets", summary.ticket_count, ""],
-          ["Total", money(summary.total_amount), ""],
-          ["Paid", money(summary.total_paid), "text-green-600"],
-          ["Balance", money(summary.total_balance), "text-red-600"],
+          ["Items", totalSelected, ""],
+          ["Total", money(sel.total), ""],
+          ["Paid", money(sel.paid), "text-green-600"],
+          ["Balance", money(sel.balance), "text-red-600"],
         ].map(([label, val, cls]) => (
           <div
             key={label}
@@ -237,12 +358,22 @@ function StatementModal({ data, downloading, onPrint, onDownload, onCollect }) {
       {/* Tickets */}
       <div>
         <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-          <Ticket className="w-4 h-4" /> Tickets ({tickets.length})
+          <Ticket className="w-4 h-4" /> Flight tickets ({tickets.length})
         </h4>
         <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 dark:bg-gray-800">
+                <th className="px-3 py-2 w-8">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={(el) => { if (el) el.indeterminate = partial; }}
+                    onChange={(e) => (e.target.checked ? onSelectAll() : onClearAll())}
+                    className="rounded cursor-pointer"
+                    title="Select everything"
+                  />
+                </th>
                 {[
                   "Passenger",
                   "Route",
@@ -265,7 +396,18 @@ function StatementModal({ data, downloading, onPrint, onDownload, onCollect }) {
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
               {tickets.map((t) => (
-                <tr key={t.id}>
+                <tr
+                  key={t.id}
+                  className={selectedIds.includes(t.id) ? "" : "opacity-45"}
+                >
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(t.id)}
+                      onChange={() => onToggle(t.id)}
+                      className="rounded cursor-pointer"
+                    />
+                  </td>
                   <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
                     {t.passenger_name}
                     {!t.is_self && (
@@ -324,6 +466,108 @@ function StatementModal({ data, downloading, onPrint, onDownload, onCollect }) {
         )}
       </div>
 
+      {/* Visa services */}
+      {visas.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+            <Stamp className="w-4 h-4" /> Visa services ({visas.length})
+          </h4>
+          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-gray-800">
+                  <th className="px-3 py-2 w-8"></th>
+                  {["Applicant", "Country", "Type", "Applied", "Status", "Total", "Paid", "Balance"].map((h) => (
+                    <th key={h} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
+                {visas.map((v) => (
+                  <tr key={v.id} className={selectedVisaIds.includes(v.id) ? "" : "opacity-45"}>
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedVisaIds.includes(v.id)}
+                        onChange={() => onToggleVisa(v.id)}
+                        className="rounded cursor-pointer"
+                      />
+                    </td>
+                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">{v.applicant_name}</td>
+                    <td className="px-3 py-2 text-gray-500">{v.destination_country}</td>
+                    <td className="px-3 py-2 text-gray-500">{v.visa_type || "—"}</td>
+                    <td className="px-3 py-2 text-gray-500">{fmtDate(v.applied_date, "dd MMM yy")}</td>
+                    <td className="px-3 py-2">
+                      <Badge variant={v.status === "collected" ? "purple" : v.status === "approved" ? "success" : "info"}>
+                        {v.status}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2">{money(v.selling_price)}</td>
+                    <td className="px-3 py-2 text-green-600">{money(v.amount_paid)}</td>
+                    <td className={`px-3 py-2 font-semibold ${Number(v.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                      {money(v.balance)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Hajj & Umrah packages */}
+      {packages.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+            <Luggage className="w-4 h-4" /> Hajj &amp; Umrah packages ({packages.length})
+          </h4>
+          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-gray-800">
+                  <th className="px-3 py-2 w-8"></th>
+                  {["Package", "Type", "Pax", "Departs", "Status", "Total", "Paid", "Balance"].map((h) => (
+                    <th key={h} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
+                {packages.map((p) => (
+                  <tr key={p.id} className={selectedPackageIds.includes(p.id) ? "" : "opacity-45"}>
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedPackageIds.includes(p.id)}
+                        onChange={() => onTogglePackage(p.id)}
+                        className="rounded cursor-pointer"
+                      />
+                    </td>
+                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">{p.label}</td>
+                    <td className="px-3 py-2">
+                      <Badge variant={p.package_type === "hajj" ? "purple" : "success"}>
+                        {p.package_type}
+                      </Badge>
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">{p.pilgrim_count}</td>
+                    <td className="px-3 py-2 text-gray-500">{fmtDate(p.departure_date, "dd MMM yy")}</td>
+                    <td className="px-3 py-2 text-gray-500">{p.status}</td>
+                    <td className="px-3 py-2">{money(p.selling_price)}</td>
+                    <td className="px-3 py-2 text-green-600">{money(p.amount_paid)}</td>
+                    <td className={`px-3 py-2 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                      {money(p.balance)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Payments */}
       {payments.length > 0 && (
         <div>
@@ -376,6 +620,10 @@ export default function CustomersPage() {
   const [stmtLoading, setStmtLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [collectTicket, setCollectTicket] = useState(null);
+  // What goes on the statement. Everything is selected by default.
+  const [selectedTicketIds, setSelectedTicketIds] = useState([]);
+  const [selectedVisaIds, setSelectedVisaIds] = useState([]);
+  const [selectedPackageIds, setSelectedPackageIds] = useState([]);
 
   const openStatement = async (customer) => {
     setStmtModal(customer);
@@ -383,7 +631,11 @@ export default function CustomersPage() {
     setStmtLoading(true);
     try {
       const res = await customersAPI.statement(customer.id);
-      setStmtData(res.data.data);
+      const d = res.data.data;
+      setStmtData(d);
+      setSelectedTicketIds((d.tickets || []).map((t) => t.id));
+      setSelectedVisaIds((d.visas || []).map((v) => v.id));
+      setSelectedPackageIds((d.packages || []).map((p) => p.id));
     } catch {
       toast.error("Failed to load statement");
       setStmtModal(null);
@@ -395,10 +647,24 @@ export default function CustomersPage() {
   const downloadStatementPDF = async (customer) => {
     setDownloading(true);
     try {
-      const res = await customersAPI.statementPDF(customer.id);
+      const all =
+        !stmtData ||
+        (selectedTicketIds.length === (stmtData.tickets || []).length &&
+          selectedVisaIds.length === (stmtData.visas || []).length &&
+          selectedPackageIds.length === (stmtData.packages || []).length);
+      const res = await customersAPI.statementPDF(
+        customer.id,
+        all
+          ? undefined
+          : {
+              ticket_ids: selectedTicketIds,
+              visa_ids: selectedVisaIds,
+              package_ids: selectedPackageIds,
+            },
+      );
       downloadBlob(
         res.data,
-        `statement-${customer.name.replace(/\s+/g, "-").toLowerCase()}.pdf`,
+        `statement-${customer.name.replace(/\s+/g, "-").toLowerCase()}${all ? "" : "-partial"}.pdf`,
       );
     } catch {
       toast.error("Failed to download PDF");
@@ -706,7 +972,7 @@ export default function CustomersPage() {
                           <p className="text-xs text-gray-500">
                             {t.airline_name} ·{" "}
                             {t.flight_date
-                              ? format(new Date(t.flight_date), "dd MMM yyyy")
+                              ? fmtDate(t.flight_date, "dd MMM yyyy")
                               : "—"}
                           </p>
                         </div>
@@ -751,7 +1017,39 @@ export default function CustomersPage() {
           <StatementModal
             data={stmtData}
             downloading={downloading}
-            onPrint={() => printStatement(stmtData)}
+            selectedIds={selectedTicketIds}
+            selectedVisaIds={selectedVisaIds}
+            selectedPackageIds={selectedPackageIds}
+            onToggle={(id) =>
+              setSelectedTicketIds((prev) =>
+                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+              )
+            }
+            onToggleVisa={(id) =>
+              setSelectedVisaIds((prev) =>
+                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+              )
+            }
+            onTogglePackage={(id) =>
+              setSelectedPackageIds((prev) =>
+                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+              )
+            }
+            onSelectAll={() => {
+              setSelectedTicketIds((stmtData.tickets || []).map((t) => t.id));
+              setSelectedVisaIds((stmtData.visas || []).map((v) => v.id));
+              setSelectedPackageIds((stmtData.packages || []).map((p) => p.id));
+            }}
+            onClearAll={() => {
+              setSelectedTicketIds([]);
+              setSelectedVisaIds([]);
+              setSelectedPackageIds([]);
+            }}
+            onPrint={() =>
+              printStatement(
+                filterStatement(stmtData, selectedTicketIds, selectedVisaIds, selectedPackageIds),
+              )
+            }
             onDownload={() => downloadStatementPDF(stmtModal)}
             onCollect={(t) => setCollectTicket(t)}
           />

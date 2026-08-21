@@ -32,6 +32,7 @@ export const ticketsAPI = {
       timeout: 60000,
     }),
   list: (params) => api.get("/tickets", { params }),
+  manifest: (params) => api.get("/tickets/manifest", { params }),
   get: (id) => api.get(`/tickets/${id}`),
   create: (data) => api.post("/tickets", data),
   update: (id, data) => api.put(`/tickets/${id}`, data),
@@ -57,15 +58,32 @@ export const cargoAPI = {
 // Uploaded files are served from the API host, not the SPA route
 export const fileUrl = (p) => (p ? `/uploads/${p}` : null);
 
+// An empty array means "none of this kind", so it must still be sent —
+// only an absent key means "everything".
+const selectionParams = (sel) => {
+  if (!sel) return undefined;
+  return {
+    ticket_ids: (sel.ticket_ids || []).join(","),
+    visa_ids: (sel.visa_ids || []).join(","),
+    package_ids: (sel.package_ids || []).join(","),
+  };
+};
+
 export const customersAPI = {
   list: (params) => api.get("/customers", { params }),
   get: (id) => api.get(`/customers/${id}`),
   create: (data) => api.post("/customers", data), // ← add this
   update: (id, data) => api.put(`/customers/${id}`, data),
   delete: (id) => api.delete(`/customers/${id}`),
-  statement: (id) => api.get(`/customers/${id}/statement`),
-  statementPDF: (id) =>
-    api.get(`/customers/${id}/statement/pdf`, { responseType: "blob" }),
+  // sel: optional { ticket_ids, visa_ids, package_ids } to invoice a subset.
+  // Omit it entirely for the full statement.
+  statement: (id, sel) =>
+    api.get(`/customers/${id}/statement`, { params: selectionParams(sel) }),
+  statementPDF: (id, sel) =>
+    api.get(`/customers/${id}/statement/pdf`, {
+      params: selectionParams(sel),
+      responseType: "blob",
+    }),
 };
 
 export const groupBookingsAPI = {
@@ -119,6 +137,42 @@ export const airlinesAPI = {
   aliases: (id) => api.get(`/airlines-list/${id}/aliases`),
   addAlias: (id, alias) => api.post(`/airlines-list/${id}/aliases`, { alias }),
   deleteAlias: (aliasId) => api.delete(`/airlines-list/aliases/${aliasId}`),
+  // payables — money owed to carriers
+  payables: (params) => api.get("/airlines/payables", { params }),
+  pay: (id, data) => api.post(`/airlines/${id}/payments`, data),
+  payTickets: (data) => api.post("/airlines/tickets/pay", data),
+  payments: (id) => api.get(`/airlines/${id}/payments`),
+  deletePayment: (paymentId) =>
+    api.delete(`/airlines/payments/${paymentId}`),
+};
+
+export const agentsAPI = {
+  list: (params) => api.get("/agents", { params }),
+  simple: () => api.get("/agents/simple"),
+  get: (id) => api.get(`/agents/${id}`),
+  create: (data) => api.post("/agents", data),
+  update: (id, data) => api.put(`/agents/${id}`, data),
+  delete: (id) => api.delete(`/agents/${id}`),
+  pay: (id, data) => api.post(`/agents/${id}/payments`, data),
+  deletePayment: (paymentId) => api.delete(`/agents/payments/${paymentId}`),
+};
+
+export const visasAPI = {
+  list: (params) => api.get("/visas", { params }),
+  get: (id) => api.get(`/visas/${id}`),
+  create: (data) => api.post("/visas", data),
+  update: (id, data) => api.put(`/visas/${id}`, data),
+  delete: (id) => api.delete(`/visas/${id}`),
+  addPayment: (id, data) => api.post(`/visas/${id}/payments`, data),
+};
+
+export const packagesAPI = {
+  list: (params) => api.get("/packages", { params }),
+  get: (id) => api.get(`/packages/${id}`),
+  create: (data) => api.post("/packages", data),
+  update: (id, data) => api.put(`/packages/${id}`, data),
+  delete: (id) => api.delete(`/packages/${id}`),
+  addPayment: (id, data) => api.post(`/packages/${id}/payments`, data),
 };
 
 export const expensesAPI = {

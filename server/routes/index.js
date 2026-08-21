@@ -18,6 +18,9 @@ const profileController = require("../controllers/profileController");
 const expenseController = require("../controllers/expenseController");
 const financialsController = require("../controllers/financialsController");
 const airlineController = require("../controllers/airlineController");
+const agentController = require("../controllers/agentController");
+const visaController = require("../controllers/visaController");
+const packageController = require("../controllers/packageController");
 
 const {
   groupBookingValidation,
@@ -131,6 +134,11 @@ router.post(
   authorize("admin", "agent"),
   upload.single("ticket_file"),
   ticketController.extractFromFile,
+);
+router.get(
+  "/tickets/manifest",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  ticketController.getManifest,
 );
 router.get(
   "/tickets",
@@ -293,6 +301,34 @@ router.delete(
   airlineController.deleteAirline,
 );
 
+// ── Airline payables (money owed to carriers) ─────────────
+// Literal paths first so they win over /airlines/:name
+router.get(
+  "/airlines/payables",
+  authorize("super_admin", "admin", "accountant"),
+  airlineController.getPayables,
+);
+router.post(
+  "/airlines/tickets/pay",
+  authorize("super_admin", "admin", "accountant"),
+  airlineController.payTickets,
+);
+router.delete(
+  "/airlines/payments/:paymentId",
+  authorize("super_admin", "admin"),
+  airlineController.deleteAirlinePayment,
+);
+router.get(
+  "/airlines/:id/payments",
+  authorize("super_admin", "admin", "accountant"),
+  airlineController.getAirlinePayments,
+);
+router.post(
+  "/airlines/:id/payments",
+  authorize("super_admin", "admin", "accountant"),
+  airlineController.payAirline,
+);
+
 // ── Airlines (airline performance + passenger manifests) ──
 router.get(
   "/airlines",
@@ -308,6 +344,114 @@ router.get(
   "/airlines/:name/pdf",
   authorize("super_admin", "admin", "agent", "accountant"),
   airlineController.exportAirlinePDF,
+);
+
+// ── Agents (external commission earners) ──────────────────
+router.get(
+  "/agents/simple",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  agentController.listAgentsSimple,
+);
+router.delete(
+  "/agents/payments/:paymentId",
+  authorize("super_admin", "admin"),
+  agentController.deleteAgentPayment,
+);
+router.get(
+  "/agents",
+  authorize("super_admin", "admin", "accountant"),
+  agentController.getAgents,
+);
+router.post(
+  "/agents",
+  authorize("super_admin", "admin"),
+  agentController.agentValidation,
+  agentController.createAgent,
+);
+router.get(
+  "/agents/:id",
+  authorize("super_admin", "admin", "accountant"),
+  agentController.getAgent,
+);
+router.put(
+  "/agents/:id",
+  authorize("super_admin", "admin"),
+  agentController.agentValidation,
+  agentController.updateAgent,
+);
+router.delete(
+  "/agents/:id",
+  authorize("super_admin", "admin"),
+  agentController.deleteAgent,
+);
+router.post(
+  "/agents/:id/payments",
+  authorize("super_admin", "admin", "accountant"),
+  agentController.payAgent,
+);
+
+// ── Visa applications ─────────────────────────────────────
+router.get(
+  "/visas",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  visaController.getVisas,
+);
+router.post(
+  "/visas",
+  authorize("admin", "agent"),
+  visaController.visaValidation,
+  visaController.createVisa,
+);
+router.get(
+  "/visas/:id",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  visaController.getVisa,
+);
+router.put(
+  "/visas/:id",
+  authorize("admin", "agent"),
+  visaController.visaValidation,
+  visaController.updateVisa,
+);
+router.delete("/visas/:id", authorize("admin"), visaController.deleteVisa);
+router.post(
+  "/visas/:id/payments",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  visaController.addVisaPayment,
+);
+
+// ── Hajj / Umrah packages ─────────────────────────────────
+router.get(
+  "/packages",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  packageController.getPackages,
+);
+router.post(
+  "/packages",
+  authorize("admin", "agent"),
+  packageController.packageValidation,
+  packageController.createPackage,
+);
+router.get(
+  "/packages/:id",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  packageController.getPackage,
+);
+router.put(
+  "/packages/:id",
+  authorize("admin", "agent"),
+  packageController.packageValidation,
+  packageController.updatePackage,
+);
+router.delete(
+  "/packages/:id",
+  authorize("admin"),
+  packageController.deletePackage,
+);
+router.post(
+  "/packages/:id/payments",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  packageController.addPackagePayment,
 );
 
 // ── Expenses ──────────────────────────────────────────────
