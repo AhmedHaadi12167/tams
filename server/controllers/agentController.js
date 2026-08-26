@@ -14,6 +14,7 @@ const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
 const { hasTable } = require("../services/schemaInfo");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
 
@@ -187,9 +188,10 @@ const getAgent = async (req, res, next) => {
         [req.params.id, req.businessId],
       ),
       query(
-        `SELECT p.*, u.name AS paid_by_name
+        `SELECT p.*, u.name AS paid_by_name, a.name AS account_name
          FROM agent_payments p
          JOIN users u ON u.id = p.paid_by
+         LEFT JOIN payment_accounts a ON a.id = p.account_id
          WHERE p.agent_id = $1 AND p.business_id = $2
          ORDER BY p.created_at DESC`,
         [req.params.id, req.businessId],
@@ -319,8 +321,8 @@ const payAgent = async (req, res, next) => {
 
     const inserted = await query(
       `INSERT INTO agent_payments
-         (business_id, agent_id, paid_by, amount, method, reference, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+         (business_id, agent_id, paid_by, amount, method, reference, note, account_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [
         req.businessId,
         req.params.id,
@@ -329,6 +331,7 @@ const payAgent = async (req, res, next) => {
         req.body.method || "cash",
         req.body.reference || null,
         req.body.note || null,
+        await requireAccount(req.body, req.businessId, null, "commission payment"),
       ],
     );
 

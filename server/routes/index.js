@@ -21,6 +21,9 @@ const airlineController = require("../controllers/airlineController");
 const agentController = require("../controllers/agentController");
 const visaController = require("../controllers/visaController");
 const packageController = require("../controllers/packageController");
+const accountController = require("../controllers/accountController");
+const trackingController = require("../controllers/trackingController");
+const taxController = require("../controllers/taxController");
 
 const {
   groupBookingValidation,
@@ -38,6 +41,11 @@ router.post(
   authController.loginValidation,
   authController.login,
 );
+// ── Public parcel tracking ────────────────────────────────
+// Declared here, above `router.use(authenticate)`, because customers have no
+// account. Returns only what someone collecting a parcel needs to know.
+router.get("/public/track/:code", trackingController.track);
+
 router.post("/auth/forgot-password", profileController.forgotPassword);
 router.post("/auth/verify-otp", profileController.verifyOTP);
 router.post("/auth/reset-password", profileController.resetPassword);
@@ -169,6 +177,14 @@ router.delete(
   ticketController.deleteTicket,
 );
 
+// Cancelling moves money back to a customer, so it is restricted to the
+// roles that are trusted to pay money out at all.
+router.post(
+  "/tickets/:id/cancel",
+  authorize("super_admin", "admin", "accountant"),
+  ticketController.cancelTicket,
+);
+
 // ── Ticket Payments (ALL users can collect money) ─────────
 router.post(
   "/tickets/:id/payments",
@@ -193,6 +209,12 @@ router.delete(
   "/cargo/:id/photo",
   authorize("admin", "agent"),
   cargoController.deleteCargoPhoto,
+);
+// Declared before /cargo/:id so the literal segment wins.
+router.post(
+  "/cargo/:id/payments",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  cargoController.addCargoPayment,
 );
 router.get(
   "/cargo",
@@ -453,6 +475,68 @@ router.post(
   "/packages/:id/payments",
   authorize("super_admin", "admin", "agent", "accountant"),
   packageController.addPackagePayment,
+);
+
+// ── Payment accounts and the cash ledger ──────────────────
+//
+// Agents can read the account list, because every payment form needs it to
+// offer a choice of where the money went. Everything that changes an account
+// or moves money between accounts is restricted to admin and accountant.
+router.get(
+  "/accounts",
+  authorize("super_admin", "admin", "agent", "accountant"),
+  accountController.getAccounts,
+);
+router.get(
+  "/accounts/ledger",
+  authorize("super_admin", "admin", "accountant"),
+  accountController.getLedger,
+);
+router.post(
+  "/accounts",
+  authorize("super_admin", "admin", "accountant"),
+  accountController.accountValidation,
+  accountController.createAccount,
+);
+router.post(
+  "/accounts/transfer",
+  authorize("super_admin", "admin", "accountant"),
+  accountController.transferValidation,
+  accountController.createTransfer,
+);
+router.put(
+  "/accounts/assign",
+  authorize("super_admin", "admin", "accountant"),
+  accountController.assignAccount,
+);
+router.put(
+  "/accounts/:id",
+  authorize("super_admin", "admin", "accountant"),
+  accountController.accountValidation,
+  accountController.updateAccount,
+);
+router.delete(
+  "/accounts/:id",
+  authorize("super_admin", "admin"),
+  accountController.deleteAccount,
+);
+
+// ── Tax owed to the authority ─────────────────────────────
+router.get(
+  "/tax",
+  authorize("super_admin", "admin", "accountant"),
+  taxController.getTaxAccount,
+);
+router.post(
+  "/tax/payments",
+  authorize("super_admin", "admin", "accountant"),
+  taxController.taxPaymentValidation,
+  taxController.payTax,
+);
+router.delete(
+  "/tax/payments/:id",
+  authorize("super_admin", "admin"),
+  taxController.deleteTaxPayment,
 );
 
 // ── Expenses ──────────────────────────────────────────────

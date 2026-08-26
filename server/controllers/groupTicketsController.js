@@ -17,6 +17,7 @@ const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const { generateGroupBookingPDF } = require("../services/reportService");
 const { resolveAirline } = require("../services/airlineService");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -86,6 +87,12 @@ const createGroupBooking = async (req, res, next) => {
 
     const groupPaid = Math.max(parseFloat(amount_paid) || 0, 0);
     const groupMethod = (payment_method || "cash").trim() || "cash";
+    // One account for the whole group payment — the money arrived once, and
+    // is then split across the passengers it covers.
+    const groupAccountId =
+      groupPaid > 0
+        ? await requireAccount(req.body, req.businessId, null, "payment")
+        : null;
 
     // ── Verify customer before opening transaction ────────────────────────────
     const customerCheck = await query(
@@ -274,9 +281,9 @@ const createGroupBooking = async (req, res, next) => {
           Object.assign(ticket, updated.rows[0]);
 
           await client.query(
-            `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note)
-             VALUES ($1, $2, $3, $4, $5, 'Group booking payment')`,
-            [businessId, ticket.id, createdBy, pay, groupMethod],
+            `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note, account_id)
+             VALUES ($1, $2, $3, $4, $5, 'Group booking payment', $6)`,
+            [businessId, ticket.id, createdBy, pay, groupMethod, groupAccountId],
           );
           remaining -= pay;
         }

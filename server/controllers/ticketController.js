@@ -10,6 +10,8 @@ const {
 const { hasColumn } = require("../services/schemaInfo");
 const { resolveAgent } = require("../services/agentService");
 const { phoneMatches } = require("../services/phoneMatch");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
+const { uuidOrThrow } = require("../utils/sqlSafe");
 
 // Compute payment status from amounts
 const calcPaymentStatus = (amountPaid, sellingPrice) => {
@@ -19,6 +21,8 @@ const calcPaymentStatus = (amountPaid, sellingPrice) => {
   if (paid >= total) return "paid";
   return "partial";
 };
+
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 /** "" and "   " both mean "not supplied" for an optional column. */
 const nullIfBlank = (v) => {
@@ -30,14 +34,10 @@ const ticketValidation = [
   body("ticket_type")
     .isIn(["LOCAL", "INTERNATIONAL"])
     .withMessage("ticket_type must be LOCAL or INTERNATIONAL"),
-  // The database enforces this too, via chk_international_fields. Checking
-  // here as well is what turns an unreadable constraint-violation error into
-  // a sentence telling the user which box to fill in.
-  body("passport_number")
-    .if(body("ticket_type").equals("INTERNATIONAL"))
-    .trim()
-    .notEmpty()
-    .withMessage("Passport number is required for international tickets"),
+  // Optional. A booking is often taken over the phone with the document
+  // details following later, and blocking the sale until then just teaches
+  // staff to type something false into the box.
+  body("passport_number").optional({ nullable: true }).trim(),
   body("passenger_name")
     .trim()
     .notEmpty()
@@ -158,6 +158,14 @@ const createTicket = async (req, res, next) => {
     const paymentStatus = calcPaymentStatus(paid, selling_price);
     const tripType = trip_type === "round_trip" ? "round_trip" : "one_way";
     const method = (payment_method || "cash").trim() || "cash";
+    // Which account the money landed in. Resolved before the transaction so
+    // a lookup failure can't leave a half-written booking behind.
+    // Required only when money actually changed hands — a booking with
+    // nothing paid yet has no movement to file.
+    const accountId =
+      paid > 0
+        ? await requireAccount(req.body, businessId, null, "payment")
+        : null;
     // Commission agent — created inline from the name/phone typed on the
     // booking form, so nobody has to visit the Agents page first.
     let commissionAgentId = null;
@@ -312,9 +320,9 @@ const createTicket = async (req, res, next) => {
       // Log the initial collection so the payment history is complete
       if (paid > 0) {
         await client.query(
-          `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note)
-           VALUES ($1, $2, $3, $4, $5, 'Initial payment at booking')`,
-          [businessId, result.rows[0].id, req.user.id, paid, method],
+          `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note, account_id)
+           VALUES ($1, $2, $3, $4, $5, 'Initial payment at booking', $6)`,
+          [businessId, result.rows[0].id, req.user.id, paid, method, accountId],
         );
       }
 
@@ -613,6 +621,17 @@ const updateTicket = async (req, res, next) => {
     const airline = await resolveAirline(req.body.airline_name, req.businessId);
     const airline_name = airline.name;
 
+    // What the customer had paid before this edit. Changing amount_paid
+    // without writing a matching payment row would leave the ticket and the
+    // ledger disagreeing — a drift that predates accounts but only becomes
+    // visible now that balances are derived from the payment history.
+    const priorPaid = (
+      await query(
+        `SELECT amount_paid FROM tickets WHERE id=$1 AND business_id=$2`,
+        [req.params.id, req.businessId],
+      )
+    ).rows[0]?.amount_paid;
+
     const result = await query(
       `UPDATE tickets SET
         ticket_type=$1, passenger_name=$2, contact_number=$3,
@@ -662,6 +681,28 @@ const updateTicket = async (req, res, next) => {
 
     if (result.rows.length === 0)
       return response.notFound(res, "Ticket not found");
+
+    // Record the change in what has been paid as its own movement, so the
+    // payment history still adds up to the ticket's amount_paid. A negative
+    // delta is a correction or refund; both are real and both belong here.
+    const paidDelta =
+      Math.round((paid - (Number(priorPaid) || 0)) * 100) / 100;
+    if (Math.abs(paidDelta) > 0.001) {
+      await query(
+        `INSERT INTO ticket_payments
+           (business_id, ticket_id, collected_by, amount, method, note, account_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          req.businessId,
+          req.params.id,
+          req.user.id,
+          paidDelta,
+          (req.body.payment_method || "cash").trim() || "cash",
+          paidDelta > 0 ? "Further payment (edit)" : "Correction or refund (edit)",
+          await requireAccount(req.body, req.businessId, null, "adjustment"),
+        ],
+      );
+    }
 
     if (airline.id) {
       await query(`UPDATE tickets SET airline_id = $1 WHERE id = $2`, [
@@ -737,8 +778,8 @@ const addPayment = async (req, res, next) => {
 
     const updated = await withTransaction(async (client) => {
       await client.query(
-        `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
+        `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note, account_id)
+         VALUES ($1,$2,$3,$4,$5,$6, $7)`,
         [
           req.businessId,
           ticket.id,
@@ -746,6 +787,7 @@ const addPayment = async (req, res, next) => {
           paid,
           method || "cash",
           note || null,
+          await requireAccount(req.body, req.businessId, client, "payment"),
         ],
       );
       const newPaid = parseFloat(ticket.amount_paid) + paid;
@@ -773,14 +815,230 @@ const addPayment = async (req, res, next) => {
 const getPayments = async (req, res, next) => {
   try {
     const result = await query(
-      `SELECT p.*, u.name AS collected_by_name
+      `SELECT p.*, u.name AS collected_by_name, a.name AS account_name
        FROM ticket_payments p
        JOIN users u ON u.id = p.collected_by
+       LEFT JOIN payment_accounts a ON a.id = p.account_id
        WHERE p.ticket_id = $1 AND p.business_id = $2
        ORDER BY p.created_at DESC`,
       [req.params.id, req.businessId],
     );
     return response.success(res, result.rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/tickets/:id/cancel
+ *
+ * Cancelling is up to three separate movements of money, and they are
+ * independent:
+ *
+ *   refund_amount   goes back to the customer, out of an account
+ *   the remainder   stays with the agency as the cancellation fee
+ *   airline_refund  comes back from the airline, into an account
+ *
+ * Deleting the ticket instead would be simpler and quite wrong: the money
+ * really did move, and a cancelled booking that vanishes takes its own
+ * audit trail with it.
+ */
+const cancelTicket = async (req, res, next) => {
+  try {
+    const ticketRes = await query(
+      `SELECT id, passenger_name, selling_price, amount_paid, cost_price,
+              status, airline_id, tax
+              ${(await hasColumn("tickets", "airline_paid")) ? ", airline_paid" : ""}
+         FROM tickets WHERE id = $1 AND business_id = $2`,
+      [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
+    );
+    if (ticketRes.rows.length === 0)
+      return response.notFound(res, "Ticket not found");
+
+    const ticket = ticketRes.rows[0];
+    if (ticket.status === "cancelled")
+      return response.error(res, "This ticket is already cancelled", 400);
+
+    const paid = round2(ticket.amount_paid);
+    const airlinePaid = round2(ticket.airline_paid || 0);
+
+    // Refunding nothing is valid — it means the agency keeps everything.
+    const refund = round2(req.body.refund_amount);
+    const airlineRefund = round2(req.body.airline_refund);
+
+    if (refund < 0 || airlineRefund < 0)
+      return response.error(res, "Refunds cannot be negative", 400);
+
+    // The tax is not the agency's money to give back. It was collected on
+    // the government's behalf and is owed whether or not anyone flies, so
+    // it comes off what can be refunded. The exception is a flight the
+    // airline cancels: the airline returns the tax with the fare, and the
+    // agency passes it on owing nothing. That case has to be stated
+    // explicitly, because doing it by accident means refunding money the
+    // agency will still have to pay.
+    const tax = round2(ticket.tax || 0);
+    const taxReturnedByAirline =
+      req.body.refund_tax === true || req.body.refund_tax === "true";
+    const taxRefunded = taxReturnedByAirline ? tax : 0;
+    const refundable = round2(Math.max(paid - (tax - taxRefunded), 0));
+
+    if (refund > refundable + 0.001)
+      return response.error(
+        res,
+        tax > 0 && !taxReturnedByAirline
+          ? `You can't refund more than $${refundable.toFixed(2)}. The customer paid ` +
+              `$${paid.toFixed(2)}, but $${tax.toFixed(2)} of it is government tax, ` +
+              `which is not refundable. If the airline returned the tax as well, ` +
+              `tick "the airline returned the tax" and the full amount can go back.`
+          : `You can't refund more than the customer paid ($${paid.toFixed(2)})`,
+        400,
+      );
+    if (airlineRefund > airlinePaid + 0.001)
+      return response.error(
+        res,
+        `The airline can't return more than you paid them ($${airlinePaid.toFixed(2)})`,
+        400,
+      );
+
+    // What the customer's payments now net to, after the refund.
+    const kept = round2(paid - refund);
+
+    // Some of what's kept isn't a fee. The refund is capped at the tax, so
+    // the tax stays in the agency's hands whether it wants it or not, and
+    // calling that a cancellation fee would book the government's money as
+    // income. Only what's left over is actually earned.
+    const taxRetained = taxReturnedByAirline ? 0 : round2(Math.min(tax, kept));
+    const fee = round2(kept - taxRetained);
+
+    // What the customer still owes on a journey that is not happening.
+    // Chasing it is rarely worth anyone's time, so it can be written off
+    // here — recorded, not quietly dropped, because a write-off is a real
+    // loss and hiding it flatters the profit.
+    const outstanding = round2(
+      Math.max(Number(ticket.selling_price) - paid, 0),
+    );
+    const writeOff =
+      req.body.write_off === true || req.body.write_off === "true"
+        ? outstanding
+        : 0;
+
+    // Each leg is required only if that leg actually moves money. A
+    // cancellation with no refund and no airline return moves nothing.
+    const accountId =
+      refund > 0.001
+        ? await requireAccount(req.body, req.businessId, null, "refund")
+        : null;
+    const airlineAccountId =
+      airlineRefund > 0.001
+        ? await requireAccount(
+            { account_id: req.body.airline_account_id || req.body.account_id },
+            req.businessId,
+            null,
+            "airline refund",
+          )
+        : null;
+
+    const result = await withTransaction(async (client) => {
+      // 1. Money back to the customer, recorded as a negative payment so it
+      //    sits in the same history as everything else they paid.
+      if (refund > 0.001) {
+        await client.query(
+          `INSERT INTO ticket_payments
+             (business_id, ticket_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            req.businessId,
+            ticket.id,
+            req.user.id,
+            -refund,
+            (req.body.method || "cash").trim() || "cash",
+            `Refund on cancellation${req.body.reason ? ` — ${req.body.reason}` : ""}`,
+            accountId,
+          ],
+        );
+      }
+
+      // 2. Money back from the airline, as a negative airline payment.
+      if (airlineRefund > 0.001 && ticket.airline_id) {
+        await client.query(
+          `INSERT INTO airline_payments
+             (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            req.businessId,
+            ticket.airline_id,
+            ticket.id,
+            req.user.id,
+            -airlineRefund,
+            (req.body.method || "cash").trim() || "cash",
+            req.body.reference || null,
+            `Refund for cancelled ticket — ${ticket.passenger_name}`,
+            airlineAccountId,
+          ],
+        );
+      }
+
+      // 3. The ticket itself. amount_paid becomes the fee retained, which is
+      //    exactly what the customer's payments now net to.
+      //
+      //    The placeholders are numbered as the values are pushed rather
+      //    than written out by hand. Two columns here are optional — they
+      //    only exist once their migration has run — and hand-numbering a
+      //    list that changes length is how $8 ends up meaning the business
+      //    id in one branch and the ticket id in the other.
+      const vals = [];
+      const p = (v) => `$${vals.push(v)}`;
+
+      // amount_paid becomes what the customer's payments net to, which
+      // includes any tax being held. cancellation_fee is the earned part
+      // only. $1 is both stored and compared, so it needs an explicit type —
+      // Postgres cannot deduce one from two different uses.
+      const keptParam = p(kept);
+      const sets = [
+        `status = 'cancelled'`,
+        `amount_paid = ${keptParam}::NUMERIC`,
+        `payment_status = CASE WHEN ${keptParam}::NUMERIC > 0 THEN 'paid'::payment_status
+                               ELSE 'unpaid'::payment_status END`,
+        `cancellation_fee = ${p(fee)}`,
+        `written_off = ${p(writeOff)}`,
+        `refunded_amount = ${p(refund)}`,
+        `airline_refund = ${p(airlineRefund)}`,
+        `cancelled_at = NOW()`,
+        `cancel_reason = ${p(req.body.reason || null)}`,
+        `cancelled_by = ${p(req.user.id)}`,
+      ];
+      if (await hasColumn("tickets", "airline_paid"))
+        sets.push(`airline_paid = airline_paid - ${p(airlineRefund)}`);
+      if (await hasColumn("tickets", "tax_refunded"))
+        sets.push(`tax_refunded = ${p(taxRefunded)}`);
+
+      const upd = await client.query(
+        `UPDATE tickets SET ${sets.join(",\n                ")}
+          WHERE id = ${p(ticket.id)} AND business_id = ${p(req.businessId)}
+          RETURNING *`,
+        vals,
+      );
+
+      return upd.rows[0];
+    });
+
+    const parts = [];
+    if (refund > 0) parts.push(`$${refund.toFixed(2)} refunded`);
+    if (fee > 0) parts.push(`$${fee.toFixed(2)} kept as a fee`);
+    if (tax > 0)
+      parts.push(
+        taxRefunded > 0
+          ? `$${tax.toFixed(2)} tax returned by the airline, so nothing is owed on it`
+          : `$${tax.toFixed(2)} tax still owed to the government — not counted as a fee`,
+      );
+    if (writeOff > 0)
+      parts.push(`$${writeOff.toFixed(2)} written off — the customer owes nothing`);
+
+    return response.success(
+      res,
+      result,
+      parts.length ? `Cancelled. ${parts.join(", ")}.` : "Ticket cancelled.",
+    );
   } catch (err) {
     next(err);
   }
@@ -795,6 +1053,7 @@ module.exports = {
   getTicket,
   updateTicket,
   deleteTicket,
+  cancelTicket,
   addPayment,
   getPayments,
 };

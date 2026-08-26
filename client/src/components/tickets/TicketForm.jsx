@@ -3,6 +3,7 @@ import { toDateInput } from "../../utils/date";
 import { ticketsAPI, customersAPI, airlinesAPI, agentsAPI } from "../../services/api";
 import { Button, Input, Select } from "../ui";
 import toast from "react-hot-toast";
+import AccountSelect from "../AccountSelect";
 import {
   FileText,
   Image as ImageIcon,
@@ -61,14 +62,16 @@ const INITIAL = {
   selling_price: "",
   amount_paid: "",
   payment_method: "cash",
+  // Which account the money landed in. The balance on the Accounts page is
+  // built from these, so a payment without one shows as unassigned.
+  account_id: "",
   agent_commission: "",
   agent_id: "",
   agent_name: "",
   agent_phone: "",
   source_file_url: "",
-  // International travel documents. The database requires a passport number
-  // on any INTERNATIONAL ticket, so this is not optional detail — without it
-  // the booking is rejected outright.
+  // International travel documents. All optional — a booking is often taken
+  // by phone with the papers following later.
   passport_number: "",
   nationality: "",
   date_of_birth: "",
@@ -222,6 +225,7 @@ export default function TicketForm({
     trip_type: initial.trip_type || "one_way",
     amount_paid: initial.amount_paid ?? "",
     payment_method: initial.payment_method || "cash",
+    account_id: initial.account_id || "",
     agent_commission: initial.agent_commission ?? "",
     agent_id: initial.agent_id || "",
     agent_name: initial.agent_name_commission || "",
@@ -372,17 +376,6 @@ export default function TicketForm({
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    // Caught here rather than left to the database, which enforces the same
-    // rule but can only report it as a constraint name nobody can act on.
-    if (
-      form.ticket_type === "INTERNATIONAL" &&
-      !String(form.passport_number || "").trim()
-    ) {
-      return toast.error(
-        "International tickets need a passport number. Add it under Travel documents.",
-      );
-    }
-
     setLoading(true);
     try {
       const payload = {
@@ -468,7 +461,7 @@ export default function TicketForm({
       )}
 
       {/* ── Ticket Type / Trip / Status ── */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Select
           label="Ticket type"
           value={form.ticket_type}
@@ -506,7 +499,7 @@ export default function TicketForm({
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Input
-              label="Passport number *"
+              label="Passport number"
               value={form.passport_number}
               onChange={set("passport_number")}
               placeholder="A12345678"
@@ -543,8 +536,8 @@ export default function TicketForm({
             />
           </div>
           <p className="text-xs text-blue-600 dark:text-blue-400 mt-3">
-            Only the passport number is required. The rest is useful for the
-            manifest and for spotting a document that expires before the trip.
+            All optional — fill in what you have. Useful for the manifest and for
+            spotting a document that expires before the trip.
           </p>
         </div>
       )}
@@ -691,7 +684,7 @@ export default function TicketForm({
         </h3>
 
         {/* Breakdown */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
           <Input
             label="Base price"
             type="number"
@@ -782,18 +775,11 @@ export default function TicketForm({
             placeholder="0.00"
             required
           />
-          <Select
-            label="Payment method"
-            value={form.payment_method}
-            onChange={set("payment_method")}
-            disabled={!(parseFloat(form.amount_paid) > 0)}
-          >
-            {PAYMENT_METHODS.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </Select>
+          <AccountSelect
+            direction="in"
+            value={form.account_id}
+            onChange={set("account_id")}
+          />
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
               Balance

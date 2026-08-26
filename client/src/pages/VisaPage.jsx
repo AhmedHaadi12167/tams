@@ -13,7 +13,6 @@ import {
   EmptyState,
   RowsPerPage,
 } from "../components/ui";
-import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   Stamp,
@@ -26,6 +25,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -232,16 +232,11 @@ function VisaModal({ open, onClose, onSaved, initial }) {
               placeholder="0.00"
               disabled={editing}
             />
-            <Select
-              label="Payment method"
-              value={form.payment_method}
-              onChange={set("payment_method")}
-              disabled={editing || !(parseFloat(form.amount_paid) > 0)}
-            >
-              {PAYMENT_METHODS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </Select>
+            <AccountSelect
+              direction="in"
+              value={form.account_id}
+              onChange={set("account_id")}
+            />
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
                 Balance
@@ -279,11 +274,14 @@ function VisaModal({ open, onClose, onSaved, initial }) {
 function CollectModal({ open, onClose, visa, onDone }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
+  // Which account the money moves through — the balance depends on it.
+  const [accountId, setAccountId] = useState("");
   const [saving, setSaving] = useState(false);
   const balance = visa ? Number(visa.selling_price) - Number(visa.amount_paid) : 0;
 
   useEffect(() => {
-    if (open) { setAmount(balance > 0 ? balance.toFixed(2) : ""); setMethod("cash"); }
+    if (open) { setAmount(balance > 0 ? balance.toFixed(2) : ""); setMethod("cash");
+      setAccountId(""); }
   }, [open, balance]);
 
   const submit = async (e) => {
@@ -293,7 +291,11 @@ function CollectModal({ open, onClose, visa, onDone }) {
     if (val > balance + 0.001) return toast.error(`Amount exceeds balance (${money(balance)})`);
     setSaving(true);
     try {
-      const res = await visasAPI.addPayment(visa.id, { amount: val, method });
+      const res = await visasAPI.addPayment(visa.id, {
+        amount: val,
+        method,
+        account_id: accountId || undefined,
+      });
       toast.success(res.data.message);
       onDone();
       onClose();
@@ -317,9 +319,7 @@ function CollectModal({ open, onClose, visa, onDone }) {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input label="Amount *" type="number" min="0.01" step="0.01" max={balance} value={amount} onChange={(e) => setAmount(e.target.value)} />
-          <Select label="Method" value={method} onChange={(e) => setMethod(e.target.value)}>
-            {PAYMENT_METHODS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
-          </Select>
+          <AccountSelect direction="in" value={accountId} onChange={(e) => setAccountId(e.target.value)} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
@@ -409,7 +409,7 @@ export default function VisaPage() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Tile label="Charged" value={money(s.total_charged)} tone="blue" />
             <Tile label="Our cost" value={money(s.total_cost)} tone="orange" />
             <Tile label="Commission earned" value={money(s.total_revenue)} tone="green" />

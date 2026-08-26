@@ -16,8 +16,38 @@ const { query } = require("../config/db");
 const tableCache = new Map();
 const columnCache = new Map();
 
+/**
+ * A "yes" is cached forever — tables and columns are not removed under a
+ * running server. A "no" is cached only briefly.
+ *
+ * That asymmetry matters more than it looks. Migrations are run by hand
+ * while the API is up, and a permanently cached "no" meant a feature stayed
+ * silently switched off until somebody happened to restart the process —
+ * with no error anywhere to explain why. Payments would record with no
+ * account, balances would quietly under-count, and nothing would say so.
+ *
+ * Fifteen seconds is long enough to keep the check off the hot path and
+ * short enough that running a migration takes effect on its own.
+ */
+const NEGATIVE_TTL_MS = 15_000;
+
+const readCache = (cache, key) => {
+  const hit = cache.get(key);
+  if (hit === undefined) return undefined;
+  if (hit.value) return true;
+  if (Date.now() - hit.at < NEGATIVE_TTL_MS) return false;
+  cache.delete(key);
+  return undefined;
+};
+
+const writeCache = (cache, key, value) => {
+  cache.set(key, { value, at: Date.now() });
+  return value;
+};
+
 const hasTable = async (table) => {
-  if (tableCache.has(table)) return tableCache.get(table);
+  const cached = readCache(tableCache, table);
+  if (cached !== undefined) return cached;
   let exists = false;
   try {
     const r = await query(`SELECT to_regclass($1) AS t`, [`public.${table}`]);
@@ -25,13 +55,13 @@ const hasTable = async (table) => {
   } catch {
     exists = false;
   }
-  tableCache.set(table, exists);
-  return exists;
+  return writeCache(tableCache, table, exists);
 };
 
 const hasColumn = async (table, column) => {
   const key = `${table}.${column}`;
-  if (columnCache.has(key)) return columnCache.get(key);
+  const cached = readCache(columnCache, key);
+  if (cached !== undefined) return cached;
   let exists = false;
   try {
     const r = await query(
@@ -43,8 +73,7 @@ const hasColumn = async (table, column) => {
   } catch {
     exists = false;
   }
-  columnCache.set(key, exists);
-  return exists;
+  return writeCache(columnCache, key, exists);
 };
 
 /** Call after running a migration so a restart isn't needed. */

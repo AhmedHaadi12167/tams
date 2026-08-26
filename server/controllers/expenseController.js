@@ -1,6 +1,7 @@
 const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
 
 const CATEGORIES = [
   "salaries",
@@ -99,9 +100,10 @@ const getExpenses = async (req, res, next) => {
         params,
       ),
       query(
-        `SELECT e.*, u.name AS created_by_name
+        `SELECT e.*, u.name AS created_by_name, a.name AS account_name
          FROM expenses e
          LEFT JOIN users u ON u.id = e.created_by
+         LEFT JOIN payment_accounts a ON a.id = e.account_id
          WHERE ${where}
          ORDER BY e.expense_date DESC, e.created_at DESC
          LIMIT $${pi} OFFSET $${pi + 1}`,
@@ -145,8 +147,8 @@ const createExpense = async (req, res, next) => {
     const result = await query(
       `INSERT INTO expenses (
         business_id, created_by, category, description, amount,
-        expense_date, vendor, payment_method, reference, notes
-      ) VALUES ($1,$2,$3,$4,$5,COALESCE($6, CURRENT_DATE),$7,$8,$9,$10)
+        expense_date, vendor, payment_method, reference, notes, account_id
+      ) VALUES ($1,$2,$3,$4,$5,COALESCE($6, CURRENT_DATE),$7,$8,$9,$10,$11)
       RETURNING *`,
       [
         req.businessId,
@@ -159,6 +161,7 @@ const createExpense = async (req, res, next) => {
         payment_method || "cash",
         reference || null,
         notes || null,
+        await requireAccount(req.body, req.businessId, null, "expense"),
       ],
     );
 
@@ -174,9 +177,10 @@ const createExpense = async (req, res, next) => {
 const getExpense = async (req, res, next) => {
   try {
     const result = await query(
-      `SELECT e.*, u.name AS created_by_name
+      `SELECT e.*, u.name AS created_by_name, a.name AS account_name
        FROM expenses e
        LEFT JOIN users u ON u.id = e.created_by
+       LEFT JOIN payment_accounts a ON a.id = e.account_id
        WHERE e.id = $1 AND e.business_id = $2`,
       [req.params.id, req.businessId],
     );
@@ -216,7 +220,8 @@ const updateExpense = async (req, res, next) => {
         vendor         = $5,
         payment_method = COALESCE($6, payment_method),
         reference      = $7,
-        notes          = $8
+        notes          = $8,
+        account_id     = $11
        WHERE id = $9 AND business_id = $10
        RETURNING *`,
       [
@@ -230,6 +235,7 @@ const updateExpense = async (req, res, next) => {
         notes || null,
         req.params.id,
         req.businessId,
+        await requireAccount(req.body, req.businessId, null, "expense"),
       ],
     );
 

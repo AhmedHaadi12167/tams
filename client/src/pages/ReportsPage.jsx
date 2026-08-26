@@ -25,6 +25,8 @@ const EMPTY = { from_date: '', to_date: '', ticket_type: '' };
 export default function ReportsPage() {
   const [filters, setFilters] = useState(EMPTY);
   const [summary, setSummary] = useState(null);
+  // The whole response, so the per-service breakdown is available too.
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState('');
 
@@ -42,12 +44,31 @@ export default function ReportsPage() {
     setListPage(1);
   };
 
+  // Every line of business, and the totals that must agree with the cards.
+  const services = data?.services || null;
+  const itemCount = services
+    ? services.tickets.count + services.cargo.count + services.visas.count + services.packages.count
+    : 0;
+  const totals = services
+    ? {
+        sales:
+          services.tickets.sales + services.cargo.sales +
+          services.visas.sales + services.packages.sales,
+        cost:
+          services.tickets.cost + services.cargo.cost +
+          services.visas.cost + services.packages.cost,
+      }
+    : { sales: 0, cost: 0 };
+
   // ── Money summary: cheap, always loaded ───────────────
   const loadSummary = useCallback(() => {
     setLoading(true);
     reportsAPI
       .summary(filters)
-      .then((res) => setSummary(res.data.data.summary))
+      .then((res) => {
+        setData(res.data.data);
+        setSummary(res.data.data.summary);
+      })
       .catch(() => toast.error('Failed to load report'))
       .finally(() => setLoading(false));
   }, [filters]);
@@ -141,11 +162,15 @@ export default function ReportsPage() {
         <div className="flex justify-center py-16"><Spinner size="lg" /></div>
       ) : summary ? (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard
               title="Total Revenue"
               value={money(summary.total_revenue)}
-              subtitle={`${summary.total_tickets} tickets sold`}
+              subtitle={
+                services
+                  ? `${itemCount} item${itemCount === 1 ? "" : "s"} · all services`
+                  : `${summary.total_tickets} tickets sold`
+              }
               icon={DollarSign}
               color="blue"
             />
@@ -172,6 +197,97 @@ export default function ReportsPage() {
             />
           </div>
 
+          {/* Every line of business, so the totals above can be checked */}
+          {services && !data?.tickets_only && (
+            <Card className="overflow-hidden">
+              <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
+                  By service
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Revenue is what each earned after its own costs
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400">
+                    <tr>
+                      {["Service", "Count", "Sales", "Cost", "Revenue", "Collected", "Balance"].map(
+                        (h, i) => (
+                          <th
+                            key={h}
+                            className={`font-medium px-4 py-2.5 ${i === 0 ? "text-left" : "text-right"}`}
+                          >
+                            {h}
+                          </th>
+                        ),
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {[
+                      ["Tickets", services.tickets],
+                      ["Cargo", services.cargo],
+                      ["Visas", services.visas],
+                      ["Packages", services.packages],
+                    ].map(([name, s]) => (
+                      <tr key={name} className={s.count === 0 ? "opacity-50" : ""}>
+                        <td className="px-4 py-2.5 font-medium text-gray-900 dark:text-white">
+                          {name}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">
+                          {s.count}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">
+                          {money(s.sales)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-gray-500">
+                          {s.cost > 0 ? `(${money(s.cost)})` : "—"}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-gray-900 dark:text-white">
+                          {money(s.revenue)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-green-600 dark:text-green-400">
+                          {money(s.collected)}
+                        </td>
+                        <td
+                          className={`px-4 py-2.5 text-right font-medium ${
+                            s.balance > 0 ? "text-red-600 dark:text-red-400" : "text-gray-400"
+                          }`}
+                        >
+                          {money(s.balance)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-gray-50 dark:bg-gray-800/60 font-semibold">
+                    <tr>
+                      <td className="px-4 py-2.5 text-gray-900 dark:text-white">Total</td>
+                      <td className="px-4 py-2.5 text-right text-gray-900 dark:text-white">
+                        {itemCount}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-gray-900 dark:text-white">
+                        {money(totals.sales)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-gray-500">
+                        {totals.cost > 0 ? `(${money(totals.cost)})` : "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-gray-900 dark:text-white">
+                        {money(summary.total_revenue)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-green-600 dark:text-green-400">
+                        {money(summary.total_collected)}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-red-600 dark:text-red-400">
+                        {money(summary.total_balance)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </Card>
+          )}
+
           {/* Money breakdown */}
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-5">
@@ -182,7 +298,7 @@ export default function ReportsPage() {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-10 gap-y-1 max-w-3xl">
               {[
-                ['Tickets sold', summary.total_tickets, false],
+                ['Items sold', services ? itemCount : summary.total_tickets, false],
                 ['Revenue earned', money(summary.total_revenue), false],
                 ['Money collected', money(summary.total_collected), 'green'],
                 ['Outstanding balance', money(summary.total_balance), 'red'],
@@ -198,7 +314,7 @@ export default function ReportsPage() {
               ].map(([label, value, tone]) => (
                 <div
                   key={label}
-                  className="flex items-center justify-between py-2.5 border-b border-gray-100 dark:border-gray-700/60"
+                  className="flex flex-wrap items-center justify-between gap-3 py-2.5 border-b border-gray-100 dark:border-gray-700/60"
                 >
                   <span className="text-sm text-gray-600 dark:text-gray-400">{label}</span>
                   <span
@@ -221,7 +337,7 @@ export default function ReportsPage() {
 
       {/* Ticket detail — opt-in */}
       <Card className="p-6">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-3 gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <Receipt className="w-4 h-4 text-gray-400" />
             <div>

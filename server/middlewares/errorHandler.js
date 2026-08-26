@@ -21,8 +21,6 @@ const errorHandler = (err, req, res, next) => {
   // one gets a sentence saying what to do about it.
   if (err.code === '23514') {
     const CONSTRAINT_MESSAGES = {
-      chk_international_fields:
-        'International tickets need a passport number. Add it under Travel documents.',
     };
     return response.error(
       res,

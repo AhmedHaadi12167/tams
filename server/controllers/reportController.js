@@ -5,6 +5,7 @@ const {
   generateExcelReport,
 } = require("../services/reportService");
 const { uuidOrThrow } = require("../utils/sqlSafe");
+const { hasTable } = require("../services/schemaInfo");
 
 /**
  * GET /api/reports/dashboard
@@ -264,6 +265,8 @@ const getDashboard = async (req, res, next) => {
         recentResult,
         prevTicketRes,
         prevCargoRes,
+        visaSummary,
+        packageSummary,
       ] = await Promise.all([
         query(
           `SELECT COUNT(*) AS total_tickets,
@@ -281,10 +284,13 @@ const getDashboard = async (req, res, next) => {
         query(
           `SELECT COUNT(*) AS total_shipments,
             COALESCE(SUM(cs.total_price), 0) AS cargo_revenue,
+            COALESCE(SUM(cs.amount_paid), 0) AS cargo_collected,
+            COALESCE(SUM(cs.total_price - cs.amount_paid)
+                     FILTER (WHERE cs.payment_status != 'paid'), 0) AS cargo_unpaid,
             COUNT(*) FILTER (WHERE cs.cargo_status = 'pending') AS pending_cargo,
             COUNT(*) FILTER (WHERE cs.cargo_status = 'delivered') AS delivered_cargo,
             COUNT(*) FILTER (WHERE cs.payment_status != 'paid') AS unpaid_cargo
-           FROM cargo_shipments cs WHERE cs.business_id = $1 ${cFilter}`,
+           FROM cargo_shipments cs WHERE cs.business_id = $1 AND cs.cargo_status <> 'cancelled' ${cFilter}`,
           [businessId],
         ),
         query(
@@ -352,10 +358,57 @@ const getDashboard = async (req, res, next) => {
               [businessId],
             )
           : Promise.resolve({ rows: [{}] }),
+        // Visas and packages only exist after migration v8. Asking for them
+        // on an older database would fail the whole dashboard, so the tables
+        // are checked first and zeros substituted when absent.
+        (await hasTable("visa_applications"))
+          ? query(
+              `SELECT COUNT(*) AS total_visas,
+                      COALESCE(SUM(v.selling_price), 0) AS visa_sales,
+                      COALESCE(SUM(v.amount_paid), 0)   AS visa_collected,
+                      COALESCE(SUM(v.selling_price - v.amount_paid)
+                               FILTER (WHERE v.payment_status <> 'paid'), 0) AS visa_unpaid
+                 FROM visa_applications v
+                WHERE v.business_id = $1 AND v.status <> 'cancelled'`,
+              [businessId],
+            )
+          : Promise.resolve({ rows: [{ total_visas: 0, visa_sales: 0, visa_collected: 0, visa_unpaid: 0 }] }),
+        (await hasTable("packages"))
+          ? query(
+              `SELECT COUNT(*) AS total_packages,
+                      COALESCE(SUM(pk.selling_price), 0) AS package_sales,
+                      COALESCE(SUM(pk.amount_paid), 0)   AS package_collected,
+                      COALESCE(SUM(pk.selling_price - pk.amount_paid)
+                               FILTER (WHERE pk.payment_status <> 'paid'), 0) AS package_unpaid
+                 FROM packages pk
+                WHERE pk.business_id = $1 AND pk.status <> 'cancelled'`,
+              [businessId],
+            )
+          : Promise.resolve({ rows: [{ total_packages: 0, package_sales: 0, package_collected: 0, package_unpaid: 0 }] }),
       ]);
 
       const ts = ticketSummary.rows[0];
       const cs = cargoSummary.rows[0];
+      const vs = visaSummary.rows[0];
+      const ps = packageSummary.rows[0];
+      const n = (x) => parseFloat(x) || 0;
+
+      // Bookings counts tickets, because that is what "a booking" means here.
+      // Money does not: what the agency collected and what it is still owed
+      // have to cover every line of business, or the headline figures quietly
+      // contradict the Financials page.
+      const collectedAll =
+        n(ts.collected_money) +
+        n(cs.cargo_collected) +
+        n(vs.visa_collected) +
+        n(ps.package_collected);
+
+      const outstandingAll =
+        n(ts.unpaid_money) +
+        n(cs.cargo_unpaid) +
+        n(vs.visa_unpaid) +
+        n(ps.package_unpaid);
+
       return response.success(res, {
         isSuperAdmin: false,
         userRole: req.user.role,
@@ -366,16 +419,28 @@ const getDashboard = async (req, res, next) => {
           international_tickets: ts.international_tickets,
           cancelled_tickets: ts.cancelled_tickets,
           unpaid_tickets: ts.unpaid_tickets,
-          unpaid_money: ts.unpaid_money,
-          collected_money: ts.collected_money,
+          // Whole-business figures, used by the KPI cards.
+          unpaid_money: outstandingAll.toFixed(2),
+          collected_money: collectedAll.toFixed(2),
+          // Kept so anything that wants tickets alone still can.
+          ticket_collected: ts.collected_money,
+          ticket_unpaid: ts.unpaid_money,
           total_commission: ts.total_commission,
           total_shipments: cs.total_shipments,
           cargo_revenue: cs.cargo_revenue,
           pending_cargo: cs.pending_cargo,
           delivered_cargo: cs.delivered_cargo,
           unpaid_cargo: cs.unpaid_cargo,
+          total_visas: vs.total_visas,
+          visa_sales: vs.visa_sales,
+          total_packages: ps.total_packages,
+          package_sales: ps.package_sales,
+          // Earnings across every line of business.
           total_revenue: (
-            parseFloat(ts.ticket_revenue) + parseFloat(cs.cargo_revenue)
+            n(ts.ticket_revenue) +
+            n(cs.cargo_revenue) +
+            n(vs.visa_sales) +
+            n(ps.package_sales)
           ).toFixed(2),
         },
         deltas: {
@@ -520,31 +585,161 @@ const getReportSummary = async (req, res, next) => {
     }
     const where = conditions.join(" AND ");
 
-    const [summaryRes, airlinesRes] = await Promise.all([
-      query(
-        `SELECT COUNT(*) FILTER (WHERE t.status != 'cancelled') AS total_tickets,
-                COALESCE(SUM(t.revenue) FILTER (WHERE t.status != 'cancelled'), 0) AS total_revenue,
-                COALESCE(SUM(t.amount_paid) FILTER (WHERE t.status != 'cancelled'), 0) AS total_collected,
-                COALESCE(SUM(t.selling_price - t.amount_paid) FILTER (WHERE t.status != 'cancelled'), 0) AS total_balance,
-                COUNT(*) FILTER (WHERE t.status != 'cancelled' AND t.payment_status != 'paid') AS unpaid_tickets
-         FROM tickets t WHERE ${where}`,
-        params,
-      ),
-      query(
-        `SELECT t.airline_name,
-                COUNT(*) AS tickets,
-                COALESCE(SUM(t.selling_price), 0) AS total_sales,
-                COALESCE(SUM(t.revenue), 0) AS total_revenue
-         FROM tickets t
-         WHERE ${where} AND t.status != 'cancelled'
-         GROUP BY t.airline_name
-         ORDER BY tickets DESC, total_revenue DESC`,
-        params,
-      ),
-    ]);
+    // The airline and ticket-type filters only make sense for tickets, so the
+    // other services are queried on their own date range. Where no date range
+    // is given, `dateOnly` is simply the business filter.
+    const svcParams = [businessId];
+    const svcConds = ["business_id = $1"];
+    let si = 2;
+    if (from_date) {
+      svcConds.push(`created_at >= $${si}`);
+      svcParams.push(from_date);
+      si++;
+    }
+    if (to_date) {
+      svcConds.push(`created_at <= $${si}`);
+      svcParams.push(to_date + " 23:59:59");
+      si++;
+    }
+    const svcWhere = svcConds.join(" AND ");
+
+    // A ticket-specific filter means the user is asking about tickets, so the
+    // other services are excluded rather than silently ignoring the filter.
+    const ticketsOnly = Boolean(ticket_type || airline_name);
+
+    const zero = (extra = {}) =>
+      Promise.resolve({ rows: [{ count: 0, sales: 0, cost: 0, collected: 0, balance: 0, ...extra }] });
+
+    const [summaryRes, airlinesRes, cargoRes, visaRes, packageRes] =
+      await Promise.all([
+        query(
+          `SELECT COUNT(*) FILTER (WHERE t.status != 'cancelled') AS total_tickets,
+                  COALESCE(SUM(t.revenue) FILTER (WHERE t.status != 'cancelled'), 0) AS total_revenue,
+                  COALESCE(SUM(t.selling_price) FILTER (WHERE t.status != 'cancelled'), 0) AS total_sales,
+                  COALESCE(SUM(t.cost_price) FILTER (WHERE t.status != 'cancelled'), 0) AS total_cost,
+                  COALESCE(SUM(t.agent_commission) FILTER (WHERE t.status != 'cancelled'), 0) AS total_commission,
+                  COALESCE(SUM(t.amount_paid) FILTER (WHERE t.status != 'cancelled'), 0) AS total_collected,
+                  COALESCE(SUM(t.selling_price - t.amount_paid) FILTER (WHERE t.status != 'cancelled'), 0) AS total_balance,
+                  COUNT(*) FILTER (WHERE t.status != 'cancelled' AND t.payment_status != 'paid') AS unpaid_tickets
+           FROM tickets t WHERE ${where}`,
+          params,
+        ),
+        query(
+          `SELECT t.airline_name,
+                  COUNT(*) AS tickets,
+                  COALESCE(SUM(t.selling_price), 0) AS total_sales,
+                  COALESCE(SUM(t.revenue), 0) AS total_revenue
+           FROM tickets t
+           WHERE ${where} AND t.status != 'cancelled'
+           GROUP BY t.airline_name
+           ORDER BY tickets DESC, total_revenue DESC`,
+          params,
+        ),
+        ticketsOnly
+          ? zero()
+          : query(
+              `SELECT COUNT(*) AS count,
+                      COALESCE(SUM(total_price), 0) AS sales,
+                      0 AS cost,
+                      COALESCE(SUM(amount_paid), 0) AS collected,
+                      COALESCE(SUM(total_price - amount_paid), 0) AS balance
+                 FROM cargo_shipments
+                WHERE ${svcWhere} AND cargo_status <> 'cancelled'`,
+              svcParams,
+            ),
+        ticketsOnly || !(await hasTable("visa_applications"))
+          ? zero()
+          : query(
+              `SELECT COUNT(*) AS count,
+                      COALESCE(SUM(selling_price), 0) AS sales,
+                      COALESCE(SUM(cost_price), 0) AS cost,
+                      COALESCE(SUM(amount_paid), 0) AS collected,
+                      COALESCE(SUM(selling_price - amount_paid), 0) AS balance
+                 FROM visa_applications
+                WHERE ${svcWhere} AND status <> 'cancelled'`,
+              svcParams,
+            ),
+        ticketsOnly || !(await hasTable("packages"))
+          ? zero()
+          : query(
+              `SELECT COUNT(*) AS count,
+                      COALESCE(SUM(selling_price), 0) AS sales,
+                      COALESCE(SUM(total_cost), 0) AS cost,
+                      COALESCE(SUM(amount_paid), 0) AS collected,
+                      COALESCE(SUM(selling_price - amount_paid), 0) AS balance
+                 FROM packages
+                WHERE ${svcWhere} AND status <> 'cancelled'`,
+              svcParams,
+            ),
+      ]);
+
+    const s = summaryRes.rows[0];
+    const cg = cargoRes.rows[0];
+    const vs = visaRes.rows[0];
+    const pk = packageRes.rows[0];
+    const n = (v) => parseFloat(v) || 0;
+    const r2 = (v) => Math.round(v * 100) / 100;
+
+    // Revenue is margin — what each line of business earned after what it
+    // cost. Cargo has no recorded supplier cost, so its sale is its margin.
+    const revenueAll = r2(
+      n(s.total_revenue) +
+        n(cg.sales) +
+        (n(vs.sales) - n(vs.cost)) +
+        (n(pk.sales) - n(pk.cost)),
+    );
 
     return response.success(res, {
-      summary: summaryRes.rows[0],
+      summary: {
+        ...s,
+        // Whole-business figures. Tickets alone stay available above.
+        total_revenue: revenueAll,
+        total_collected: r2(
+          n(s.total_collected) + n(cg.collected) + n(vs.collected) + n(pk.collected),
+        ),
+        total_balance: r2(
+          n(s.total_balance) + n(cg.balance) + n(vs.balance) + n(pk.balance),
+        ),
+        ticket_revenue: r2(n(s.total_revenue)),
+        ticket_collected: r2(n(s.total_collected)),
+      },
+      // Each line of business on its own, so the total can be checked.
+      services: {
+        tickets: {
+          count: parseInt(s.total_tickets),
+          sales: r2(n(s.total_sales)),
+          cost: r2(n(s.total_cost)),
+          commission: r2(n(s.total_commission)),
+          revenue: r2(n(s.total_revenue)),
+          collected: r2(n(s.total_collected)),
+          balance: r2(n(s.total_balance)),
+        },
+        cargo: {
+          count: parseInt(cg.count),
+          sales: r2(n(cg.sales)),
+          cost: 0,
+          revenue: r2(n(cg.sales)),
+          collected: r2(n(cg.collected)),
+          balance: r2(n(cg.balance)),
+        },
+        visas: {
+          count: parseInt(vs.count),
+          sales: r2(n(vs.sales)),
+          cost: r2(n(vs.cost)),
+          revenue: r2(n(vs.sales) - n(vs.cost)),
+          collected: r2(n(vs.collected)),
+          balance: r2(n(vs.balance)),
+        },
+        packages: {
+          count: parseInt(pk.count),
+          sales: r2(n(pk.sales)),
+          cost: r2(n(pk.cost)),
+          revenue: r2(n(pk.sales) - n(pk.cost)),
+          collected: r2(n(pk.collected)),
+          balance: r2(n(pk.balance)),
+        },
+      },
+      tickets_only: ticketsOnly,
       airlines: airlinesRes.rows,
       topAirline: airlinesRes.rows[0] || null,
     });

@@ -12,7 +12,6 @@ import {
   Pagination,
   EmptyState,
 } from "../components/ui";
-import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   BarChart,
@@ -41,6 +40,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#06b6d4"];
 
@@ -96,12 +96,25 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const settleTickets = async (ids) => {
+  // Settling passengers moves money out, so it has to say which account it
+  // leaves. This used to fire straight off the button with no account at all,
+  // which is why it started failing once guessing was removed.
+  const [settleIds, setSettleIds] = useState(null);
+
+  const settleTickets = (ids) => {
     if (ids.length === 0) return;
+    setSettleIds(ids);
+  };
+
+  const confirmSettle = async (accountId) => {
     setPaying(true);
     try {
-      const res = await airlinesAPI.payTickets({ ticket_ids: ids });
+      const res = await airlinesAPI.payTickets({
+        ticket_ids: settleIds,
+        account_id: accountId,
+      });
       toast.success(res.data.message);
+      setSettleIds(null);
       load();
     } catch (err) {
       toast.error(err.response?.data?.message || "Payment failed");
@@ -173,10 +186,10 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Tile label="Tickets" value={s.tickets ?? 0} tone="blue" />
         <Tile label="Passengers" value={s.passengers ?? 0} />
-        <Tile label="Cost (period)" value={money(s.total_cost)} tone="orange" />
+        <Tile label="Airline cost (period)" value={money(s.total_cost)} tone="orange" />
         <Tile label="Owed all time" value={money(account?.total_cost)} />
         <Tile label="Paid to airline" value={money(account?.total_paid)} tone="green" />
         <Tile
@@ -220,7 +233,7 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
 
       {/* Passengers */}
       <Card>
-        <div className="flex items-center justify-between gap-3 px-6 pt-6 pb-4 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-3 gap-3 px-6 pt-6 pb-4 flex-wrap">
           <div className="flex items-center gap-2">
             <Users className="w-4 h-4 text-blue-600" />
             <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
@@ -370,7 +383,60 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
           />
         </div>
       </Card>
+
+      <SettleModal
+        open={!!settleIds}
+        count={settleIds?.length || 0}
+        saving={paying}
+        onClose={() => setSettleIds(null)}
+        onConfirm={confirmSettle}
+      />
     </div>
+  );
+}
+
+// ── Which account settles these passengers ───────────────────────────────────
+//
+// Small on purpose. The amounts are already known — this only asks the one
+// thing the system cannot work out for itself.
+function SettleModal({ open, count, saving, onClose, onConfirm }) {
+  const [accountId, setAccountId] = useState("");
+
+  useEffect(() => {
+    if (open) setAccountId("");
+  }, [open]);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!accountId) return toast.error("Choose the account paying the airline");
+    onConfirm(accountId);
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Settle with the airline">
+      <form onSubmit={submit} className="space-y-4">
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          Settling{" "}
+          <strong className="text-gray-900 dark:text-white">
+            {count} passenger{count === 1 ? "" : "s"}
+          </strong>
+          . The outstanding amount for each is paid in full.
+        </p>
+        <AccountSelect
+          direction="out"
+          value={accountId}
+          onChange={(e) => setAccountId(e.target.value)}
+        />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            <Banknote className="w-4 h-4" /> Pay
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -688,6 +754,8 @@ function ManageModal({ open, onClose, onChanged }) {
 function PayAirlineModal({ open, onClose, target, onPaid }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
+  // Which account the money moves through — the balance depends on it.
+  const [accountId, setAccountId] = useState("");
   const [reference, setReference] = useState("");
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState([]);
@@ -698,6 +766,7 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
     if (!open || !airlineId) return;
     setAmount(balance > 0 ? balance.toFixed(2) : "");
     setMethod("cash");
+      setAccountId("");
     setReference("");
     airlinesAPI
       .payments(airlineId)
@@ -716,6 +785,7 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
       const res = await airlinesAPI.pay(airlineId, {
         amount: val,
         method,
+        account_id: accountId || undefined,
         reference: reference || undefined,
       });
       toast.success(res.data.message);
@@ -751,11 +821,7 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
-          <Select label="Method" value={method} onChange={(e) => setMethod(e.target.value)}>
-            {PAYMENT_METHODS.map((m) => (
-              <option key={m.value} value={m.value}>{m.label}</option>
-            ))}
-          </Select>
+          <AccountSelect direction="out" value={accountId} onChange={(e) => setAccountId(e.target.value)} />
         </div>
         <Input
           label="Reference (optional)"
@@ -774,9 +840,9 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
             </p>
             <div className="border border-gray-200 dark:border-gray-700 rounded-xl divide-y divide-gray-100 dark:divide-gray-700 max-h-40 overflow-y-auto">
               {history.slice(0, 8).map((h) => (
-                <div key={h.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                <div key={h.id} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm">
                   <span className="text-gray-500 dark:text-gray-400">
-                    {fmtDate(h.created_at)} · {h.method}
+                    {fmtDate(h.created_at)} · {h.account_name || h.method}
                   </span>
                   <span className="font-semibold text-green-600 dark:text-green-400">
                     {money(h.amount)}

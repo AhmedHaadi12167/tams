@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { financialsAPI, expensesAPI } from "../services/api";
+import { financialsAPI, expensesAPI, taxAPI } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
   Button,
@@ -43,9 +43,12 @@ import {
   ArrowUpRight,
   Eye,
   EyeOff,
+  Landmark,
+  Banknote,
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const COLORS = [
   "#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
@@ -81,6 +84,7 @@ const TABS = [
   { key: "cash", label: "Cash Flow", icon: Wallet },
   { key: "receivables", label: "Receivables", icon: AlertTriangle },
   { key: "expenses", label: "Expenses", icon: Receipt },
+  { key: "tax", label: "Tax", icon: Landmark },
 ];
 
 // ── Statement line ───────────────────────────────────────────────────────────
@@ -91,7 +95,14 @@ const Line = ({ label: text, value, bold, indent, tone = "gray", divider }) => {
     muted: "text-gray-600 dark:text-gray-400",
     green: "text-green-600 dark:text-green-400",
     red: "text-red-600 dark:text-red-400",
+    // The balance sheet totals ask for "blue". Without this entry the lookup
+    // returned undefined, the element got no colour class at all, and the two
+    // most important figures on the page inherited a dim grey that was almost
+    // invisible against a dark background.
+    blue: "text-blue-600 dark:text-blue-400",
   };
+  // Anything unrecognised falls back to readable rather than to nothing.
+  const toneClass = tones[tone] || tones.gray;
   return (
     <div
       className={`flex items-center justify-between py-2 ${
@@ -106,7 +117,7 @@ const Line = ({ label: text, value, bold, indent, tone = "gray", divider }) => {
         {text}
       </span>
       <span
-        className={`text-sm tabular-nums ${bold ? "font-bold" : ""} ${tones[tone]}`}
+        className={`text-sm tabular-nums ${bold ? "font-bold" : ""} ${toneClass}`}
       >
         {value}
       </span>
@@ -149,6 +160,9 @@ const EMPTY_EXPENSE = {
   expense_date: new Date().toISOString().slice(0, 10),
   vendor: "",
   payment_method: "cash",
+  // Which account the money left. Expenses show up in the ledger as money
+  // out of this account.
+  account_id: "",
   reference: "",
   notes: "",
 };
@@ -238,13 +252,11 @@ function ExpenseModal({ open, onClose, onSaved, categories, initial }) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input label="Date" type="date" value={form.expense_date} onChange={set("expense_date")} />
-          <Select label="Paid by" value={form.payment_method} onChange={set("payment_method")}>
-            <option value="cash">Cash</option>
-            <option value="bank">Bank transfer</option>
-            <option value="mobile_money">Mobile money</option>
-            <option value="cheque">Cheque</option>
-            <option value="card">Card</option>
-          </Select>
+          <AccountSelect
+            direction="out"
+            value={form.account_id}
+            onChange={set("account_id")}
+          />
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -509,12 +521,89 @@ export default function FinancialsPage() {
                   <h2 className="font-semibold text-gray-900 dark:text-white text-sm mb-4">
                     Income Statement
                   </h2>
-                  <Line label="Ticket sales" value={money(pl.revenue.ticket_sales)} indent />
-                  <Line label="Cargo sales" value={money(pl.revenue.cargo_sales)} indent />
+                  {/* Every line of business that sold anything. A statement
+                      whose rows don't add up to its own total is worse than
+                      no statement — visa and package sales were inside Gross
+                      Sales all along but never shown. */}
+                  {[
+                    ["Ticket sales", pl.revenue.ticket_sales],
+                    ["Cargo sales", pl.revenue.cargo_sales],
+                    ["Visa sales", pl.revenue.visa_sales],
+                    ["Package sales", pl.revenue.package_sales],
+                  ]
+                    .filter(([, v]) => Number(v) !== 0)
+                    .map(([label, v]) => (
+                      <Line key={label} label={label} value={money(v)} indent />
+                    ))}
                   <Line label="Gross Sales" value={money(pl.revenue.gross_sales)} bold divider />
 
-                  <Line label="Cost of sales — airline tickets" value={`(${money(pl.cost_of_sales.airline_tickets)})`} indent tone="red" />
+                  {[
+                    ["Airline tickets", pl.cost_of_sales.airline_tickets],
+                    ["Visa fees paid", pl.cost_of_sales.visa_fees],
+                    ["Package suppliers", pl.cost_of_sales.package_suppliers],
+                  ]
+                    .filter(([, v]) => Number(v) !== 0)
+                    .map(([label, v]) => (
+                      <Line
+                        key={label}
+                        label={`Cost of sales — ${label.toLowerCase()}`}
+                        value={`(${money(v)})`}
+                        indent
+                        tone="red"
+                      />
+                    ))}
+                  <Line
+                    label="Total cost of sales"
+                    value={`(${money(pl.cost_of_sales.total)})`}
+                    tone="red"
+                  />
                   <Line label="Gross Profit" value={money(pl.gross_profit)} bold tone="green" divider />
+
+                  {pl.tax?.collected > 0 && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400 py-2">
+                      {money(pl.tax.collected)} of tax is inside these figures
+                      and belongs to the government, not the agency. See the
+                      Tax tab for what's still owed.
+                    </p>
+                  )}
+
+                  {pl.cancellations?.cancelled_count > 0 && (
+                    <>
+                      <Line
+                        label={`CANCELLATIONS (${pl.cancellations.cancelled_count} ticket${pl.cancellations.cancelled_count === 1 ? "" : "s"})`}
+                        value=""
+                        bold
+                      />
+                      <Line
+                        label="Fees kept (excluding tax)"
+                        value={money(pl.cancellations.fees_kept)}
+                        indent
+                        tone="green"
+                      />
+                      {pl.cancellations.unrecovered_cost > 0 && (
+                        <Line
+                          label="Fare paid out, not returned"
+                          value={`(${money(pl.cancellations.unrecovered_cost)})`}
+                          indent
+                          tone="red"
+                        />
+                      )}
+                      <Line
+                        label="Net from cancellations"
+                        value={money(pl.cancellations.net)}
+                        indent
+                        tone={pl.cancellations.net >= 0 ? "green" : "red"}
+                      />
+                      {pl.cancellations.written_off > 0 && (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 py-2 pl-4">
+                          {money(pl.cancellations.written_off)} of customer
+                          balances was written off on these tickets. It is not
+                          subtracted above — a cancelled sale never counted as
+                          revenue, so the money was never in the profit to lose.
+                        </p>
+                      )}
+                    </>
+                  )}
 
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
                     Operating expenses
@@ -535,7 +624,7 @@ export default function FinancialsPage() {
                   <Line label="Total Operating Costs" value={`(${money(pl.operating_costs.total)})`} bold tone="red" divider />
 
                   <div className="mt-3 -mx-6 -mb-6 px-6 py-4 bg-gray-50 dark:bg-gray-700/40 rounded-b-xl">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <span className="font-bold text-gray-900 dark:text-white">
                         Net Profit
                       </span>
@@ -778,7 +867,7 @@ export default function FinancialsPage() {
           {/* ── RECEIVABLES ──────────────────────────── */}
           {tab === "receivables" && receivables && (
             <div className="space-y-6">
-              <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <Tile label="0–30 days" value={money(receivables.aging.current_0_30)} tone="green" />
                 <Tile label="31–60 days" value={money(receivables.aging.days_31_60)} tone="blue" />
                 <Tile label="61–90 days" value={money(receivables.aging.days_61_90)} tone="orange" />
@@ -822,7 +911,7 @@ export default function FinancialsPage() {
                 </Card>
               ) : (
                 <Card className="p-6">
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="flex flex-wrap items-center justify-between gap-3 gap-3 flex-wrap">
                     <div>
                       <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
                         {receivables.aging.open_items} unpaid item
@@ -962,7 +1051,7 @@ export default function FinancialsPage() {
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-gray-200 dark:border-gray-700">
-                          {["Date", "Category", "Description", "Vendor", "Method", "Reference", "Amount", "Recorded by", ""].map((h, i) => (
+                          {["Date", "Category", "Description", "Vendor", "Account", "Reference", "Amount", "Recorded by", ""].map((h, i) => (
                             <th key={i} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap">
                               {h}
                             </th>
@@ -978,7 +1067,7 @@ export default function FinancialsPage() {
                             </td>
                             <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{e.description}</td>
                             <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.vendor || "—"}</td>
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{label(e.payment_method)}</td>
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.account_name || label(e.payment_method)}</td>
                             <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.reference || "—"}</td>
                             <td className="px-4 py-3 font-semibold text-red-600 whitespace-nowrap">{money(e.amount)}</td>
                             <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{e.created_by_name || "—"}</td>
@@ -1016,6 +1105,8 @@ export default function FinancialsPage() {
               </Card>
             </div>
           )}
+
+          {tab === "tax" && <TaxPanel />}
         </>
       )}
 
@@ -1032,5 +1123,294 @@ export default function FinancialsPage() {
         onSaved={refreshAll}
       />
     </div>
+  );
+}
+
+
+// ── Tax owed to the authority ────────────────────────────────────────────────
+//
+// Tax arrives inside the fare and is not the agency's money. It accrues as a
+// liability and leaves again when the authority is paid — so it gets the same
+// treatment as an unsettled airline balance: a figure that should reach zero,
+// and a payment that comes out of a real account.
+
+function TaxPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [payOpen, setPayOpen] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    taxAPI
+      .get()
+      .then((r) => setData(r.data.data))
+      .catch((e) =>
+        toast.error(e.response?.data?.message || "Failed to load tax"),
+      )
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (loading && !data)
+    return (
+      <div className="flex justify-center py-16">
+        <Spinner size="lg" />
+      </div>
+    );
+
+  if (!data)
+    return (
+      <EmptyState
+        icon={Landmark}
+        title="Tax tracking unavailable"
+        description="This needs a database update. Run migration_v15.sql."
+      />
+    );
+
+  const { summary, payments, by_month } = data;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <Tile
+          label="Tax collected"
+          value={money(summary.tax_accrued)}
+          sub={`On ${summary.taxed_tickets} ticket${summary.taxed_tickets === 1 ? "" : "s"}`}
+          icon={Landmark}
+        />
+        <Tile
+          label="Already paid"
+          value={money(summary.tax_paid)}
+          sub={summary.last_payment_at ? `Last ${fmtDate(summary.last_payment_at)}` : "Nothing paid yet"}
+          tone="green"
+          icon={CheckCircle2}
+        />
+        <Tile
+          label="Still owed"
+          value={money(summary.tax_owed)}
+          sub={summary.tax_owed > 0 ? "Due to the tax authority" : "Fully settled"}
+          tone={summary.tax_owed > 0 ? "red" : "green"}
+          icon={AlertTriangle}
+        />
+      </div>
+
+      <Card className="p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-gray-900 dark:text-white">
+              This money is not yours to spend
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+              It arrives inside the ticket price and is held until the authority
+              is paid. It is not counted as revenue, and the airline is not
+              credited with it.
+            </p>
+          </div>
+          {summary.tax_owed > 0 && (
+            <Button onClick={() => setPayOpen(true)}>
+              <Banknote className="w-4 h-4" /> Pay tax
+            </Button>
+          )}
+        </div>
+      </Card>
+
+      {by_month.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="font-semibold text-gray-900 dark:text-white text-sm">
+              Tax collected by month
+            </h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400">
+                <tr>
+                  <th className="text-left font-medium px-4 py-2.5">Month</th>
+                  <th className="text-right font-medium px-4 py-2.5">Tickets</th>
+                  <th className="text-right font-medium px-4 py-2.5">Tax</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {by_month.map((m) => (
+                  <tr key={m.month}>
+                    <td className="px-4 py-2.5 text-gray-900 dark:text-white">
+                      {fmtMonth(m.month)}
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-gray-600 dark:text-gray-300">
+                      {m.tickets}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-gray-900 dark:text-white">
+                      {money(m.tax)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <Card className="overflow-hidden">
+        <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+          <h3 className="font-semibold text-gray-900 dark:text-white text-sm">
+            Payments made
+          </h3>
+        </div>
+        {payments.length === 0 ? (
+          <EmptyState
+            icon={Landmark}
+            title="No tax paid yet"
+            description="When you pay the authority, record it here so the balance reflects it."
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400">
+                <tr>
+                  <th className="text-left font-medium px-4 py-2.5">Date</th>
+                  <th className="text-left font-medium px-4 py-2.5">Period</th>
+                  <th className="text-left font-medium px-4 py-2.5">From</th>
+                  <th className="text-left font-medium px-4 py-2.5">Reference</th>
+                  <th className="text-right font-medium px-4 py-2.5">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {payments.map((p) => (
+                  <tr key={p.id}>
+                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300 whitespace-nowrap">
+                      {fmtDate(p.paid_at)}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500">
+                      {p.period_from || p.period_to
+                        ? `${p.period_from ? fmtDate(p.period_from) : "…"} → ${p.period_to ? fmtDate(p.period_to) : "…"}`
+                        : "—"}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
+                      {p.account_name || "—"}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500">{p.reference || "—"}</td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-red-600 dark:text-red-400">
+                      {money(p.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <PayTaxModal
+        open={payOpen}
+        owed={summary.tax_owed}
+        onClose={() => setPayOpen(false)}
+        onPaid={load}
+      />
+    </div>
+  );
+}
+
+function PayTaxModal({ open, owed, onClose, onPaid }) {
+  const [amount, setAmount] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [periodFrom, setPeriodFrom] = useState("");
+  const [periodTo, setPeriodTo] = useState("");
+  const [reference, setReference] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setAmount(owed > 0 ? Number(owed).toFixed(2) : "");
+      setAccountId("");
+      setPeriodFrom("");
+      setPeriodTo("");
+      setReference("");
+    }
+  }, [open, owed]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const val = parseFloat(amount);
+    if (!val || val <= 0) return toast.error("Enter a valid amount");
+    if (val > Number(owed) + 0.001)
+      return toast.error(`That's more than the ${money(owed)} owed`);
+    if (!accountId) return toast.error("Choose the account paying the tax");
+
+    setSaving(true);
+    try {
+      const res = await taxAPI.pay({
+        amount: val,
+        account_id: accountId,
+        period_from: periodFrom || undefined,
+        period_to: periodTo || undefined,
+        reference: reference || undefined,
+      });
+      toast.success(res.data.message);
+      onPaid();
+      onClose();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Payment failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Pay tax">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 text-center">
+          <p className="text-2xl font-bold text-red-600">{money(owed)}</p>
+          <p className="text-xs text-gray-500 mt-0.5">currently owed</p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input
+            label="Amount *"
+            type="number"
+            min="0.01"
+            step="0.01"
+            max={owed}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+          <AccountSelect
+            direction="out"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+          />
+          <Input
+            label="Period from"
+            type="date"
+            value={periodFrom}
+            onChange={(e) => setPeriodFrom(e.target.value)}
+          />
+          <Input
+            label="Period to"
+            type="date"
+            value={periodTo}
+            onChange={(e) => setPeriodTo(e.target.value)}
+          />
+        </div>
+
+        <Input
+          label="Reference (optional)"
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          placeholder="Receipt or filing number"
+        />
+
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            <Banknote className="w-4 h-4" /> Pay {amount ? money(amount) : ""}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

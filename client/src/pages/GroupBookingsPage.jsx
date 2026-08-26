@@ -13,7 +13,6 @@ import {
   Modal,
   RowsPerPage,
 } from "../components/ui";
-import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   Users,
@@ -33,6 +32,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ function TicketRow({
 
       {/* Row body */}
       {expanded && (
-        <div className="p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
           {/* Passenger name */}
           <div className="col-span-2 md:col-span-1">
             <label className="field-label">Passenger Name *</label>
@@ -271,7 +271,7 @@ function TicketRow({
               Pricing
             </p>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-3">
               <div>
                 <label className="field-label">Base price</label>
                 <Input
@@ -497,7 +497,7 @@ function GroupStatementModal({ group, onClose }) {
       </div>
 
       {/* Header info */}
-      <div className="grid grid-cols-2 gap-4 text-sm">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         {[
           ["Group", group.group_label],
           ["Type", group.group_type],
@@ -703,6 +703,9 @@ function GroupBookingForm({ onSave, onCancel }) {
   const [sharedRoute, setSharedRoute] = useState(true);
   const [amountPaid, setAmountPaid] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  // One account for the whole group payment — it arrives once, then splits
+  // across the passengers it covers.
+  const [groupAccountId, setGroupAccountId] = useState("");
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -862,6 +865,7 @@ function GroupBookingForm({ onSave, onCancel }) {
         notes: notes || undefined,
         amount_paid: paidNow,
         payment_method: paymentMethod,
+        account_id: groupAccountId || undefined,
         tickets,
       });
       toast.success(`Group booking created — ${tickets.length} ticket(s)`);
@@ -886,7 +890,7 @@ function GroupBookingForm({ onSave, onCancel }) {
         </h3>
 
         {/* Group type selector */}
-        <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
           {Object.entries(GROUP_TYPE_META).map(([key, meta]) => {
             const Icon = meta.icon;
             return (
@@ -967,7 +971,7 @@ function GroupBookingForm({ onSave, onCancel }) {
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className="field-label">Group Label</label>
             <Input
@@ -991,7 +995,7 @@ function GroupBookingForm({ onSave, onCancel }) {
 
       {/* ── Step 2: Passengers ── */}
       <div>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
             2. Passengers ({tickets.length})
           </h3>
@@ -1019,7 +1023,7 @@ function GroupBookingForm({ onSave, onCancel }) {
       {/* ── Totals + Payment ── */}
       {tickets.length > 0 && (
         <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 space-y-4">
-          <div className="grid grid-cols-3 gap-4 text-center text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-center text-sm">
             <div>
               <p className="text-gray-400 text-xs uppercase tracking-wide">
                 Passengers
@@ -1070,17 +1074,12 @@ function GroupBookingForm({ onSave, onCancel }) {
             </div>
             <div>
               <label className="field-label">Payment method</label>
-              <Select
-                value={paymentMethod}
-                onChange={(e) => setPaymentMethod(e.target.value)}
-                disabled={!(parseFloat(amountPaid) > 0)}
-              >
-                {PAYMENT_METHODS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </Select>
+              <AccountSelect
+                direction="in"
+                label="Paid into"
+                value={groupAccountId}
+                onChange={(e) => setGroupAccountId(e.target.value)}
+              />
             </div>
             <div className="text-center">
               <p className="text-gray-400 text-xs uppercase tracking-wide">
@@ -1187,7 +1186,7 @@ export default function GroupBookingsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <Users className="w-6 h-6 text-blue-500" />

@@ -16,12 +16,14 @@ import CustomersPage from "./pages/CustomersPage";
 import ReportsPage from "./pages/ReportsPage";
 import AirlinesPage from "./pages/AirlinesPage";
 import FinancialsPage from "./pages/FinancialsPage";
+import AccountsPage from "./pages/AccountsPage";
 import AgentsPage from "./pages/AgentsPage";
 import VisaPage from "./pages/VisaPage";
 import PackagesPage from "./pages/PackagesPage";
 import UsersPage from "./pages/UsersPage";
 import BusinessesPage from "./pages/BusinessesPage";
 import ProfilePage from "./pages/ProfilePage";
+import TrackPage from "./pages/TrackPage";
 
 const ProtectedRoute = ({ children, roles }) => {
   const { user, loading, hasRole } = useAuth();
@@ -51,6 +53,12 @@ const PublicRoute = ({ children }) => {
 function AppRoutes() {
   return (
     <Routes>
+      {/* Public — no login, and deliberately not wrapped in PublicRoute,
+          which would bounce a signed-in member of staff to the dashboard
+          when they only wanted to check a parcel. */}
+      <Route path="/track" element={<TrackPage />} />
+      <Route path="/track/:code" element={<TrackPage />} />
+
       <Route
         path="/login"
         element={
@@ -129,6 +137,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute roles={["admin", "accountant"]}>
             <FinancialsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/accounts"
+        element={
+          <ProtectedRoute roles={["admin", "accountant"]}>
+            <AccountsPage />
           </ProtectedRoute>
         }
       />

@@ -15,6 +15,7 @@ const { body, validationResult } = require("express-validator");
 const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const { hasTable } = require("../services/schemaInfo");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
 
@@ -276,14 +277,15 @@ const createPackage = async (req, res, next) => {
 
       if (paid > 0) {
         await client.query(
-          `INSERT INTO package_payments (business_id, package_id, collected_by, amount, method, note)
-           VALUES ($1,$2,$3,$4,$5,'Initial payment')`,
+          `INSERT INTO package_payments (business_id, package_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,'Initial payment', $6)`,
           [
             req.businessId,
             created.id,
             req.user.id,
             paid,
             payment_method || "cash",
+            await requireAccount(req.body, req.businessId, client, "payment"),
           ],
         );
       }
@@ -325,9 +327,10 @@ const getPackage = async (req, res, next) => {
         [req.params.id, req.businessId],
       ),
       query(
-        `SELECT p.*, u.name AS collected_by_name
+        `SELECT p.*, u.name AS collected_by_name, a.name AS account_name
          FROM package_payments p
          JOIN users u ON u.id = p.collected_by
+         LEFT JOIN payment_accounts a ON a.id = p.account_id
          WHERE p.package_id = $1 AND p.business_id = $2
          ORDER BY p.created_at DESC`,
         [req.params.id, req.businessId],
@@ -473,8 +476,8 @@ const addPackagePayment = async (req, res, next) => {
 
     const updated = await withTransaction(async (client) => {
       await client.query(
-        `INSERT INTO package_payments (business_id, package_id, collected_by, amount, method, note)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
+        `INSERT INTO package_payments (business_id, package_id, collected_by, amount, method, note, account_id)
+         VALUES ($1,$2,$3,$4,$5,$6, $7)`,
         [
           req.businessId,
           p.id,
@@ -482,6 +485,7 @@ const addPackagePayment = async (req, res, next) => {
           amount,
           req.body.method || "cash",
           req.body.note || null,
+          await requireAccount(req.body, req.businessId, client, "payment"),
         ],
       );
       const newPaid = round2(Number(p.amount_paid) + amount);

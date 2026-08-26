@@ -95,7 +95,7 @@ export default function ProfilePage() {
           </h2>
         </div>
 
-        <div className="grid grid-cols-2 gap-4 mb-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
           {[
             ["Email", profile.email],
             [
@@ -152,7 +152,7 @@ export default function ProfilePage() {
               Agency
             </h2>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {[
               ["Agency Name", profile.business_name],
               ["Agency Email", profile.business_email || "—"],

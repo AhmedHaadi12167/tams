@@ -165,7 +165,7 @@ export default function BusinessesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             Businesses
@@ -181,7 +181,7 @@ export default function BusinessesPage() {
 
       {/* Platform overview */}
       {overview && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard
             title="Total Businesses"
             value={ov.total_businesses || 0}
@@ -278,7 +278,7 @@ export default function BusinessesPage() {
                 <Badge variant={statusVariant[biz.status]}>{biz.status}</Badge>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 my-3 py-3 border-y border-gray-100 dark:border-gray-700/50">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 my-3 py-3 border-y border-gray-100 dark:border-gray-700/50">
                 <div className="text-center">
                   <p className="text-lg font-bold text-gray-900 dark:text-white">
                     {biz.tickets_this_month}
@@ -362,7 +362,7 @@ export default function BusinessesPage() {
                 onChange={setC("business_name")}
                 required
               />
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Input
                   label="Agency email *"
                   type="email"
@@ -500,7 +500,7 @@ export default function BusinessesPage() {
         ) : (
           viewData && (
             <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <StatCard
                   title="Total Tickets"
                   value={viewData.stats.total_tickets}
@@ -534,7 +534,7 @@ export default function BusinessesPage() {
                   {viewData.users.map((u) => (
                     <div
                       key={u.id}
-                      className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+                      className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
                     >
                       <div>
                         <p className="text-sm font-medium text-gray-900 dark:text-white">

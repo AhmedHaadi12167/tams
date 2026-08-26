@@ -28,9 +28,11 @@ import {
   ClipboardList,
   Printer,
   Plane,
+  Ban,
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const statusVariant = {
   active: "success",
@@ -40,13 +42,296 @@ const statusVariant = {
 const typeVariant = { LOCAL: "info", INTERNATIONAL: "purple" };
 const paymentVariant = { paid: "success", partial: "warning", unpaid: "danger" };
 
+/**
+ * What the customer still owes.
+ *
+ * A written-off amount is money the agency decided not to chase when the
+ * ticket was cancelled. It is settled — just not by being paid — so it has to
+ * come off the balance. Leaving it in showed a cancelled booking as still
+ * owing hundreds, which is exactly the debt the write-off was meant to clear.
+ */
 const balanceOf = (t) =>
-  (parseFloat(t.selling_price) || 0) - (parseFloat(t.amount_paid) || 0);
+  Math.round(
+    ((parseFloat(t.selling_price) || 0) -
+      (parseFloat(t.amount_paid) || 0) -
+      (parseFloat(t.written_off) || 0)) * 100,
+  ) / 100;
+
+/** A cancelled ticket is finished with, however it was settled. */
+const isSettled = (t) => t.status === "cancelled" || balanceOf(t) <= 0.001;
+
+/**
+ * How a cancelled ticket was settled — every line of it.
+ *
+ * One cancellation can do three things at once: hand some money back, keep
+ * some as a fee, and forgive whatever was still owed. Showing only the first
+ * of those that happens to be non-zero is how a refund gets paid a second
+ * time, so this returns them all.
+ */
+const settlementLines = (t) => {
+  const lines = [];
+  const refunded = parseFloat(t.refunded_amount) || 0;
+  const kept = parseFloat(t.cancellation_fee) || 0;
+  const written = parseFloat(t.written_off) || 0;
+  if (refunded > 0) lines.push(`$${refunded.toFixed(2)} refunded`);
+  if (kept > 0) lines.push(`$${kept.toFixed(2)} kept as fee`);
+  if (written > 0) lines.push(`$${written.toFixed(2)} written off`);
+  return lines.length ? lines : ["Nothing owed either way"];
+};
+
+// ─── Cancel & Refund ─────────────────────────────────────────────────────────
+//
+// Three amounts, and they don't depend on each other: what goes back to the
+// customer, what the agency keeps, and what the airline returns. The form
+// shows the fee being computed as you type, because "how much am I actually
+// keeping?" is the question people get wrong under pressure.
+function CancelTicketForm({ ticket, onDone, onCancel }) {
+  const paid = parseFloat(ticket.amount_paid) || 0;
+  const airlinePaid = parseFloat(ticket.airline_paid) || 0;
+
+  const [refund, setRefund] = useState(
+    Math.max(paid - (parseFloat(ticket.tax) || 0), 0).toFixed(2),
+  );
+  const [airlineRefund, setAirlineRefund] = useState("0.00");
+  const [accountId, setAccountId] = useState("");
+  const [airlineAccountId, setAirlineAccountId] = useState("");
+  const [reason, setReason] = useState("");
+  const [writeOff, setWriteOff] = useState(true);
+  // Ticked only when the airline hands the tax back with the fare. Left
+  // alone, the tax stays owed to the government and cannot be refunded.
+  const [refundTax, setRefundTax] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // What the customer still owes on a journey that won't happen.
+  const outstanding =
+    Math.round(Math.max((parseFloat(ticket.selling_price) || 0) - paid, 0) * 100) / 100;
+
+  // The government's share of what the customer paid. It is owed whether or
+  // not anyone flies, so it is not the agency's to give back.
+  const tax = Math.round((parseFloat(ticket.tax) || 0) * 100) / 100;
+  const refundable =
+    Math.round(Math.max(paid - (refundTax ? 0 : tax), 0) * 100) / 100;
+
+  const refundVal = parseFloat(refund) || 0;
+  const airlineVal = parseFloat(airlineRefund) || 0;
+  const kept = Math.round((paid - refundVal) * 100) / 100;
+  // The tax inside what's kept isn't earned — it's held for the government.
+  const taxRetained = refundTax ? 0 : Math.min(tax, Math.max(kept, 0));
+  const fee = Math.round((kept - taxRetained) * 100) / 100;
+  const tooMuch = refundVal > refundable + 0.001;
+  const airlineTooMuch = airlineVal > airlinePaid + 0.001;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (tooMuch)
+      return toast.error(
+        `You can't refund more than $${refundable.toFixed(2)}`,
+      );
+    if (airlineTooMuch)
+      return toast.error(
+        `The airline can't return more than the $${airlinePaid.toFixed(2)} you paid them`,
+      );
+    setSaving(true);
+    try {
+      const res = await ticketsAPI.cancel(ticket.id, {
+        refund_amount: refundVal,
+        airline_refund: airlineVal,
+        account_id: accountId || undefined,
+        airline_account_id: airlineAccountId || undefined,
+        write_off: outstanding > 0 ? writeOff : undefined,
+        refund_tax: refundTax || undefined,
+        reason: reason || undefined,
+      });
+      toast.success(res.data.message);
+      onDone();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Could not cancel the ticket");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4">
+        <p className="text-sm font-medium text-gray-900 dark:text-white">
+          {ticket.passenger_name}
+        </p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          {ticket.from_city} → {ticket.to_city} · {fmtDate(ticket.flight_date)}
+        </p>
+        <div className="flex gap-6 mt-2 text-sm">
+          <span className="text-gray-600 dark:text-gray-300">
+            Customer paid{" "}
+            <strong className="text-gray-900 dark:text-white">
+              ${paid.toFixed(2)}
+            </strong>
+          </span>
+          {airlinePaid > 0 && (
+            <span className="text-gray-600 dark:text-gray-300">
+              Paid to airline{" "}
+              <strong className="text-gray-900 dark:text-white">
+                ${airlinePaid.toFixed(2)}
+              </strong>
+            </span>
+          )}
+          {tax > 0 && (
+            <span className="text-gray-600 dark:text-gray-300">
+              Of which tax{" "}
+              <strong className="text-gray-900 dark:text-white">
+                ${tax.toFixed(2)}
+              </strong>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Customer side */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Input
+          label="Refund to customer"
+          type="number"
+          min="0"
+          step="0.01"
+          max={refundable}
+          value={refund}
+          onChange={(e) => setRefund(e.target.value)}
+          error={
+            tooMuch ? `More than the $${refundable.toFixed(2)} refundable` : undefined
+          }
+          hint={
+            tax > 0 && !refundTax
+              ? `$${paid.toFixed(2)} paid less $${tax.toFixed(2)} tax`
+              : undefined
+          }
+        />
+        <AccountSelect
+          direction="out"
+          label="Refund from"
+          value={accountId}
+          onChange={(e) => setAccountId(e.target.value)}
+        />
+      </div>
+
+      {tax > 0 && (
+        <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-3">
+          <p className="text-sm text-blue-900 dark:text-blue-100">
+            <strong>${tax.toFixed(2)}</strong> of this ticket is government
+            tax. It is owed whether or not the passenger flies, so it is not
+            refundable and stays in the Tax section.
+          </p>
+          <label className="flex items-start gap-2.5 cursor-pointer mt-2">
+            <input
+              type="checkbox"
+              checked={refundTax}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setRefundTax(on);
+                setRefund(Math.max(paid - (on ? 0 : tax), 0).toFixed(2));
+              }}
+              className="mt-0.5 rounded"
+            />
+            <span className="text-sm text-blue-900 dark:text-blue-100">
+              The airline returned the tax as well
+              <span className="block text-xs text-blue-700 dark:text-blue-300 mt-0.5">
+                Usually only when the airline cancelled the flight. Ticking
+                this clears the ${tax.toFixed(2)} from what you owe the
+                government and lets the whole ${paid.toFixed(2)} go back.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+
+      {fee !== 0 && !tooMuch && (
+        <div className="rounded-xl bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 px-3 py-2">
+          <p className="text-sm text-green-800 dark:text-green-200">
+            You keep <strong>${fee.toFixed(2)}</strong> as a cancellation fee.
+            The sale stops counting, but this stays as income.
+            {taxRetained > 0 && (
+              <span className="block mt-1">
+                The other ${taxRetained.toFixed(2)} you're holding is tax, not
+                income — it goes to the government.
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* Airline side */}
+      {airlinePaid > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 border-t border-gray-200 dark:border-gray-700">
+          <Input
+            label="Airline refunds you"
+            type="number"
+            min="0"
+            step="0.01"
+            max={airlinePaid}
+            value={airlineRefund}
+            onChange={(e) => setAirlineRefund(e.target.value)}
+            error={
+              airlineTooMuch
+                ? `More than the $${airlinePaid.toFixed(2)} you paid`
+                : undefined
+            }
+          />
+          <AccountSelect
+            direction="in"
+            label="Refund into"
+            value={airlineAccountId}
+            onChange={(e) => setAirlineAccountId(e.target.value)}
+          />
+        </div>
+      )}
+
+      {/* Still owing on a cancelled journey */}
+      {outstanding > 0 && (
+        <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-3">
+          <label className="flex items-start gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={writeOff}
+              onChange={(e) => setWriteOff(e.target.checked)}
+              className="mt-0.5 rounded"
+            />
+            <span className="text-sm text-amber-900 dark:text-amber-100">
+              Write off the{" "}
+              <strong>${outstanding.toFixed(2)}</strong> still owed — the
+              customer pays nothing more.
+              <span className="block text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                No money moves. The amount is recorded as a loss so it shows in
+                your profit rather than disappearing. Untick to keep chasing it.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+
+      <Input
+        label="Reason (optional)"
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="Passenger changed plans, flight cancelled…"
+      />
+
+      <div className="flex gap-3 justify-end pt-1">
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Keep ticket
+        </Button>
+        <Button type="submit" variant="danger" loading={saving}>
+          <Ban className="w-4 h-4" /> Cancel ticket
+        </Button>
+      </div>
+    </form>
+  );
+}
 
 // ─── Collect Payment Modal ───────────────────────────────────────────────────
 function CollectPaymentForm({ ticket, onDone, onCancel }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
+  // Which account the money lands in — the Accounts balance depends on it.
+  const [accountId, setAccountId] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const balance = balanceOf(ticket);
@@ -59,7 +344,7 @@ function CollectPaymentForm({ ticket, onDone, onCancel }) {
       return toast.error(`Amount exceeds balance ($${balance.toFixed(2)})`);
     setSaving(true);
     try {
-      await ticketsAPI.addPayment(ticket.id, { amount: val, method, note });
+      await ticketsAPI.addPayment(ticket.id, { amount: val, method, account_id: accountId || undefined, note });
       toast.success(`$${val.toFixed(2)} collected from ${ticket.passenger_name}`);
       onDone();
     } catch (err) {
@@ -71,7 +356,7 @@ function CollectPaymentForm({ ticket, onDone, onCancel }) {
 
   return (
     <form onSubmit={submit} className="space-y-4">
-      <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 grid grid-cols-3 gap-3 text-center">
+      <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-center">
         <div>
           <p className="text-xs text-gray-500 uppercase">Total</p>
           <p className="font-bold text-gray-900 dark:text-white">
@@ -101,17 +386,11 @@ function CollectPaymentForm({ ticket, onDone, onCancel }) {
         placeholder={balance.toFixed(2)}
         required
       />
-      <Select
-        label="Method"
-        value={method}
-        onChange={(e) => setMethod(e.target.value)}
-      >
-        <option value="cash">Cash</option>
-        <option value="evc">EVC Plus</option>
-        <option value="edahab">eDahab</option>
-        <option value="bank">Bank transfer</option>
-        <option value="other">Other</option>
-      </Select>
+      <AccountSelect
+        direction="in"
+        value={accountId}
+        onChange={(e) => setAccountId(e.target.value)}
+      />
       <Input
         label="Note (optional)"
         value={note}
@@ -255,7 +534,7 @@ function ManifestModal({ open, onClose }) {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
               {[
                 ["Passengers", summary.passengers, "text-gray-900 dark:text-white"],
                 ["Airlines", summary.airlines, "text-gray-900 dark:text-white"],
@@ -323,7 +602,9 @@ function ManifestModal({ open, onClose }) {
 }
 
 export default function TicketsPage() {
-  const { canWrite } = useAuth();
+  const { canWrite, hasRole } = useAuth();
+  // Cancelling pays money back out, so it needs more than write access.
+  const canCancel = hasRole("super_admin", "admin", "accountant");
   const [tickets, setTickets] = useState([]);
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(true);
@@ -337,6 +618,7 @@ export default function TicketsPage() {
   });
   const [modal, setModal] = useState({ open: false, mode: null, ticket: null });
   const [payModal, setPayModal] = useState(null); // ticket being paid
+  const [cancelModal, setCancelModal] = useState(null); // ticket being cancelled
   const [payments, setPayments] = useState([]); // history in view modal
   const [manifestOpen, setManifestOpen] = useState(false);
 
@@ -391,7 +673,7 @@ export default function TicketsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             Tickets
@@ -571,12 +853,24 @@ export default function TicketsPage() {
                     <td className="px-4 py-3">
                       <Badge
                         variant={
-                          paymentVariant[ticket.payment_status] || "danger"
+                          ticket.status === "cancelled"
+                            ? "default"
+                            : paymentVariant[ticket.payment_status] || "danger"
                         }
                       >
-                        {ticket.payment_status || "unpaid"}
+                        {ticket.status === "cancelled"
+                          ? "settled"
+                          : ticket.payment_status || "unpaid"}
                       </Badge>
-                      {balanceOf(ticket) > 0 && (
+                      {ticket.status === "cancelled" ? (
+                        <span className="block text-xs text-gray-400 mt-0.5">
+                          {settlementLines(ticket).map((l) => (
+                            <span key={l} className="block">
+                              {l}
+                            </span>
+                          ))}
+                        </span>
+                      ) : balanceOf(ticket) > 0 && (
                         <p className="text-xs text-red-500 font-semibold mt-0.5">
                           Bal: ${balanceOf(ticket).toFixed(2)}
                         </p>
@@ -596,7 +890,7 @@ export default function TicketsPage() {
                         >
                           <Eye className="w-4 h-4" />
                         </Button>
-                        {balanceOf(ticket) > 0 &&
+                        {!isSettled(ticket) &&
                           ticket.status === "active" && (
                             <Button
                               variant="ghost"
@@ -608,6 +902,17 @@ export default function TicketsPage() {
                               <Banknote className="w-4 h-4" />
                             </Button>
                           )}
+                        {ticket.status === "active" && canCancel && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setCancelModal(ticket)}
+                            title="Cancel and refund"
+                            className="text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
+                          >
+                            <Ban className="w-4 h-4" />
+                          </Button>
+                        )}
                         {canWrite() && (
                           <>
                             <Button
@@ -657,6 +962,25 @@ export default function TicketsPage() {
           onSave={handleSave}
           onCancel={closeModal}
         />
+      </Modal>
+
+      {/* Cancel & Refund Modal */}
+      <Modal
+        open={!!cancelModal}
+        onClose={() => setCancelModal(null)}
+        title={cancelModal ? `Cancel ticket — ${cancelModal.passenger_name}` : ""}
+        size="lg"
+      >
+        {cancelModal && (
+          <CancelTicketForm
+            ticket={cancelModal}
+            onDone={() => {
+              setCancelModal(null);
+              load();
+            }}
+            onCancel={() => setCancelModal(null)}
+          />
+        )}
       </Modal>
 
       {/* Collect Payment Modal */}
@@ -738,12 +1062,32 @@ export default function TicketsPage() {
                 "Commission",
                 `$${Number(modal.ticket.agent_commission || 0).toFixed(2)}`,
               ],
-              ["Revenue (net)", `$${Number(modal.ticket.revenue).toFixed(2)}`],
+              ...(Number(modal.ticket.tax) > 0
+                ? [
+                    [
+                      "Tax (government)",
+                      `$${Number(modal.ticket.tax).toFixed(2)}` +
+                        (Number(modal.ticket.tax_refunded) > 0
+                          ? " — returned by the airline"
+                          : modal.ticket.status === "cancelled"
+                            ? " — still owed, not refundable"
+                            : ""),
+                    ],
+                  ]
+                : []),
+              [
+                modal.ticket.status === "cancelled"
+                  ? "Revenue (kept less fare lost)"
+                  : "Revenue (net)",
+                `$${Number(modal.ticket.revenue).toFixed(2)}`,
+              ],
               [
                 "Amount Paid",
                 `$${Number(modal.ticket.amount_paid || 0).toFixed(2)}`,
               ],
-              ["Balance", `$${balanceOf(modal.ticket).toFixed(2)}`],
+              modal.ticket.status === "cancelled"
+                ? ["Settled by", settlementLines(modal.ticket).join(" · ")]
+                : ["Balance", `$${balanceOf(modal.ticket).toFixed(2)}`],
               [
                 "Payment Status",
                 (modal.ticket.payment_status || "unpaid").toUpperCase(),
@@ -781,14 +1125,14 @@ export default function TicketsPage() {
                   {payments.map((p) => (
                     <div
                       key={p.id}
-                      className="flex items-center justify-between text-sm py-1.5 px-3 bg-green-50 dark:bg-green-900/10 rounded-lg"
+                      className="flex flex-wrap items-center justify-between gap-3 text-sm py-1.5 px-3 bg-green-50 dark:bg-green-900/10 rounded-lg"
                     >
                       <div>
                         <span className="font-semibold text-green-700 dark:text-green-400">
                           ${Number(p.amount).toFixed(2)}
                         </span>
                         <span className="text-xs text-gray-500 ml-2 capitalize">
-                          {p.method}
+                          {p.account_name || p.method}
                         </span>
                       </div>
                       <div className="text-right text-xs text-gray-500">
@@ -803,7 +1147,7 @@ export default function TicketsPage() {
               </div>
             )}
 
-            {balanceOf(modal.ticket) > 0 &&
+            {!isSettled(modal.ticket) &&
               modal.ticket.status === "active" && (
                 <Button
                   onClick={() => {

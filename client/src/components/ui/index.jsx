@@ -49,7 +49,7 @@ export const Button = ({
 // never copied anywhere, and the button is skipped in tab order so it
 // can't interrupt typing your password and pressing Enter.
 export const Input = React.forwardRef(
-  ({ label, error, className = "", type = "text", ...props }, ref) => {
+  ({ label, error, hint, className = "", type = "text", ...props }, ref) => {
     const isPassword = type === "password";
     const [revealed, setRevealed] = React.useState(false);
 
@@ -99,7 +99,13 @@ export const Input = React.forwardRef(
         ) : (
           field
         )}
-        {error && <p className="text-xs text-red-500">{error}</p>}
+        {error ? (
+          <p className="text-xs text-red-500">{error}</p>
+        ) : (
+          hint && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">{hint}</p>
+          )
+        )}
       </div>
     );
   },

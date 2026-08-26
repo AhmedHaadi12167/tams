@@ -85,6 +85,7 @@ export const ticketsAPI = {
   create: (data) => api.post("/tickets", data),
   update: (id, data) => api.put(`/tickets/${id}`, data),
   delete: (id) => api.delete(`/tickets/${id}`),
+  cancel: (id, data) => api.post(`/tickets/${id}/cancel`, data),
   addPayment: (id, data) => api.post(`/tickets/${id}/payments`, data),
   payments: (id) => api.get(`/tickets/${id}/payments`),
 };
@@ -101,6 +102,7 @@ export const cargoAPI = {
       timeout: 60000,
     }),
   deletePhoto: (id) => api.delete(`/cargo/${id}/photo`),
+  addPayment: (id, data) => api.post(`/cargo/${id}/payments`, data),
 };
 
 // Uploaded files are served from the API host, not the SPA route
@@ -246,6 +248,22 @@ export const usersAPI = {
   create: (data) => api.post("/users", data),
   update: (id, data) => api.put(`/users/${id}`, data),
   delete: (id) => api.delete(`/users/${id}`),
+};
+
+export const accountsAPI = {
+  list: () => api.get("/accounts"),
+  ledger: (params) => api.get("/accounts/ledger", { params }),
+  create: (data) => api.post("/accounts", data),
+  update: (id, data) => api.put(`/accounts/${id}`, data),
+  delete: (id) => api.delete(`/accounts/${id}`),
+  transfer: (data) => api.post("/accounts/transfer", data),
+  assign: (data) => api.put("/accounts/assign", data),
+};
+
+export const taxAPI = {
+  get: (params) => api.get("/tax", { params }),
+  pay: (data) => api.post("/tax/payments", data),
+  deletePayment: (id) => api.delete(`/tax/payments/${id}`),
 };
 
 export const businessAPI = {

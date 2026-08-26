@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { customersAPI, ticketsAPI, downloadBlob } from "../services/api";
+import { customersAPI, ticketsAPI, downloadBlob, visasAPI, packagesAPI } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
   Button,
@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const money = (v) => `$${Number(v || 0).toFixed(2)}`;
 const payBadge = { paid: "success", partial: "warning", unpaid: "danger" };
@@ -62,7 +63,7 @@ const printStatement = (data) => {
         <td>${fmtDate(p.created_at, "dd MMM yyyy HH:mm")}</td>
         <td>${p.passenger_name}</td>
         <td>${money(p.amount)}</td>
-        <td>${p.method || "cash"}</td>
+        <td>${p.account_name || p.method || "—"}</td>
         <td>${p.collected_by_name}</td>
       </tr>`,
     )
@@ -202,11 +203,37 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
 };
 
 // ─── Collect Payment (from statement) ────────────────────────────────────────
-function CollectForm({ ticket, onDone, onCancel }) {
+//
+// A customer owing money on a visa or a Hajj package is owed-from in exactly
+// the same way as one owing on a ticket, so the statement collects all three
+// the same way. Previously only tickets could be settled here, which meant
+// walking to another screen to take money the statement had just shown you.
+const COLLECT = {
+  ticket: {
+    api: (id, body) => ticketsAPI.addPayment(id, body),
+    title: (r) => r.passenger_name,
+    subtitle: (r) => `${r.from_city} → ${r.to_city}`,
+  },
+  visa: {
+    api: (id, body) => visasAPI.addPayment(id, body),
+    title: (r) => r.applicant_name,
+    subtitle: (r) => `${r.destination_country} visa`,
+  },
+  package: {
+    api: (id, body) => packagesAPI.addPayment(id, body),
+    title: (r) => r.label,
+    subtitle: (r) => `${r.package_type} package`,
+  },
+};
+
+function CollectForm({ target, onDone, onCancel }) {
   const [amount, setAmount] = useState("");
-  const [method, setMethod] = useState("cash");
+  const [accountId, setAccountId] = useState("");
   const [saving, setSaving] = useState(false);
-  const balance = Number(ticket.balance) || 0;
+
+  const kind = COLLECT[target.kind] || COLLECT.ticket;
+  const record = target.record;
+  const balance = Number(record.balance) || 0;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -216,8 +243,11 @@ function CollectForm({ ticket, onDone, onCancel }) {
       return toast.error(`Amount exceeds balance (${money(balance)})`);
     setSaving(true);
     try {
-      await ticketsAPI.addPayment(ticket.id, { amount: val, method });
-      toast.success(`${money(val)} collected from ${ticket.passenger_name}`);
+      await kind.api(record.id, {
+        amount: val,
+        account_id: accountId || undefined,
+      });
+      toast.success(`${money(val)} collected from ${kind.title(record)}`);
       onDone();
     } catch (err) {
       toast.error(err.response?.data?.message || "Failed to collect payment");
@@ -230,7 +260,7 @@ function CollectForm({ ticket, onDone, onCancel }) {
     <form onSubmit={submit} className="space-y-4">
       <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4 text-center">
         <p className="text-sm text-gray-600 dark:text-gray-300">
-          {ticket.passenger_name} · {ticket.from_city} → {ticket.to_city}
+          {kind.title(record)} · {kind.subtitle(record)}
         </p>
         <p className="text-lg font-bold text-red-600 mt-1">
           Balance: {money(balance)}
@@ -247,22 +277,11 @@ function CollectForm({ ticket, onDone, onCancel }) {
         placeholder={balance.toFixed(2)}
         required
       />
-      <div className="flex flex-col gap-1">
-        <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-          Method
-        </label>
-        <select
-          value={method}
-          onChange={(e) => setMethod(e.target.value)}
-          className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white"
-        >
-          <option value="cash">Cash</option>
-          <option value="evc">EVC Plus</option>
-          <option value="edahab">eDahab</option>
-          <option value="bank">Bank transfer</option>
-          <option value="other">Other</option>
-        </select>
-      </div>
+      <AccountSelect
+        direction="in"
+        value={accountId}
+        onChange={(e) => setAccountId(e.target.value)}
+      />
       <div className="flex gap-3 justify-end">
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
@@ -477,8 +496,8 @@ function StatementModal({
               <thead>
                 <tr className="bg-gray-50 dark:bg-gray-800">
                   <th className="px-3 py-2 w-8"></th>
-                  {["Applicant", "Country", "Type", "Applied", "Status", "Total", "Paid", "Balance"].map((h) => (
-                    <th key={h} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                  {["Applicant", "Country", "Type", "Applied", "Status", "Total", "Paid", "Balance", ""].map((h, hi) => (
+                    <th key={h || hi} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
                       {h}
                     </th>
                   ))}
@@ -509,6 +528,19 @@ function StatementModal({
                     <td className={`px-3 py-2 font-semibold ${Number(v.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
                       {money(v.balance)}
                     </td>
+                    <td className="px-3 py-2 text-right">
+                      {Number(v.balance) > 0 && onCollect && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onCollect(v, "visa")}
+                          title="Collect payment"
+                          className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
+                        >
+                          <Banknote className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -528,8 +560,8 @@ function StatementModal({
               <thead>
                 <tr className="bg-gray-50 dark:bg-gray-800">
                   <th className="px-3 py-2 w-8"></th>
-                  {["Package", "Type", "Pax", "Departs", "Status", "Total", "Paid", "Balance"].map((h) => (
-                    <th key={h} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                  {["Package", "Type", "Pax", "Departs", "Status", "Total", "Paid", "Balance", ""].map((h, hi) => (
+                    <th key={h || hi} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
                       {h}
                     </th>
                   ))}
@@ -560,6 +592,19 @@ function StatementModal({
                     <td className={`px-3 py-2 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
                       {money(p.balance)}
                     </td>
+                    <td className="px-3 py-2 text-right">
+                      {Number(p.balance) > 0 && onCollect && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onCollect(p, "package")}
+                          title="Collect payment"
+                          className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
+                        >
+                          <Banknote className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -579,14 +624,14 @@ function StatementModal({
             {payments.map((p, i) => (
               <div
                 key={i}
-                className="flex items-center justify-between text-sm py-1.5 px-3 bg-green-50 dark:bg-green-900/10 rounded-lg"
+                className="flex flex-wrap items-center justify-between gap-3 text-sm py-1.5 px-3 bg-green-50 dark:bg-green-900/10 rounded-lg"
               >
                 <div>
                   <span className="font-semibold text-green-700 dark:text-green-400">
                     {money(p.amount)}
                   </span>
                   <span className="text-xs text-gray-500 ml-2">
-                    {p.passenger_name} · {p.method}
+                    {p.passenger_name} · {p.account_name || p.method}
                   </span>
                 </div>
                 <div className="text-right text-xs text-gray-500">
@@ -619,7 +664,8 @@ export default function CustomersPage() {
   const [stmtData, setStmtData] = useState(null);
   const [stmtLoading, setStmtLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [collectTicket, setCollectTicket] = useState(null);
+  // What the user clicked Collect on: { kind: 'ticket'|'visa'|'package', record }
+  const [collectTarget, setCollectTarget] = useState(null);
   // What goes on the statement. Everything is selected by default.
   const [selectedTicketIds, setSelectedTicketIds] = useState([]);
   const [selectedVisaIds, setSelectedVisaIds] = useState([]);
@@ -720,7 +766,7 @@ export default function CustomersPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
             Customers
@@ -923,7 +969,7 @@ export default function CustomersPage() {
         ) : (
           viewData && (
             <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {[
                   ["Name", viewData.customer.name],
                   ["Phone", viewData.customer.phone || "—"],
@@ -963,7 +1009,7 @@ export default function CustomersPage() {
                     {viewData.tickets.map((t) => (
                       <div
                         key={t.id}
-                        className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+                        className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
                       >
                         <div>
                           <p className="text-sm font-medium text-gray-900 dark:text-white">
@@ -1051,27 +1097,27 @@ export default function CustomersPage() {
               )
             }
             onDownload={() => downloadStatementPDF(stmtModal)}
-            onCollect={(t) => setCollectTicket(t)}
+            onCollect={(record, kind = "ticket") => setCollectTarget({ kind, record })}
           />
         )}
       </Modal>
 
       {/* Collect Payment Modal */}
       <Modal
-        open={!!collectTicket}
-        onClose={() => setCollectTicket(null)}
+        open={!!collectTarget}
+        onClose={() => setCollectTarget(null)}
         title="Collect Payment"
         size="md"
       >
-        {collectTicket && (
+        {collectTarget && (
           <CollectForm
-            ticket={collectTicket}
+            target={collectTarget}
             onDone={() => {
-              setCollectTicket(null);
+              setCollectTarget(null);
               if (stmtModal) openStatement(stmtModal); // refresh statement
               load(); // refresh counts
             }}
-            onCancel={() => setCollectTicket(null)}
+            onCancel={() => setCollectTarget(null)}
           />
         )}
       </Modal>

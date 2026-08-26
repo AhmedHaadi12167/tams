@@ -21,6 +21,7 @@ import {
   Stamp,
   Luggage,
   UserRound,
+  PiggyBank,
 } from "lucide-react";
 
 // The super admin runs the platform; they do not run an agency. Tickets,
@@ -91,9 +92,15 @@ const NAV_ITEMS = [
     roles: ["admin", "accountant"],
   },
   {
+    path: "/accounts",
+    label: "Accounts",
+    icon: Wallet,
+    roles: ["admin", "accountant"],
+  },
+  {
     path: "/financials",
     label: "Financials",
-    icon: Wallet,
+    icon: PiggyBank,
     roles: ["admin", "accountant"],
   },
   { path: "/users", label: "Team", icon: Settings, roles: ["admin"] },

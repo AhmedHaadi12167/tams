@@ -1,19 +1,52 @@
 const { body, validationResult } = require("express-validator");
-const { query } = require("../config/db");
+const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const { v4: uuidv4 } = require("uuid");
+const { hasTable } = require("../services/schemaInfo");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
+
+/**
+ * A shipment is priced one of two ways, and which one is used depends on
+ * whether the goods were actually weighed:
+ *
+ *   by weight  weight_kg × price_per_kg
+ *   flat       a total typed straight in, for a box of electronics that
+ *              nobody is going to put on a scale
+ *
+ * So none of the three fields can be required on its own. What is required
+ * is that the shipment ends up with a price by one route or the other, which
+ * is checked below rather than field by field.
+ */
+const hasPrice = (b) => {
+  const flat = parseFloat(b.flat_price);
+  if (Number.isFinite(flat) && flat > 0) return true;
+  const w = parseFloat(b.weight_kg);
+  const r = parseFloat(b.price_per_kg);
+  return Number.isFinite(w) && w > 0 && Number.isFinite(r) && r > 0;
+};
 
 const cargoValidation = [
-  body("item_description")
-    .trim()
-    .notEmpty()
-    .withMessage("Item description is required"),
+  // Description is optional — "the blue box" is sometimes all there is.
+  body("item_description").optional({ nullable: true }).trim(),
   body("weight_kg")
-    .isFloat({ min: 0.1 })
-    .withMessage("Weight must be greater than 0"),
+    .optional({ nullable: true, checkFalsy: true })
+    .isFloat({ min: 0 })
+    .withMessage("Weight must be a positive number"),
   body("price_per_kg")
+    .optional({ nullable: true, checkFalsy: true })
     .isFloat({ min: 0 })
     .withMessage("Price per kg must be a positive number"),
+  body("flat_price")
+    .optional({ nullable: true, checkFalsy: true })
+    .isFloat({ min: 0 })
+    .withMessage("Price must be a positive number"),
+  body().custom((b) => {
+    if (!hasPrice(b))
+      throw new Error(
+        "Give the shipment a price — either a weight and a rate per kg, or a total price.",
+      );
+    return true;
+  }),
   body("sender_name").trim().notEmpty().withMessage("Sender name is required"),
   body("from_city").trim().notEmpty().withMessage("From city is required"),
   body("receiver_name")
@@ -122,6 +155,10 @@ const createCargo = async (req, res, next) => {
       notes,
       amount_paid,
       photo_url,
+      flat_price,
+      arrived_city,
+      arrived_office,
+      arrived_phone,
     } = req.body;
 
     // Force uppercase on names
@@ -130,46 +167,85 @@ const createCargo = async (req, res, next) => {
 
     const tracking_number = generateTracking();
 
-    // Auto-determine payment status
-    const total = parseFloat(weight_kg) * parseFloat(price_per_kg);
+    // Whichever pricing route was used. Mirrors the generated column in the
+    // database exactly, so the payment status computed here can't disagree
+    // with the total stored there.
+    const num = (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const flat = num(flat_price);
+    const total =
+      flat !== null && flat > 0
+        ? flat
+        : (num(weight_kg) || 0) * (num(price_per_kg) || 0);
     const paid = parseFloat(amount_paid || 0);
     let paymentStatus = "unpaid";
     if (paid >= total) paymentStatus = "paid";
     else if (paid > 0) paymentStatus = "partial";
 
-    const result = await query(
-      `INSERT INTO cargo_shipments (
-        business_id, created_by, item_description, weight_kg, price_per_kg,
-        sender_name, sender_contact, from_city,
-        receiver_name, receiver_contact, to_city,
-        tracking_number, notes, amount_paid, payment_status, photo_url
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-      RETURNING *`,
-      [
-        req.businessId,
-        req.user.id,
-        item_description,
-        weight_kg,
-        price_per_kg,
-        sender_name,
-        sender_contact || null,
-        from_city,
-        receiver_name,
-        receiver_contact || null,
-        to_city,
-        tracking_number,
-        notes || null,
-        paid,
-        paymentStatus,
-        photo_url || null,
-      ],
-    );
+    // Which account took the money, resolved before the transaction opens.
+    const accountId =
+      paid > 0 ? await requireAccount(req.body, req.businessId, null, "payment") : null;
+    const trackPayments = await hasTable("cargo_payments");
 
-    return response.created(
-      res,
-      result.rows[0],
-      "Shipment created successfully",
-    );
+    const shipment = await withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO cargo_shipments (
+          business_id, created_by, item_description, weight_kg, price_per_kg,
+          sender_name, sender_contact, from_city,
+          receiver_name, receiver_contact, to_city,
+          tracking_number, notes, amount_paid, payment_status, photo_url,
+          flat_price, arrived_city, arrived_office, arrived_phone
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        RETURNING *`,
+        [
+          req.businessId,
+          req.user.id,
+          item_description || null,
+          num(weight_kg),
+          num(price_per_kg),
+          sender_name,
+          sender_contact || null,
+          from_city,
+          receiver_name,
+          receiver_contact || null,
+          to_city,
+          tracking_number,
+          notes || null,
+          paid,
+          paymentStatus,
+          photo_url || null,
+          flat,
+          arrived_city || null,
+          arrived_office || null,
+          arrived_phone || null,
+        ],
+      );
+
+      // Record the collection itself, not just the new total. Without this
+      // row the money has no time, no account and no collector, so it can
+      // never appear in the ledger.
+      if (paid > 0 && trackPayments) {
+        await client.query(
+          `INSERT INTO cargo_payments
+             (business_id, cargo_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,'Payment at booking',$6)`,
+          [
+            req.businessId,
+            result.rows[0].id,
+            req.user.id,
+            paid,
+            (req.body.payment_method || "cash").trim() || "cash",
+            accountId,
+          ],
+        );
+      }
+
+      return result.rows[0];
+    });
+
+    return response.created(res, shipment, "Shipment created successfully");
   } catch (err) {
     next(err);
   }
@@ -213,48 +289,112 @@ const updateCargo = async (req, res, next) => {
       cargo_status,
       amount_paid,
       photo_url,
+      flat_price,
+      arrived_city,
+      arrived_office,
+      arrived_phone,
     } = req.body;
 
-    // Recalculate payment status
-    const total = parseFloat(weight_kg) * parseFloat(price_per_kg);
+    // Recalculate payment status against whichever pricing route was used.
+    const num = (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const flat = num(flat_price);
+    const total =
+      flat !== null && flat > 0
+        ? flat
+        : (num(weight_kg) || 0) * (num(price_per_kg) || 0);
     const paid = parseFloat(amount_paid || 0);
     let paymentStatus = "unpaid";
     if (paid >= total) paymentStatus = "paid";
     else if (paid > 0) paymentStatus = "partial";
 
-    const result = await query(
-      `UPDATE cargo_shipments SET
-        item_description=$1, weight_kg=$2, price_per_kg=$3,
-        sender_name=$4, sender_contact=$5, from_city=$6,
-        receiver_name=$7, receiver_contact=$8, to_city=$9,
-        notes=$10, cargo_status=COALESCE($11::cargo_status, cargo_status),
-        amount_paid=$12, payment_status=$13,
-        photo_url=$16
-       WHERE id=$14 AND business_id=$15
-       RETURNING *`,
-      [
-        item_description,
-        weight_kg,
-        price_per_kg,
-        sender_name,
-        sender_contact || null,
-        from_city,
-        receiver_name,
-        receiver_contact || null,
-        to_city,
-        notes || null,
-        cargo_status || null,
-        paid,
-        paymentStatus,
-        req.params.id,
-        req.businessId,
-        photo_url || null,
-      ],
-    );
+    // Resolved inside the transaction below, once the change in what was
+    // paid is known — an edit that doesn't touch the money needs no account.
+    const trackPayments = await hasTable("cargo_payments");
 
-    if (result.rows.length === 0)
-      return response.notFound(res, "Shipment not found");
-    return response.success(res, result.rows[0], "Shipment updated");
+    const updated = await withTransaction(async (client) => {
+      // Read what was paid before, so the change can be recorded as a
+      // movement. Editing the total without a matching row would leave the
+      // shipment and the ledger disagreeing, and nothing would reveal it.
+      const before = await client.query(
+        `SELECT amount_paid FROM cargo_shipments WHERE id=$1 AND business_id=$2`,
+        [req.params.id, req.businessId],
+      );
+      if (before.rows.length === 0) return null;
+      const previouslyPaid = Number(before.rows[0].amount_paid) || 0;
+
+      const result = await client.query(
+        `UPDATE cargo_shipments SET
+          item_description=$1, weight_kg=$2, price_per_kg=$3,
+          sender_name=$4, sender_contact=$5, from_city=$6,
+          receiver_name=$7, receiver_contact=$8, to_city=$9,
+          notes=$10, cargo_status=COALESCE($11::cargo_status, cargo_status),
+          amount_paid=$12, payment_status=$13,
+          photo_url=$16,
+          flat_price=$17,
+          arrived_city=$18, arrived_office=$19, arrived_phone=$20,
+          -- Stamped the moment it is first marked delivered, and never
+          -- overwritten afterwards, so 'arrived on' means what it says even
+          -- if the record is edited later.
+          arrived_at = CASE
+            WHEN $11::cargo_status = 'delivered' AND arrived_at IS NULL THEN NOW()
+            WHEN $11::cargo_status IS NOT NULL AND $11::cargo_status <> 'delivered' THEN NULL
+            ELSE arrived_at
+          END
+         WHERE id=$14 AND business_id=$15
+         RETURNING *`,
+        [
+          item_description || null,
+          num(weight_kg),
+          num(price_per_kg),
+          sender_name,
+          sender_contact || null,
+          from_city,
+          receiver_name,
+          receiver_contact || null,
+          to_city,
+          notes || null,
+          cargo_status || null,
+          paid,
+          paymentStatus,
+          req.params.id,
+          req.businessId,
+          photo_url || null,
+          flat,
+          arrived_city || null,
+          arrived_office || null,
+          arrived_phone || null,
+        ],
+      );
+      if (result.rows.length === 0) return null;
+
+      // Only the difference is a new movement. A negative one is a refund or
+      // a correction — both are real events and both belong in the ledger.
+      const delta = Math.round((paid - previouslyPaid) * 100) / 100;
+      if (Math.abs(delta) > 0.001 && trackPayments) {
+        await client.query(
+          `INSERT INTO cargo_payments
+             (business_id, cargo_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            req.businessId,
+            req.params.id,
+            req.user.id,
+            delta,
+            (req.body.payment_method || "cash").trim() || "cash",
+            delta > 0 ? "Further payment" : "Correction or refund",
+            await requireAccount(req.body, req.businessId, client, "adjustment"),
+          ],
+        );
+      }
+
+      return result.rows[0];
+    });
+
+    if (!updated) return response.notFound(res, "Shipment not found");
+    return response.success(res, updated, "Shipment updated");
   } catch (err) {
     next(err);
   }
@@ -313,6 +453,94 @@ const deleteCargoPhoto = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/cargo/:id/payments
+ *
+ * Take money against a shipment that still owes something, the same way
+ * tickets, visas and packages work. Previously the only way to record a
+ * further cargo payment was to edit the shipment and change the total paid,
+ * which is a different thing entirely — an edit, not a receipt.
+ */
+const addCargoPayment = async (req, res, next) => {
+  try {
+    const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
+    if (amount <= 0) return response.error(res, "Enter a valid amount", 400);
+
+    const found = await query(
+      `SELECT id, sender_name, total_price, amount_paid
+         FROM cargo_shipments WHERE id = $1 AND business_id = $2`,
+      [req.params.id, req.businessId],
+    );
+    if (found.rows.length === 0)
+      return response.notFound(res, "Shipment not found");
+
+    const cargo = found.rows[0];
+    const balance =
+      Math.round(
+        (Number(cargo.total_price) - Number(cargo.amount_paid)) * 100,
+      ) / 100;
+
+    if (amount > balance + 0.001)
+      return response.error(
+        res,
+        `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
+        400,
+      );
+
+    const accountId = await requireAccount(
+      req.body,
+      req.businessId,
+      null,
+      "payment",
+    );
+    const trackPayments = await hasTable("cargo_payments");
+
+    const updated = await withTransaction(async (client) => {
+      if (trackPayments) {
+        await client.query(
+          `INSERT INTO cargo_payments
+             (business_id, cargo_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            req.businessId,
+            cargo.id,
+            req.user.id,
+            amount,
+            (req.body.method || "cash").trim() || "cash",
+            req.body.note || null,
+            accountId,
+          ],
+        );
+      }
+
+      const newPaid = Math.round((Number(cargo.amount_paid) + amount) * 100) / 100;
+      const status =
+        newPaid >= Number(cargo.total_price) - 0.001
+          ? "paid"
+          : newPaid > 0
+            ? "partial"
+            : "unpaid";
+
+      const r = await client.query(
+        `UPDATE cargo_shipments
+            SET amount_paid = $1, payment_status = $2::payment_status
+          WHERE id = $3 AND business_id = $4
+          RETURNING *`,
+        [newPaid, status, cargo.id, req.businessId],
+      );
+      return r.rows[0];
+    });
+
+    return response.success(
+      res,
+      updated,
+      `$${amount.toFixed(2)} collected from ${cargo.sender_name}`,
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getCargo,
   createCargo,
@@ -322,4 +550,5 @@ module.exports = {
   cargoValidation,
   uploadCargoPhoto,
   deleteCargoPhoto,
+  addCargoPayment,
 };

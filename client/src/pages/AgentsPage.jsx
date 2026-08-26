@@ -11,7 +11,6 @@ import {
   Modal,
   EmptyState,
 } from "../components/ui";
-import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   UserRound,
@@ -26,6 +25,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -132,6 +132,8 @@ function AgentModal({ open, onClose, onSaved, initial }) {
 function PayModal({ open, onClose, agent, onPaid }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
+  // Which account the money moves through — the balance depends on it.
+  const [accountId, setAccountId] = useState("");
   const [reference, setReference] = useState("");
   const [saving, setSaving] = useState(false);
   const balance = Number(agent?.balance) || 0;
@@ -140,6 +142,7 @@ function PayModal({ open, onClose, agent, onPaid }) {
     if (open) {
       setAmount(balance > 0 ? balance.toFixed(2) : "");
       setMethod("cash");
+      setAccountId("");
       setReference("");
     }
   }, [open, balance]);
@@ -155,6 +158,7 @@ function PayModal({ open, onClose, agent, onPaid }) {
       const res = await agentsAPI.pay(agent.agent_id || agent.id, {
         amount: val,
         method,
+        account_id: accountId || undefined,
         reference: reference || undefined,
       });
       toast.success(res.data.message);
@@ -190,11 +194,7 @@ function PayModal({ open, onClose, agent, onPaid }) {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
-          <Select label="Method" value={method} onChange={(e) => setMethod(e.target.value)}>
-            {PAYMENT_METHODS.map((m) => (
-              <option key={m.value} value={m.value}>{m.label}</option>
-            ))}
-          </Select>
+          <AccountSelect direction="out" value={accountId} onChange={(e) => setAccountId(e.target.value)} />
         </div>
         <Input
           label="Reference (optional)"
@@ -259,7 +259,7 @@ function AgentDetail({ agentId, onBack, onChanged }) {
         )}
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Tile label="Tickets credited" value={account.ticket_count} tone="blue" />
         <Tile label="Commission earned" value={money(account.commission_earned)} />
         <Tile label="Already paid" value={money(account.commission_paid)} tone="green" />
@@ -325,7 +325,7 @@ function AgentDetail({ agentId, onBack, onChanged }) {
                   <tr key={p.id}>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{fmtDate(p.created_at, "dd MMM yyyy HH:mm")}</td>
                     <td className="px-4 py-3 font-semibold text-green-600 dark:text-green-400">{money(p.amount)}</td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400 capitalize">{p.method}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{p.account_name || p.method}</td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{p.reference || "—"}</td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{p.paid_by_name}</td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{p.note || "—"}</td>
@@ -426,7 +426,7 @@ export default function AgentsPage() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Tile label="Agents" value={totals.total_agents ?? 0} tone="blue" icon={UserRound} />
             <Tile label="Commission earned" value={money(totals.earned)} />
             <Tile label="Paid out" value={money(totals.paid)} tone="green" />

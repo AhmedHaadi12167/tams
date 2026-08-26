@@ -47,7 +47,7 @@ export default function RegisterPage() {
               <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3 uppercase tracking-wide">Agency Info</h3>
               <div className="space-y-3">
                 <Input label="Agency name" placeholder="Mogadishu Travel Co." value={form.business_name} onChange={set('business_name')} required />
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <Input label="Agency email" type="email" placeholder="info@agency.com" value={form.business_email} onChange={set('business_email')} required />
                   <Input label="Phone" type="tel" placeholder="+252 XX XXX XXXX" value={form.business_phone} onChange={set('business_phone')} />
                 </div>

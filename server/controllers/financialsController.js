@@ -93,13 +93,45 @@ const getProfitLoss = async (req, res, next) => {
     ] = await Promise.all([
         query(
           `SELECT
-             COUNT(*)                                 AS ticket_count,
-             COALESCE(SUM(t.selling_price), 0)        AS gross_sales,
-             COALESCE(SUM(t.cost_price), 0)           AS cost_of_sales,
-             COALESCE(SUM(t.agent_commission), 0)     AS agent_commission,
-             COALESCE(SUM(t.amount_paid), 0)          AS collected
+             COUNT(*) FILTER (WHERE t.status <> 'cancelled')                     AS ticket_count,
+             COALESCE(SUM(t.selling_price)    FILTER (WHERE t.status <> 'cancelled'), 0) AS gross_sales,
+             COALESCE(SUM(t.cost_price)       FILTER (WHERE t.status <> 'cancelled'), 0) AS cost_of_sales,
+             COALESCE(SUM(t.agent_commission) FILTER (WHERE t.status <> 'cancelled'), 0) AS agent_commission,
+             COALESCE(SUM(t.amount_paid)      FILTER (WHERE t.status <> 'cancelled'), 0) AS collected,
+             -- A cancelled booking is no longer a sale, but the fee retained
+             -- on it was still earned. Dropping the row entirely would lose
+             -- that income and leave the accounts holding money the profit
+             -- and loss could not explain.
+             COALESCE(SUM(t.cancellation_fee) FILTER (WHERE t.status = 'cancelled'), 0)  AS cancellation_fees,
+             COUNT(*) FILTER (WHERE t.status = 'cancelled')                      AS cancelled_count,
+             -- What the agency paid the airline and never got back on a
+             -- cancelled ticket. The sale disappears from revenue, so if this
+             -- disappeared too the profit would be overstated by exactly the
+             -- amount lost — the books would look better for losing money.
+             --
+             -- It is what was *paid*, not what the ticket cost. An airline
+             -- cannot refund money it was never sent, so a ticket cancelled
+             -- before the agency paid for it loses nothing. airline_paid has
+             -- already had any refund taken off it by the cancellation.
+             COALESCE(SUM(
+               GREATEST(COALESCE(t.airline_paid, 0), 0)
+             ) FILTER (WHERE t.status = 'cancelled'), 0)                         AS unrecovered_cost,
+             -- Balances given up on when a ticket was cancelled. Reported
+             -- so the loss is visible, but NOT subtracted from profit: a
+             -- cancelled sale never entered revenue in the first place, so
+             -- taking the unpaid part out again would count the same loss
+             -- twice and make a bad cancellation look worse than it was.
+             COALESCE(SUM(COALESCE(t.written_off, 0))
+                      FILTER (WHERE t.status = 'cancelled'), 0)                  AS written_off,
+             -- Tax sits inside cost_price but belongs to the government, so
+             -- it is neither the agency's cost nor the airline's income.
+             -- Cancelling the journey does not cancel the tax, so cancelled
+             -- tickets count too — less anything the airline handed back.
+             COALESCE(SUM(
+               GREATEST(COALESCE(t.tax, 0) - COALESCE(t.tax_refunded, 0), 0)
+             ), 0)                                                               AS tax_collected
            FROM tickets t
-           WHERE t.business_id = $1 AND t.status <> 'cancelled'${tRange.clause}`,
+           WHERE t.business_id = $1${tRange.clause}`,
           [businessId, ...tRange.params],
         ),
         query(
@@ -180,7 +212,31 @@ const getProfitLoss = async (req, res, next) => {
     const commission = round2(t.agent_commission);
     const recordedExpenses = round2(e.total_expenses);
     const operatingCosts = round2(commission + recordedExpenses);
-    const netProfit = round2(grossProfit - operatingCosts);
+
+    // Fees kept on cancelled bookings. Not a sale — there is no journey and
+    // no cost of sale against it — but money genuinely earned, so it belongs
+    // below gross profit rather than inside gross sales.
+    const cancellationFees = round2(t.cancellation_fees);
+
+    // The other half of a cancellation: fare paid to the airline and not
+    // returned. A cost with no sale against it.
+    const unrecoveredCost = round2(t.unrecovered_cost);
+    const writtenOff = round2(t.written_off);
+
+    // Tax collected on behalf of the government. Held, not earned.
+    const taxCollected = round2(t.tax_collected);
+
+    // What every cancellation left behind, netted: fees kept less fares the
+    // airline didn't return. This is the same arithmetic the revenue column
+    // on each cancelled ticket performs, so the figure below equals the sum
+    // of those tickets — the Tickets page and the income statement cannot
+    // drift apart. The written-off balances are shown beside it but not
+    // subtracted; see the query above.
+    const cancellationNet = round2(cancellationFees - unrecoveredCost);
+
+    const netProfit = round2(
+      grossProfit + cancellationNet - operatingCosts,
+    );
 
     return response.success(res, {
       period: { from: from_date || null, to: to_date || null },
@@ -203,6 +259,15 @@ const getProfitLoss = async (req, res, next) => {
       },
       gross_profit: grossProfit,
       gross_margin_pct: grossSales > 0 ? round2((grossProfit / grossSales) * 100) : 0,
+      cancellations: {
+        cancelled_count: parseInt(t.cancelled_count),
+        fees_kept: cancellationFees,
+        unrecovered_cost: unrecoveredCost,
+        written_off: writtenOff,
+        net: cancellationNet,
+      },
+      // Shown so it is obvious this money is being held, not earned.
+      tax: { collected: taxCollected },
       operating_costs: {
         agent_commission: commission,
         recorded_expenses: recordedExpenses,

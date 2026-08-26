@@ -13,7 +13,6 @@ import {
   EmptyState,
   RowsPerPage,
 } from "../components/ui";
-import { PAYMENT_METHODS } from "../components/tickets/TicketForm";
 import toast from "react-hot-toast";
 import {
   Luggage,
@@ -28,6 +27,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
+import AccountSelect from "../components/AccountSelect";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -241,7 +241,7 @@ function PackageModal({ open, onClose, onSaved, initialId }) {
 
           {/* Cost lines */}
           <div>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                 What it costs us
               </h3>
@@ -320,14 +320,11 @@ function PackageModal({ open, onClose, onSaved, initialId }) {
             {!editing && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
                 <Input label="Deposit paid now" type="number" min="0" step="0.01" value={form.amount_paid} onChange={set("amount_paid")} placeholder="0.00" />
-                <Select
-                  label="Payment method"
-                  value={form.payment_method}
-                  onChange={set("payment_method")}
-                  disabled={!(parseFloat(form.amount_paid) > 0)}
-                >
-                  {PAYMENT_METHODS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
-                </Select>
+                <AccountSelect
+                  direction="in"
+                  value={form.account_id}
+                  onChange={set("account_id")}
+                />
               </div>
             )}
           </div>
@@ -428,7 +425,7 @@ function DetailModal({ open, onClose, packageId, onChanged }) {
             </Button>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             {[
               ["Cost", money(data.package.total_cost), "text-orange-600"],
               ["Price", money(data.package.selling_price), "text-gray-900 dark:text-white"],
@@ -470,7 +467,7 @@ function DetailModal({ open, onClose, packageId, onChanged }) {
                       <tr key={p.id}>
                         <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{fmtDate(p.created_at, "dd MMM yyyy HH:mm")}</td>
                         <td className="px-3 py-2 font-semibold text-green-600">{money(p.amount)}</td>
-                        <td className="px-3 py-2 text-gray-500 capitalize">{p.method}</td>
+                        <td className="px-3 py-2 text-gray-500">{p.account_name || p.method}</td>
                         <td className="px-3 py-2 text-gray-500">{p.collected_by_name}</td>
                       </tr>
                     ))}
@@ -490,11 +487,14 @@ function DetailModal({ open, onClose, packageId, onChanged }) {
 function CollectModal({ open, onClose, pkg, onDone }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
+  // Which account the money moves through — the balance depends on it.
+  const [accountId, setAccountId] = useState("");
   const [saving, setSaving] = useState(false);
   const balance = pkg ? Number(pkg.selling_price) - Number(pkg.amount_paid) : 0;
 
   useEffect(() => {
-    if (open) { setAmount(balance > 0 ? balance.toFixed(2) : ""); setMethod("cash"); }
+    if (open) { setAmount(balance > 0 ? balance.toFixed(2) : ""); setMethod("cash");
+      setAccountId(""); }
   }, [open, balance]);
 
   const submit = async (e) => {
@@ -504,7 +504,11 @@ function CollectModal({ open, onClose, pkg, onDone }) {
     if (val > balance + 0.001) return toast.error(`Amount exceeds balance (${money(balance)})`);
     setSaving(true);
     try {
-      const res = await packagesAPI.addPayment(pkg.id, { amount: val, method });
+      const res = await packagesAPI.addPayment(pkg.id, {
+        amount: val,
+        method,
+        account_id: accountId || undefined,
+      });
       toast.success(res.data.message);
       onDone();
       onClose();
@@ -526,9 +530,7 @@ function CollectModal({ open, onClose, pkg, onDone }) {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input label="Amount *" type="number" min="0.01" step="0.01" max={balance} value={amount} onChange={(e) => setAmount(e.target.value)} />
-          <Select label="Method" value={method} onChange={(e) => setMethod(e.target.value)}>
-            {PAYMENT_METHODS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
-          </Select>
+          <AccountSelect direction="in" value={accountId} onChange={(e) => setAccountId(e.target.value)} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
@@ -619,7 +621,7 @@ export default function PackagesPage() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Tile label="Package sales" value={money(s.total_sales)} tone="blue" />
             <Tile label="Total cost" value={money(s.total_cost)} tone="orange" />
             <Tile label="Profit" value={money(s.total_revenue)} tone="green" />

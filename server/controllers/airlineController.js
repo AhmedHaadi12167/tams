@@ -16,8 +16,23 @@ const {
   findAirlineMatch,
 } = require("../services/airlineService");
 const { hasTable, hasColumn } = require("../services/schemaInfo");
+const { resolveAccount, requireAccount } = require("../services/accountResolver");
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
+
+/**
+ * What the airline is actually owed for a ticket.
+ *
+ * cost_price is everything paid out for the seat, and part of that is tax
+ * the government collects — the airline never sees it. So every figure on
+ * this page nets the tax off, and they all use this one expression rather
+ * than each writing the subtraction out again. When the header, the
+ * passenger row and the Pay button disagree, it is because they were doing
+ * their own arithmetic.
+ */
+const AIRLINE_COST = "GREATEST(t.cost_price - COALESCE(t.tax, 0), 0)";
+/** Same thing where the query has no `t.` alias. */
+const AIRLINE_COST_BARE = "GREATEST(cost_price - COALESCE(tax, 0), 0)";
 
 /**
  * Shared filter builder for airline queries.
@@ -90,7 +105,7 @@ const getAirlines = async (req, res, next) => {
            COUNT(*) FILTER (WHERE t.ticket_type = 'INTERNATIONAL')        AS international_tickets,
            COUNT(DISTINCT t.passenger_name)                               AS passengers,
            COUNT(DISTINCT (t.from_city || ' → ' || t.to_city))            AS routes,
-           COALESCE(SUM(t.cost_price), 0)                                 AS total_cost,
+           COALESCE(SUM(${AIRLINE_COST}), 0)                              AS total_cost,
            MAX(t.flight_date)                                             AS last_flight_date
          FROM tickets t
          WHERE ${where}
@@ -119,7 +134,7 @@ const getAirlines = async (req, res, next) => {
         `SELECT
            COUNT(*)                             AS tickets,
            COUNT(DISTINCT t.airline_name)       AS airlines,
-           COALESCE(SUM(t.cost_price), 0)       AS total_cost
+           COALESCE(SUM(${AIRLINE_COST}), 0)    AS total_cost
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
       ),
@@ -207,8 +222,8 @@ const getAirlinePassengers = async (req, res, next) => {
     // Settlement columns only exist after migration v9
     const perTicket = await hasColumn("tickets", "airline_paid");
     const settleCols = perTicket
-      ? "t.airline_paid, (t.cost_price - t.airline_paid) AS airline_balance,"
-      : "0::NUMERIC AS airline_paid, t.cost_price AS airline_balance,";
+      ? `t.airline_paid, (${AIRLINE_COST} - t.airline_paid) AS airline_balance,`
+      : `0::NUMERIC AS airline_paid, ${AIRLINE_COST} AS airline_balance,`;
 
     const [countRes, summaryRes, routesRes, listRes] = await Promise.all([
       query(`SELECT COUNT(*) FROM tickets t WHERE ${where}`, [
@@ -219,12 +234,12 @@ const getAirlinePassengers = async (req, res, next) => {
         `SELECT
            COUNT(*)                          AS tickets,
            COUNT(DISTINCT t.passenger_name)  AS passengers,
-           COALESCE(SUM(t.cost_price), 0)    AS total_cost,
+           COALESCE(SUM(${AIRLINE_COST}), 0) AS total_cost,
            ${perTicket
              ? `COALESCE(SUM(t.airline_paid), 0) AS cost_paid,
-                COALESCE(SUM(t.cost_price - t.airline_paid), 0) AS cost_unpaid,
-                COUNT(*) FILTER (WHERE t.cost_price > t.airline_paid) AS unsettled`
-             : `0::NUMERIC AS cost_paid, COALESCE(SUM(t.cost_price), 0) AS cost_unpaid,
+                COALESCE(SUM(${AIRLINE_COST} - t.airline_paid), 0) AS cost_unpaid,
+                COUNT(*) FILTER (WHERE ${AIRLINE_COST} > t.airline_paid) AS unsettled`
+             : `0::NUMERIC AS cost_paid, COALESCE(SUM(${AIRLINE_COST}), 0) AS cost_unpaid,
                 COUNT(*) AS unsettled`}
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
@@ -234,7 +249,7 @@ const getAirlinePassengers = async (req, res, next) => {
            t.from_city, t.to_city,
            t.from_city || ' → ' || t.to_city   AS route,
            COUNT(*)                            AS tickets,
-           COALESCE(SUM(t.cost_price), 0)      AS cost
+           COALESCE(SUM(${AIRLINE_COST}), 0)   AS cost
          FROM tickets t WHERE ${where}
          GROUP BY t.from_city, t.to_city
          ORDER BY tickets DESC LIMIT 15`,
@@ -245,7 +260,7 @@ const getAirlinePassengers = async (req, res, next) => {
            t.id, t.passenger_name, t.contact_number, t.passport_number,
            t.ticket_type, t.trip_type, t.status,
            t.from_city, t.to_city, t.flight_date, t.return_date,
-           t.ticket_reference, t.cost_price,
+           t.ticket_reference, ${AIRLINE_COST} AS cost_price, t.cost_price AS fare_paid_out, COALESCE(t.tax,0) AS tax,
            ${settleCols}
            t.created_at AS booked_date,
            u.name AS agent_name,
@@ -345,14 +360,14 @@ const exportAirlinePDF = async (req, res, next) => {
         `SELECT
            COUNT(*) AS tickets,
            COUNT(DISTINCT t.passenger_name) AS passengers,
-           COALESCE(SUM(t.cost_price), 0) AS total_cost
+           COALESCE(SUM(${AIRLINE_COST}), 0) AS total_cost
          FROM tickets t WHERE ${where}`,
         [businessId, ...params],
       ),
       query(
         `SELECT t.passenger_name, t.contact_number, t.from_city, t.to_city,
                 t.flight_date, t.return_date, t.trip_type, t.ticket_type,
-                t.ticket_reference, t.cost_price, u.name AS agent_name
+                t.ticket_reference, ${AIRLINE_COST} AS cost_price, t.cost_price AS fare_paid_out, COALESCE(t.tax,0) AS tax, u.name AS agent_name
          FROM tickets t
          LEFT JOIN users u ON u.id = t.created_by
          WHERE ${where}
@@ -362,7 +377,7 @@ const exportAirlinePDF = async (req, res, next) => {
       query(
         `SELECT t.from_city || ' → ' || t.to_city AS route,
                 COUNT(*) AS tickets,
-                COALESCE(SUM(t.cost_price), 0) AS cost
+                COALESCE(SUM(${AIRLINE_COST}), 0) AS cost
          FROM tickets t WHERE ${where}
          GROUP BY 1 ORDER BY tickets DESC LIMIT 15`,
         [businessId, ...params],
@@ -816,6 +831,10 @@ const payAirline = async (req, res, next) => {
       return response.notFound(res, "Airline not found");
 
     const balance = round2(acc.rows[0].balance);
+    // Which account the money leaves from. One settlement can be split
+    // across several tickets, but it is a single payment out of a single
+    // account, so it is resolved once here.
+    const payAccountId = await requireAccount(req.body, req.businessId, null, "airline payment");
     // No amount given means "settle the whole balance"
     const amount =
       req.body.amount === undefined || req.body.amount === null || req.body.amount === ""
@@ -846,10 +865,10 @@ const payAirline = async (req, res, next) => {
 
       if (perTicket) {
         const open = await client.query(
-          `SELECT id, cost_price, airline_paid
+          `SELECT id, ${AIRLINE_COST_BARE} AS cost_price, airline_paid
            FROM tickets
            WHERE business_id = $1 AND airline_id = $2 AND status <> 'cancelled'
-             AND cost_price > airline_paid
+             AND ${AIRLINE_COST_BARE} > airline_paid
            ORDER BY created_at`,
           [req.businessId, req.params.id],
         );
@@ -866,12 +885,12 @@ const payAirline = async (req, res, next) => {
           );
           const ins = await client.query(
             `INSERT INTO airline_payments
-               (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+               (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note, account_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
             [
               req.businessId, req.params.id, t.id, req.user.id, take,
               req.body.method || "cash", req.body.reference || null,
-              req.body.note || null,
+              req.body.note || null, payAccountId,
             ],
           );
           rows.push(ins.rows[0]);
@@ -883,13 +902,13 @@ const payAirline = async (req, res, next) => {
       if (remaining > 0.001 || rows.length === 0) {
         const ins = await client.query(
           `INSERT INTO airline_payments
-             (business_id, airline_id, paid_by, amount, method, reference, note)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+             (business_id, airline_id, paid_by, amount, method, reference, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
           [
             req.businessId, req.params.id, req.user.id,
             rows.length === 0 ? amount : remaining,
             req.body.method || "cash", req.body.reference || null,
-            req.body.note || null,
+            req.body.note || null, payAccountId,
           ],
         );
         rows.push(ins.rows[0]);
@@ -921,9 +940,10 @@ const getAirlinePayments = async (req, res, next) => {
   try {
     if (!(await accountTableExists())) return response.success(res, []);
     const r = await query(
-      `SELECT p.*, u.name AS paid_by_name
+      `SELECT p.*, u.name AS paid_by_name, a.name AS account_name
        FROM airline_payments p
        JOIN users u ON u.id = p.paid_by
+       LEFT JOIN payment_accounts a ON a.id = p.account_id
        WHERE p.airline_id = $1 AND p.business_id = $2
        ORDER BY p.created_at DESC`,
       [req.params.id, req.businessId],
@@ -959,7 +979,7 @@ const payTickets = async (req, res, next) => {
       return response.error(res, "Select at least one passenger", 400);
 
     const open = await query(
-      `SELECT id, passenger_name, airline_id, cost_price, airline_paid
+      `SELECT id, passenger_name, airline_id, ${AIRLINE_COST_BARE} AS cost_price, airline_paid
        FROM tickets
        WHERE business_id = $1 AND id = ANY($2::uuid[]) AND status <> 'cancelled'`,
       [req.businessId, ids],
@@ -976,6 +996,9 @@ const payTickets = async (req, res, next) => {
         "Those passengers are already settled with the airline.",
         400,
       );
+
+    // Same account for every passenger settled in this one payment.
+    const payAccountId = await requireAccount(req.body, req.businessId, null, "airline payment");
 
     // A single amount, when given, is split across the chosen passengers
     const requested =
@@ -1012,12 +1035,12 @@ const payTickets = async (req, res, next) => {
         );
         const ins = await client.query(
           `INSERT INTO airline_payments
-             (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+             (business_id, airline_id, ticket_id, paid_by, amount, method, reference, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
           [
             req.businessId, t.airline_id, t.id, req.user.id, take,
             req.body.method || "cash", req.body.reference || null,
-            req.body.note || `Settled ${t.passenger_name}`,
+            req.body.note || `Settled ${t.passenger_name}`, payAccountId,
           ],
         );
         rows.push({ ...ins.rows[0], passenger_name: t.passenger_name });

@@ -83,6 +83,24 @@ app.use("/api/auth/forgot-password", loginLimiter);
 app.use("/api/auth/verify-otp", loginLimiter);
 app.use("/api/auth/reset-password", loginLimiter);
 
+// Public tracking is the only endpoint a stranger can reach, so it is the
+// only one someone could use to guess tracking numbers at scale. Thirty
+// lookups per minute is generous for a person checking their parcel and
+// useless for enumeration.
+app.use(
+  "/api/public",
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 30,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: {
+      success: false,
+      message: "Too many lookups. Please wait a moment and try again.",
+    },
+  }),
+);
+
 // A backstop against scraping and runaway loops. Set high enough that
 // ordinary use — an office of staff working steadily all day — never
 // approaches it.

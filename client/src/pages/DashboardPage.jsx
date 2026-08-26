@@ -72,7 +72,7 @@ const Delta = ({ value, invert }) => {
 
 // ── KPI card ─────────────────────────────────────────────────────────────────
 
-const Kpi = ({ label, value, icon: Icon, tint, delta, invert }) => (
+const Kpi = ({ label, value, sub, icon: Icon, tint, delta, invert }) => (
   <div className={`${CARD} p-5`}>
     <div className="flex items-center gap-4">
       <div className={`w-12 h-12 rounded-2xl grid place-items-center shrink-0 ${tint}`}>
@@ -88,6 +88,14 @@ const Kpi = ({ label, value, icon: Icon, tint, delta, invert }) => (
           </p>
           <Delta value={delta} invert={invert} />
         </div>
+        {/* Says which figures span the whole business and which don't, so
+            nobody has to guess why Tickets Booked and Money Collected move
+            differently. */}
+        {sub && (
+          <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
+            {sub}
+          </p>
+        )}
       </div>
     </div>
   </div>
@@ -97,7 +105,7 @@ const Kpi = ({ label, value, icon: Icon, tint, delta, invert }) => (
 
 const Panel = ({ title, pill, onPillChange, pillOptions, action, children, className = "" }) => (
   <div className={`${CARD} p-6 ${className}`}>
-    <div className="flex items-center justify-between gap-3 mb-6">
+    <div className="flex flex-wrap items-center justify-between gap-3 gap-3 mb-6">
       <h2 className="font-semibold text-gray-900 dark:text-white text-[15px]">
         {title}
       </h2>
@@ -272,22 +280,22 @@ export default function DashboardPage() {
 
   const kpis = isSuperAdmin
     ? [
-        { label: "Total Bookings", value: count(s.total_tickets), icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
+        { label: "Tickets Booked", value: count(s.total_tickets), icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
         { label: "Active Agencies", value: count(s.active_businesses), icon: Building2, tint: "bg-indigo-50 text-indigo-500 dark:bg-indigo-900/20 dark:text-indigo-400", delta: null },
-        { label: "Total Earnings", value: money(s.total_revenue), icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
-        { label: "Outstanding", value: money(s.unpaid_money), icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
+        { label: "Total Revenue", value: money(s.total_revenue), sub: "All services", icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
+        { label: "Outstanding", value: money(s.unpaid_money), sub: "All services", icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
       ]
     : [
-        { label: "Total Bookings", value: count(s.total_tickets), icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
-        { label: "Money Collected", value: money(s.collected_money), icon: UserPlus, tint: "bg-indigo-50 text-indigo-500 dark:bg-indigo-900/20 dark:text-indigo-400", delta: d.collected_money },
-        { label: "Total Earnings", value: money(s.total_revenue), icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
-        { label: "Outstanding", value: money(s.unpaid_money), icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
+        { label: "Tickets Booked", value: count(s.total_tickets), icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
+        { label: "Money Collected", value: money(s.collected_money), sub: "All services", icon: UserPlus, tint: "bg-indigo-50 text-indigo-500 dark:bg-indigo-900/20 dark:text-indigo-400", delta: d.collected_money },
+        { label: "Total Revenue", value: money(s.total_revenue), sub: "All services", icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
+        { label: "Outstanding", value: money(s.unpaid_money), sub: "All services", icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
       ];
 
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-3 gap-4 flex-wrap">
         <h1 className="text-[22px] font-bold text-gray-900 dark:text-white tracking-tight">
           {titles[user?.role] || "Dashboard"}
         </h1>
