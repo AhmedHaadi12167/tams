@@ -10,6 +10,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import fs from "fs";
+import { seedAccounts } from "./seed.mjs";
 
 const CFG = "./cfg";
 const pass = [];
@@ -70,6 +71,7 @@ const biz = (
     `INSERT INTO businesses (name, email) VALUES ('Ecos Travel','a@b.c') RETURNING id`,
   )
 ).rows[0].id;
+await seedAccounts(db, biz);
 
 // The seed loop runs over businesses that existed when the migration ran, so
 // a business created afterwards needs the accounts too. This is the bug this

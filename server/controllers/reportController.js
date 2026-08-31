@@ -6,6 +6,12 @@ const {
 } = require("../services/reportService");
 const { uuidOrThrow } = require("../utils/sqlSafe");
 const { hasTable } = require("../services/schemaInfo");
+const {
+  cashMovement,
+  cashBySource,
+  periodWindow,
+  TZ,
+} = require("../services/cashLedger");
 
 /**
  * GET /api/reports/dashboard
@@ -17,33 +23,48 @@ const getDashboard = async (req, res, next) => {
     const businessId = req.businessId;
     const { period = "month" } = req.query;
 
-    let tFilter = "";
-    let cFilter = "";
+    // ── The window, once, for everything ─────────────────────
+    //
+    // Real dates on the agency's own calendar. Previously each figure built
+    // its own fragment — DATE(created_at) = CURRENT_DATE for tickets,
+    // NOW() - INTERVAL '30 days' for cargo — and the visa and package
+    // queries had no date filter at all. So "Today" showed 0 tickets booked
+    // and $2,400 sold: the visas and packages were every one ever recorded,
+    // leaking a whole history into a single day's card.
+    //
+    // One window, applied to every line of business, on the agency's clock.
+    const window = await periodWindow(period);
+    const prevWindow = (() => {
+      if (!window.from) return null;
+      const from = new Date(window.from);
+      const to = new Date(window.to);
+      const days = Math.round((to - from) / 86400000) + 1;
+      const shift = (d) => {
+        const x = new Date(d);
+        x.setDate(x.getDate() - days);
+        return x.toISOString().slice(0, 10);
+      };
+      return { from: shift(from), to: shift(to) };
+    })();
+
+    // Dates are generated here, never supplied by the caller, but they are
+    // interpolated rather than bound — so they are proved to be dates first.
+    const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+    const bookedIn = (column, w) => {
+      if (!w || !isDate(w.from) || !isDate(w.to)) return "";
+      return ` AND (${column} AT TIME ZONE '${TZ}')::DATE` +
+             ` BETWEEN '${w.from}' AND '${w.to}'`;
+    };
+
+    const tFilter = bookedIn("t.created_at", window);
+    const cFilter = bookedIn("cs.created_at", window);
+    const vFilter = bookedIn("v.created_at", window);
+    const pFilter = bookedIn("pk.created_at", window);
+
     // Matching window immediately before the selected one, so the KPI cards
     // can show a real period-over-period change instead of a decorative one.
-    let tPrevFilter = null;
-    let cPrevFilter = null;
-
-    if (period === "today") {
-      tFilter = "AND DATE(t.created_at) = CURRENT_DATE";
-      cFilter = "AND DATE(cs.created_at) = CURRENT_DATE";
-      tPrevFilter = "AND DATE(t.created_at) = CURRENT_DATE - 1";
-      cPrevFilter = "AND DATE(cs.created_at) = CURRENT_DATE - 1";
-    } else if (period === "week") {
-      tFilter = "AND t.created_at >= NOW() - INTERVAL '7 days'";
-      cFilter = "AND cs.created_at >= NOW() - INTERVAL '7 days'";
-      tPrevFilter =
-        "AND t.created_at >= NOW() - INTERVAL '14 days' AND t.created_at < NOW() - INTERVAL '7 days'";
-      cPrevFilter =
-        "AND cs.created_at >= NOW() - INTERVAL '14 days' AND cs.created_at < NOW() - INTERVAL '7 days'";
-    } else if (period === "month") {
-      tFilter = "AND t.created_at >= NOW() - INTERVAL '30 days'";
-      cFilter = "AND cs.created_at >= NOW() - INTERVAL '30 days'";
-      tPrevFilter =
-        "AND t.created_at >= NOW() - INTERVAL '60 days' AND t.created_at < NOW() - INTERVAL '30 days'";
-      cPrevFilter =
-        "AND cs.created_at >= NOW() - INTERVAL '60 days' AND cs.created_at < NOW() - INTERVAL '30 days'";
-    }
+    const tPrevFilter = prevWindow ? bookedIn("t.created_at", prevWindow) : null;
+    const cPrevFilter = prevWindow ? bookedIn("cs.created_at", prevWindow) : null;
 
     // % change vs the previous window. null when there's no basis to compare.
     const pctChange = (now, before) => {
@@ -271,6 +292,7 @@ const getDashboard = async (req, res, next) => {
         query(
           `SELECT COUNT(*) AS total_tickets,
             COALESCE(SUM(t.revenue), 0) AS ticket_revenue,
+            COALESCE(SUM(t.selling_price), 0) AS ticket_sales,
             COUNT(*) FILTER (WHERE t.ticket_type = 'LOCAL') AS local_tickets,
             COUNT(*) FILTER (WHERE t.ticket_type = 'INTERNATIONAL') AS international_tickets,
             COUNT(*) FILTER (WHERE t.status = 'cancelled') AS cancelled_tickets,
@@ -365,26 +387,28 @@ const getDashboard = async (req, res, next) => {
           ? query(
               `SELECT COUNT(*) AS total_visas,
                       COALESCE(SUM(v.selling_price), 0) AS visa_sales,
+                      COALESCE(SUM(v.revenue), 0)       AS visa_profit,
                       COALESCE(SUM(v.amount_paid), 0)   AS visa_collected,
                       COALESCE(SUM(v.selling_price - v.amount_paid)
                                FILTER (WHERE v.payment_status <> 'paid'), 0) AS visa_unpaid
                  FROM visa_applications v
-                WHERE v.business_id = $1 AND v.status <> 'cancelled'`,
+                WHERE v.business_id = $1 AND v.status <> 'cancelled'${vFilter}`,
               [businessId],
             )
-          : Promise.resolve({ rows: [{ total_visas: 0, visa_sales: 0, visa_collected: 0, visa_unpaid: 0 }] }),
+          : Promise.resolve({ rows: [{ total_visas: 0, visa_sales: 0, visa_profit: 0, visa_collected: 0, visa_unpaid: 0 }] }),
         (await hasTable("packages"))
           ? query(
               `SELECT COUNT(*) AS total_packages,
                       COALESCE(SUM(pk.selling_price), 0) AS package_sales,
+                      COALESCE(SUM(pk.revenue), 0)       AS package_profit,
                       COALESCE(SUM(pk.amount_paid), 0)   AS package_collected,
                       COALESCE(SUM(pk.selling_price - pk.amount_paid)
                                FILTER (WHERE pk.payment_status <> 'paid'), 0) AS package_unpaid
                  FROM packages pk
-                WHERE pk.business_id = $1 AND pk.status <> 'cancelled'`,
+                WHERE pk.business_id = $1 AND pk.status <> 'cancelled'${pFilter}`,
               [businessId],
             )
-          : Promise.resolve({ rows: [{ total_packages: 0, package_sales: 0, package_collected: 0, package_unpaid: 0 }] }),
+          : Promise.resolve({ rows: [{ total_packages: 0, package_sales: 0, package_profit: 0, package_collected: 0, package_unpaid: 0 }] }),
       ]);
 
       const ts = ticketSummary.rows[0];
@@ -393,21 +417,48 @@ const getDashboard = async (req, res, next) => {
       const ps = packageSummary.rows[0];
       const n = (x) => parseFloat(x) || 0;
 
-      // Bookings counts tickets, because that is what "a booking" means here.
-      // Money does not: what the agency collected and what it is still owed
-      // have to cover every line of business, or the headline figures quietly
-      // contradict the Financials page.
-      const collectedAll =
-        n(ts.collected_money) +
-        n(cs.cargo_collected) +
-        n(vs.visa_collected) +
-        n(ps.package_collected);
+      // ── Money in, from the ledger ────────────────────────────
+      //
+      // Not from SUM(amount_paid) on the records booked in this window.
+      // amount_paid is a running total attached to a booking, so filtering it
+      // by the booking's date answers "of what we sold this week, how much
+      // has ever been paid" — which is not what "collected this week" means,
+      // and is why collecting $100 today against last week's ticket showed as
+      // nothing. The ledger holds each payment with the moment it happened.
+      const [money, moneyBySource, prevMoney] = await Promise.all([
+        cashMovement(businessId, window),
+        cashBySource(businessId, window),
+        prevWindow ? cashMovement(businessId, prevWindow) : Promise.resolve(null),
+      ]);
 
+      // What is still owed is a balance, not a flow: it is what customers owe
+      // right now, whenever the booking was made. Filtering it by period made
+      // the figure shrink whenever you looked at a narrower window, which
+      // made it look like debts were being collected when nothing had moved.
+      const dueRes = await query(
+        `SELECT
+           (SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid
+                                         - COALESCE(written_off, 0), 0)), 0)
+              FROM tickets
+             WHERE business_id = $1 AND status <> 'cancelled')            AS tickets,
+           (SELECT COALESCE(SUM(GREATEST(total_price - amount_paid, 0)), 0)
+              FROM cargo_shipments
+             WHERE business_id = $1 AND cargo_status <> 'cancelled')      AS cargo,
+           ${(await hasTable("visa_applications"))
+             ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
+                   FROM visa_applications
+                  WHERE business_id = $1 AND status <> 'cancelled')`
+             : "0"}                                                       AS visas,
+           ${(await hasTable("packages"))
+             ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
+                   FROM packages
+                  WHERE business_id = $1 AND status <> 'cancelled')`
+             : "0"}                                                       AS packages`,
+        [businessId],
+      );
+      const due = dueRes.rows[0];
       const outstandingAll =
-        n(ts.unpaid_money) +
-        n(cs.cargo_unpaid) +
-        n(vs.visa_unpaid) +
-        n(ps.package_unpaid);
+        n(due.tickets) + n(due.cargo) + n(due.visas) + n(due.packages);
 
       return response.success(res, {
         isSuperAdmin: false,
@@ -421,7 +472,10 @@ const getDashboard = async (req, res, next) => {
           unpaid_tickets: ts.unpaid_tickets,
           // Whole-business figures, used by the KPI cards.
           unpaid_money: outstandingAll.toFixed(2),
-          collected_money: collectedAll.toFixed(2),
+          collected_money: money.collected.toFixed(2),
+          paid_out: money.paid_out.toFixed(2),
+          net_cash: money.net.toFixed(2),
+          collected_by_source: moneyBySource,
           // Kept so anything that wants tickets alone still can.
           ticket_collected: ts.collected_money,
           ticket_unpaid: ts.unpaid_money,
@@ -435,12 +489,35 @@ const getDashboard = async (req, res, next) => {
           visa_sales: vs.visa_sales,
           total_packages: ps.total_packages,
           package_sales: ps.package_sales,
-          // Earnings across every line of business.
-          total_revenue: (
-            n(ts.ticket_revenue) +
+          // Two different things, and they were being added together.
+          //
+          // ts.ticket_revenue is a *margin* — selling price less cost less
+          // commission. cargo_revenue, visa_sales and package_sales are
+          // *gross sales*. Summing them produced a number that was neither,
+          // and that no other page in TAMS could reproduce: the Dashboard
+          // said 2,460 while Financials said 560 for the same trading.
+          //
+          // So both are reported, named for what they are, and each matches
+          // the corresponding line on the income statement.
+          gross_sales: (
+            n(ts.ticket_sales) +
             n(cs.cargo_revenue) +
             n(vs.visa_sales) +
             n(ps.package_sales)
+          ).toFixed(2),
+          gross_profit: (
+            n(ts.ticket_revenue) +
+            n(cs.cargo_revenue) +
+            n(vs.visa_profit) +
+            n(ps.package_profit)
+          ).toFixed(2),
+          // The old name, kept pointing at the margin so nothing that still
+          // reads it shows a wilder number than before.
+          total_revenue: (
+            n(ts.ticket_revenue) +
+            n(cs.cargo_revenue) +
+            n(vs.visa_profit) +
+            n(ps.package_profit)
           ).toFixed(2),
         },
         deltas: {
@@ -457,11 +534,11 @@ const getDashboard = async (req, res, next) => {
             ts.unpaid_money,
             prevTicketRes.rows[0].unpaid_money,
           ),
-          collected_money: pctChange(
-            ts.collected_money,
-            prevTicketRes.rows[0].collected_money,
-          ),
+          collected_money: prevMoney
+            ? pctChange(money.collected, prevMoney.collected)
+            : null,
         },
+        period: { from: window.from, to: window.to },
         chart: chartResult.rows,
         agentPerformance: req.user.role === "agent" ? [] : agentResult.rows,
         topRoutes: routeResult.rows,
@@ -689,12 +766,31 @@ const getReportSummary = async (req, res, next) => {
         (n(pk.sales) - n(pk.cost)),
     );
 
+    // Money actually received in this window, from the ledger — the same
+    // number the Dashboard, the Cash Flow statement and the Accounts page
+    // now show. Summing amount_paid across the bookings *made* in the window
+    // answers a different question and gave a different answer, which is how
+    // four screens ended up quoting four figures for "collected".
+    //
+    // The per-service `collected` figures below are left as they are: those
+    // legitimately mean "of what we sold, how much has been paid", and they
+    // are labelled per service rather than as a period total.
+    const received = await cashMovement(businessId, {
+      from: from_date,
+      to: to_date,
+    });
+
     return response.success(res, {
       summary: {
         ...s,
         // Whole-business figures. Tickets alone stay available above.
         total_revenue: revenueAll,
-        total_collected: r2(
+        total_collected: received.collected,
+        total_paid_out: received.paid_out,
+        net_cash: received.net,
+        // What the bookings in this window have been paid so far, which is
+        // not the same thing and is kept for the per-service breakdown.
+        booked_and_paid: r2(
           n(s.total_collected) + n(cg.collected) + n(vs.collected) + n(pk.collected),
         ),
         total_balance: r2(

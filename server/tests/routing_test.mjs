@@ -13,6 +13,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
 import fs from "fs";
+import { seedAccounts } from "./seed.mjs";
 
 const require = createRequire(import.meta.url);
 const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
@@ -76,6 +77,7 @@ const agentC = require(`${SERVER}/controllers/agentController.js`);
 const expenseC = require(`${SERVER}/controllers/expenseController.js`);
 
 const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.c') RETURNING id`)).rows[0].id;
+await seedAccounts(pg, biz);
 const user = (await pg.query(
   `INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`, [biz])).rows[0].id;
 const A = Object.fromEntries(

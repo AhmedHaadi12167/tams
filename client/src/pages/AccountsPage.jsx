@@ -11,6 +11,7 @@ import {
   Select,
   Modal,
   Pagination,
+  RowsPerPage,
   EmptyState,
 } from "../components/ui";
 import toast from "react-hot-toast";
@@ -621,6 +622,10 @@ export default function AccountsPage() {
   const [ledger, setLedger] = useState(null);
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [page, setPage] = useState(1);
+  // How many movements to show at once. An account with a few dozen entries
+  // reads fine in one list; one with a year of trading does not, and the
+  // person looking at it is the one who knows which they have.
+  const [perPage, setPerPage] = useState(25);
   const [filters, setFilters] = useState({
     direction: "",
     source: "",
@@ -666,7 +671,7 @@ export default function AccountsPage() {
     accountsAPI
       .ledger({
         page,
-        limit: 50,
+        limit: perPage,
         account_id: selected?.account_id || undefined,
         direction: filters.direction || undefined,
         source: filters.source || undefined,
@@ -678,7 +683,7 @@ export default function AccountsPage() {
       .then((r) => setLedger({ ...r.data.data, meta: r.data.meta }))
       .catch(() => setLedger(null))
       .finally(() => setLedgerLoading(false));
-  }, [page, selected, filters, hasQuery]);
+  }, [page, perPage, selected, filters, hasQuery]);
 
   useEffect(() => {
     loadLedger();
@@ -853,6 +858,32 @@ export default function AccountsPage() {
       )}
 
       {/* ── The accounts ── */}
+      {accounts.length === 0 ? (
+        // Since migration_v21 a new agency starts with none and names its own,
+        // so this is the first thing a new user sees here. It has to say what
+        // to do, not just report that a list is empty.
+        <EmptyState
+          icon={Wallet}
+          title="No payment accounts yet"
+          description={
+            canManage
+              ? "Add the accounts your agency actually uses — your bank, your EVC or eDahab line, the cash drawer. Every payment is recorded against one of them, which is what makes the balances add up."
+              : "No accounts have been set up yet. Ask an administrator to add them before recording payments."
+          }
+          action={
+            canManage ? (
+              <Button
+                onClick={() => {
+                  setEditing(null);
+                  setAccountOpen(true);
+                }}
+              >
+                <Plus className="w-4 h-4" /> Add your first account
+              </Button>
+            ) : null
+          }
+        />
+      ) : (
       <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
         {accounts.map((a) => (
           <AccountCard
@@ -867,6 +898,7 @@ export default function AccountsPage() {
           />
         ))}
       </div>
+      )}
 
       {/* ── The ledger ── */}
       <Card className="overflow-hidden">
@@ -909,6 +941,18 @@ export default function AccountsPage() {
               </div>
             )}
           </div>
+          {/*
+            Said out loud because it is not obvious and the difference
+            matters: these three cover everything the filters match, not just
+            the rows on screen. Someone reading page 1 of 6 should not think
+            the totals belong to those 25 lines.
+          */}
+          {ledger?.meta && ledger.meta.totalPages > 1 && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+              Totals cover all {ledger.meta.total} matching movements, not just
+              this page.
+            </p>
+          )}
 
           {/* filters */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-2 mt-3">
@@ -1050,13 +1094,41 @@ export default function AccountsPage() {
           </div>
         )}
 
-        {ledger?.meta && ledger.meta.totalPages > 1 && (
-          <div className="p-3 border-t border-gray-200 dark:border-gray-700">
-            <Pagination
-              page={ledger.meta.page}
-              totalPages={ledger.meta.totalPages}
-              onChange={setPage}
-            />
+        {/*
+          Shown whenever there are movements, not only when they spill onto a
+          second page. The count is the useful part: "1–25 of 132" tells you
+          there is more to see, where a bare list of 25 rows silently looks
+          like the whole story. The pager itself hides when there is one page.
+        */}
+        {ledger?.meta && ledger.movements.length > 0 && (
+          <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <p className="text-sm text-gray-500 dark:text-gray-400 order-2 sm:order-1">
+              Showing{" "}
+              <span className="font-medium text-gray-700 dark:text-gray-300">
+                {(ledger.meta.page - 1) * ledger.meta.limit + 1}–
+                {Math.min(
+                  ledger.meta.page * ledger.meta.limit,
+                  ledger.meta.total,
+                )}
+              </span>{" "}
+              of {ledger.meta.total} movement
+              {ledger.meta.total === 1 ? "" : "s"}
+            </p>
+            <div className="flex items-center gap-4 order-1 sm:order-2">
+              <RowsPerPage
+                value={perPage}
+                onChange={(n) => {
+                  setPerPage(n);
+                  // Page 4 of 25-per-page does not exist at 100 per page.
+                  setPage(1);
+                }}
+              />
+              <Pagination
+                page={ledger.meta.page}
+                totalPages={ledger.meta.totalPages}
+                onChange={setPage}
+              />
+            </div>
           </div>
         )}
       </Card>

@@ -4,6 +4,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
 import fs from "fs";
+import { seedAccounts } from "./seed.mjs";
 const require=createRequire(import.meta.url);
 const SERVER="/sessions/awesome-festive-mccarthy/mnt/tams/server";
 const pass=[],fail=[];const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
@@ -23,6 +24,7 @@ const visaC=require(`${SERVER}/controllers/visaController.js`);
 const reportC=require(`${SERVER}/controllers/reportController.js`);
 
 const biz=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.c') RETURNING id`)).rows[0].id;
+await seedAccounts(pg, biz);
 const user=(await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`,[biz])).rows[0].id;
 const ctx={businessId:biz,user:{id:user,role:"admin"}};
 const mkRes=()=>{const r={code:200,body:null};r.status=c=>(r.code=c,r);r.json=b=>(r.body=b,r);return r;};
@@ -60,8 +62,20 @@ ck("reports include cargo",  rep.services.cargo.count===1, `${rep.services.cargo
 ck("visa revenue is charged minus cost", m2(rep.services.visas.revenue)==="100.00", m2(rep.services.visas.revenue));
 const sumRev = rep.services.tickets.revenue+rep.services.cargo.revenue+rep.services.visas.revenue+rep.services.packages.revenue;
 ck("service rows add up to total revenue", m2(sumRev)===m2(rep.summary.total_revenue), `${m2(sumRev)} vs ${m2(rep.summary.total_revenue)}`);
+// Two different questions, deliberately.
+//
+// The per-service `collected` figures answer "of what we sold, how much has
+// been paid" — they read amount_paid off the booking. summary.total_collected
+// answers "how much money arrived in this window" and reads the ledger. This
+// shipment was inserted straight into the table with amount_paid already set
+// and no payment record behind it, so the two legitimately differ: the money
+// is claimed on the row but was never recorded as having arrived anywhere.
+// That gap is exactly what the ledger exists to expose.
 const sumCol = rep.services.tickets.collected+rep.services.cargo.collected+rep.services.visas.collected+rep.services.packages.collected;
-ck("service rows add up to collected", m2(sumCol)===m2(rep.summary.total_collected), `${m2(sumCol)} vs ${m2(rep.summary.total_collected)}`);
+ck("service rows add up to what the bookings say they've been paid",
+   m2(sumCol)===m2(rep.summary.booked_and_paid), `${m2(sumCol)} vs ${m2(rep.summary.booked_and_paid)}`);
+ck("and the headline figure is the ledger, which knows nothing of that orphan 40",
+   m2(rep.summary.total_collected)===m2(sumCol-40), `${m2(rep.summary.total_collected)}`);
 
 console.log(`\nPASS (${pass.length})`);pass.forEach(p=>console.log("  ✓ "+p));
 if(fail.length){console.log(`\nFAIL (${fail.length})`);fail.forEach(f=>console.log("  ✗ "+f));process.exit(1);}

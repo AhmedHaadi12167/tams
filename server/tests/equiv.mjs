@@ -38,7 +38,7 @@ const fresh = await shape(await build(["schema.sql"]));
 const upgraded = await shape(
   await build([
     "schema.sql",
-    ...Array.from({ length: 9 }, (_, i) => `migration_v${i + 10}.sql`),
+    ...Array.from({ length: 12 }, (_, i) => `migration_v${i + 10}.sql`),
   ]),
 );
 

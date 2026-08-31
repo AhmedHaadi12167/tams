@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { accountsAPI } from "../services/api";
 import { Select } from "./ui";
 
@@ -53,7 +54,10 @@ const loadAccounts = () => {
         .map(normalise)
         // A row with no usable id would recreate the original bug silently.
         .filter((a) => Boolean(a.id));
-      cachedError = cache.length === 0 ? "No active accounts were found." : null;
+      // An empty list is not an error. Since migration_v21 a new agency
+      // starts with no accounts and adds its own, so this is the ordinary
+      // first-run state and gets its own, friendlier treatment below.
+      cachedError = null;
       return { accounts: cache, error: cachedError };
     })
     .catch((err) => {
@@ -115,18 +119,24 @@ export default function AccountSelect({
   const heading =
     label || (direction === "out" ? "Paid from *" : "Paid into *");
 
-  // An empty picker is the failure that lets money get filed by guesswork,
-  // so it is shown as an error rather than as a dropdown with nothing in it.
-  if (!loading && (error || accounts.length === 0)) {
+  // An empty picker is the failure that lets money get filed by guesswork, so
+  // it is never rendered as a dropdown with nothing in it. But the two ways of
+  // being empty are not the same thing and must not look the same:
+  //
+  //   - the request failed        → something is broken, offer to retry
+  //   - the agency has none yet   → nothing is broken, offer to add one
+  //
+  // Showing a red "Couldn't load your accounts / Try again" to someone whose
+  // only problem is that they haven't set up a bank account sends them looking
+  // for a fault that doesn't exist.
+  if (!loading && error) {
     return (
       <div className="flex flex-col gap-1">
         <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
           {heading}
         </label>
         <div className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 px-3 py-2">
-          <p className="text-xs text-red-700 dark:text-red-300">
-            {error || "No payment accounts set up yet."}
-          </p>
+          <p className="text-xs text-red-700 dark:text-red-300">{error}</p>
           <button
             type="button"
             onClick={() => {
@@ -137,6 +147,28 @@ export default function AccountSelect({
           >
             Try again
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!loading && accounts.length === 0) {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+          {heading}
+        </label>
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-3 py-2">
+          <p className="text-xs text-amber-800 dark:text-amber-200">
+            No payment accounts yet. Add the bank, mobile-money or cash account
+            this money belongs to, and it will appear here.
+          </p>
+          <Link
+            to="/accounts"
+            className="text-xs font-semibold text-amber-900 dark:text-amber-100 underline mt-1 inline-block"
+          >
+            Add an account
+          </Link>
         </div>
       </div>
     );

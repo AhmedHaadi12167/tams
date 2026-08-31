@@ -4,14 +4,39 @@ const { query } = require('../config/db');
 const response = require('../utils/response');
 const { hasColumn } = require('../services/schemaInfo');
 
+// Optional, and free text on purpose. Every agency invents its own ladder,
+// and a fixed list would be wrong for the second one that signed up.
+const titleRule = body('title')
+  .optional({ nullable: true })
+  .trim()
+  .isLength({ max: 120 })
+  .withMessage('Title must be 120 characters or fewer');
+
 const userValidation = [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('role').isIn(['admin', 'agent', 'accountant']).withMessage('Invalid role'),
-  // Optional, and free text on purpose. Every agency invents its own ladder,
-  // and a fixed list would be wrong for the second one that signed up.
-  body('title').optional({ nullable: true }).trim().isLength({ max: 120 })
-    .withMessage('Title must be 120 characters or fewer'),
+  titleRule,
+];
+
+/**
+ * Editing an existing person is not the same as creating one.
+ *
+ * updateUser deliberately never touches the email address — changing the
+ * address someone signs in with is an account migration, not an edit — so
+ * the form doesn't send one. Sharing the create rules meant the update was
+ * checked for an email that was never going to be there, and every attempt
+ * to save a job title came back as "Validation Error" naming nothing.
+ *
+ * Every field here is optional because the form sends only what changed.
+ */
+const userUpdateValidation = [
+  body('name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
+  body('email').optional().isEmail().withMessage('Valid email is required'),
+  body('role').optional().isIn(['admin', 'agent', 'accountant'])
+    .withMessage('Invalid role'),
+  body('is_active').optional().isBoolean().withMessage('Invalid active flag'),
+  titleRule,
 ];
 
 /**
@@ -111,17 +136,20 @@ const updateUser = async (req, res, next) => {
     // because the title column is optional and hand-numbering a list that
     // changes length is how $4 ends up meaning the user id in one branch
     // and the business id in the other.
+    // Every column is set only when the caller actually sent it. A form that
+    // posts one field must not blank the rest — and `role = NULL` would fail
+    // the NOT NULL constraint and surface as an unexplained 500.
     const vals = [];
     const p = (v) => `$${vals.push(v)}`;
-    const sets = [
-      `name = ${p(name)}`,
-      `role = ${p(role)}`,
-      `is_active = COALESCE(${p(is_active !== undefined ? is_active : null)}, is_active)`,
-    ];
-    // Only when the caller sent the field. The activate/deactivate toggle
-    // posts just name, role and is_active, and must not wipe a title it was
-    // never shown.
-    if (withTitle && title !== undefined) sets.push(`title = ${p(blankToNull(title))}`);
+    const sets = [];
+    if (name !== undefined) sets.push(`name = ${p(name)}`);
+    if (role !== undefined) sets.push(`role = ${p(role)}::user_role`);
+    if (is_active !== undefined) sets.push(`is_active = ${p(is_active)}`);
+    if (withTitle && title !== undefined)
+      sets.push(`title = ${p(blankToNull(title))}`);
+
+    if (sets.length === 0)
+      return response.error(res, 'Nothing to update', 400);
 
     const result = await query(
       `UPDATE users SET ${sets.join(', ')}
@@ -156,4 +184,11 @@ const deleteUser = async (req, res, next) => {
   }
 };
 
-module.exports = { getUsers, createUser, updateUser, deleteUser, userValidation };
+module.exports = {
+  getUsers,
+  createUser,
+  updateUser,
+  deleteUser,
+  userValidation,
+  userUpdateValidation,
+};

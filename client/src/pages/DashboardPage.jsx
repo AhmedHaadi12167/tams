@@ -286,10 +286,17 @@ export default function DashboardPage() {
         { label: "Outstanding", value: money(s.unpaid_money), sub: "All services", icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
       ]
     : [
-        { label: "Tickets Booked", value: count(s.total_tickets), icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
-        { label: "Money Collected", value: money(s.collected_money), sub: "All services", icon: UserPlus, tint: "bg-indigo-50 text-indigo-500 dark:bg-indigo-900/20 dark:text-indigo-400", delta: d.collected_money },
-        { label: "Total Revenue", value: money(s.total_revenue), sub: "All services", icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
-        { label: "Outstanding", value: money(s.unpaid_money), sub: "All services", icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
+        { label: "Tickets Booked", value: count(s.total_tickets), sub: periodLabel, icon: CalendarCheck, tint: "bg-blue-50 text-blue-500 dark:bg-blue-900/20 dark:text-blue-400", delta: d.total_tickets },
+        // Cash that actually arrived in this window, from the ledger — the
+        // same figure the Accounts and Cash Flow pages show.
+        { label: "Money Collected", value: money(s.collected_money), sub: `Received ${periodLabel.toLowerCase()}`, icon: UserPlus, tint: "bg-indigo-50 text-indigo-500 dark:bg-indigo-900/20 dark:text-indigo-400", delta: d.collected_money },
+        // Margin, not sales. The old card added the ticket margin to the full
+        // sale price of cargo, visas and packages, which matched no other
+        // page in the system.
+        { label: "Gross Profit", value: money(s.gross_profit ?? s.total_revenue), sub: `${money(s.gross_sales)} sold`, icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-500 dark:bg-emerald-900/20 dark:text-emerald-400", delta: d.total_revenue },
+        // A balance, not a flow: what customers owe right now, whenever they
+        // booked. It does not shrink just because you narrowed the period.
+        { label: "Outstanding", value: money(s.unpaid_money), sub: "Owed now, all services", icon: Wallet, tint: "bg-amber-50 text-amber-500 dark:bg-amber-900/20 dark:text-amber-400", delta: d.unpaid_money, invert: true },
       ];
 
   return (

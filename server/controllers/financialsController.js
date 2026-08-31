@@ -17,6 +17,11 @@
 
 const { query } = require("../config/db");
 const response = require("../utils/response");
+const {
+  cashMovement,
+  cashBySource,
+  cashDaily,
+} = require("../services/cashLedger");
 const { hasTable } = require("../services/schemaInfo");
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -592,47 +597,62 @@ const getCashFlow = async (req, res, next) => {
       ),
     ]);
 
-    const ticketIn = round2(inflowRes.rows[0].total);
-    const cargoIn = round2(cargoInRes.rows[0].total);
-    const visaIn = round2(visaInRes.rows[0].total);
-    const packageIn = round2(packageInRes.rows[0].total);
-    const totalIn = round2(ticketIn + cargoIn + visaIn + packageIn);
+    // ── One source of truth ──────────────────────────────────
+    //
+    // These figures used to be assembled by hand: ticket payments from the
+    // payments table, cargo from the shipment's amount_paid column, and tax
+    // payments not at all. That is why Cash Flow said 2,560 while the
+    // Accounts page said 2,960 for the same trading — the Accounts page read
+    // the ledger and this one didn't.
+    //
+    // The ledger holds every movement with the account it touched and the
+    // moment it happened, and its total is what makes the account balances
+    // reconcile. Everything below is that same ledger, grouped for display.
+    const [money, bySource, daily] = await Promise.all([
+      cashMovement(businessId, { from: from_date, to: to_date }),
+      cashBySource(businessId, { from: from_date, to: to_date }),
+      cashDaily(businessId, { from: from_date, to: to_date }),
+    ]);
 
-    const expensesOut = round2(outflowRes.rows[0].total);
-    const airlineOut = round2(airlineOutRes.rows[0].total);
-    const agentOut = round2(agentOutRes.rows[0].total);
-    const totalOut = round2(expensesOut + airlineOut + agentOut);
+    const inOf = (src) =>
+      round2(bySource.find((r) => r.source === src)?.collected || 0);
+    const outOf = (src) =>
+      round2(bySource.find((r) => r.source === src)?.paid_out || 0);
 
     return response.success(res, {
       period: { from: from_date || null, to: to_date || null },
       inflow: {
-        ticket_payments: ticketIn,
-        cargo_payments: cargoIn,
-        visa_payments: visaIn,
-        package_payments: packageIn,
-        total: totalIn,
-        entries: parseInt(inflowRes.rows[0].entries),
+        ticket_payments: inOf("ticket"),
+        cargo_payments: inOf("cargo"),
+        visa_payments: inOf("visa"),
+        package_payments: inOf("package"),
+        total: money.collected,
+        entries: money.entries,
         by_method: methodRes.rows.map((r) => ({
           method: r.method || "cash",
           total: round2(r.total),
         })),
       },
       outflow: {
-        expenses: expensesOut,
-        airline_settlements: airlineOut,
-        agent_commission: agentOut,
-        total: totalOut,
-        entries:
-          parseInt(outflowRes.rows[0].entries) +
-          parseInt(airlineOutRes.rows[0].entries || 0) +
-          parseInt(agentOutRes.rows[0].entries || 0),
+        expenses: outOf("expense"),
+        airline_settlements: outOf("airline"),
+        agent_commission: outOf("agent"),
+        tax: outOf("tax"),
+        // Money handed back to customers is an outflow like any other. It was
+        // previously netted invisibly against the day's takings, so a day
+        // with a large refund looked like a quiet day rather than a costly
+        // one.
+        refunds: round2(
+          outOf("ticket") + outOf("cargo") + outOf("visa") + outOf("package"),
+        ),
+        total: money.paid_out,
       },
-      net_cash_flow: round2(totalIn - totalOut),
-      daily: dailyRes.rows.map((r) => ({
+      net_cash_flow: money.net,
+      daily: daily.map((r) => ({
         day: r.day,
-        inflow: round2(r.inflow),
-        outflow: round2(r.outflow),
-        net: round2(n(r.inflow) - n(r.outflow)),
+        inflow: r.inflow,
+        outflow: r.outflow,
+        net: round2(r.inflow - r.outflow),
       })),
     });
   } catch (err) {

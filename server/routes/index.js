@@ -136,7 +136,7 @@ router.post(
 router.put(
   "/users/:id",
   authorize("admin", "super_admin"),
-  userController.userValidation,
+  userController.userUpdateValidation,
   userController.updateUser,
 );
 router.delete(

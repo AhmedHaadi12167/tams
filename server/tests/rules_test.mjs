@@ -14,6 +14,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
 import fs from "fs";
+import { seedAccounts } from "./seed.mjs";
 const require = createRequire(import.meta.url);
 const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
 const pass = [], fail = [];
@@ -57,6 +58,7 @@ const taxC = require(`${SERVER}/controllers/taxController.js`);
 const finC = require(`${SERVER}/controllers/financialsController.js`);
 
 const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('R','r@x.c') RETURNING id`)).rows[0].id;
+await seedAccounts(pg, biz);
 const user = (await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`, [biz])).rows[0].id;
 const A = Object.fromEntries((await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`, [biz])).rows.map((r) => [r.name, r.id]));
 const ctx = { businessId: biz, user: { id: user, role: "admin" } };

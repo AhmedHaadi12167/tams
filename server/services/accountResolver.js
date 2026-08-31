@@ -89,9 +89,6 @@ const resolveAccount = async (input, businessId, client = null) => {
  * wrong — the single worst outcome for a system whose whole job is to say
  * where the money is.
  *
- * It stays silent when the agency has no accounts at all, so an installation
- * that hasn't run migration_v11 keeps working exactly as before.
- *
  * @param {object} input
  * @param {string} businessId
  * @param {object} [client]
@@ -101,6 +98,8 @@ const requireAccount = async (input, businessId, client = null, what = "payment"
   const resolved = await resolveAccount(input, businessId, client);
   if (resolved) return resolved;
 
+  // A database that hasn't run migration_v11 has no accounts table at all,
+  // and predates the whole idea. Nothing to ask for, so nothing to refuse.
   if (!(await hasTable("payment_accounts"))) return null;
 
   const run = client ? client.query.bind(client) : query;
@@ -109,8 +108,29 @@ const requireAccount = async (input, businessId, client = null, what = "payment"
       WHERE business_id = $1 AND is_active LIMIT 1`,
     [businessId],
   );
-  // No accounts configured — nothing to choose from, so don't block the sale.
-  if (any.rows.length === 0) return null;
+
+  // No accounts set up yet.
+  //
+  // This used to let the payment through unassigned, on the reasoning that
+  // there was nothing to choose from so blocking the sale would be unhelpful.
+  // That reasoning held while every business was handed eleven accounts
+  // automatically and having none meant an ancient database. Since v21 stopped
+  // seeding them, having none is the ordinary state of a brand-new agency —
+  // and letting money through in that state means the very first payments an
+  // agency ever takes are the ones that sit outside every balance.
+  //
+  // Better to stop and say what to do. Nothing is lost: the person adds an
+  // account, which takes seconds, and records the payment properly.
+  if (any.rows.length === 0) {
+    const err = new Error(
+      `Add a payment account before recording money. Go to Accounts and ` +
+        `create the bank, mobile-money or cash account this ${what} belongs ` +
+        `to — otherwise it can't appear in any balance.`,
+    );
+    err.statusCode = 400;
+    err.expose = true;
+    throw err;
+  }
 
   const err = new Error(
     `Choose which account this ${what} went into or out of. ` +

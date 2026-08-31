@@ -2,6 +2,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
 import fs from "fs";
+import { seedAccounts } from "./seed.mjs";
 const require = createRequire(import.meta.url);
 const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
 const pass=[],fail=[]; const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
@@ -33,7 +34,9 @@ ck("picks the table up without a restart", later === true,
 // ── 2. An account id from another agency must be refused, not guessed ─────
 const { resolveAccount } = require(`${SERVER}/services/accountResolver.js`);
 const bizA=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('A','a@x.c') RETURNING id`)).rows[0].id;
+await seedAccounts(pg, bizA);
 const bizB=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('B','b@x.c') RETURNING id`)).rows[0].id;
+await seedAccounts(pg, bizB);
 const theirs=(await pg.query(`SELECT id FROM payment_accounts WHERE business_id=$1 AND name='Premier Bank'`,[bizB])).rows[0].id;
 
 let refused=false, msg="";
