@@ -52,5 +52,5 @@ $v20$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS title VARCHAR(120);
 
 COMMENT ON COLUMN users.title IS
-  'Job title shown to customers (e.g. Operations Director). Distinct from '
+  'Job title shown to customers (e.g. Operational Director). Distinct from '
   'role, which is the access level and is never shown outside the system.';

@@ -708,7 +708,7 @@ const invoiceNumber = (customer) => {
  */
 const drawInvoiceHeader = (doc, business, { compact = false } = {}) => {
   const top = 26;
-  const bandH = compact ? 55 : 95;
+  const bandH = compact ? 46 : 66;
   const bandBottom = top + bandH;
 
   // Three things across one row: the agency's mark, its name, and the word
@@ -762,7 +762,7 @@ const drawInvoiceHeader = (doc, business, { compact = false } = {}) => {
   // Left: the agency's own mark, given as much of the band as it can use.
   const boxY = top + 4;
   const boxH = bandH - 8;
-  const LOGO_W = compact ? 140 : 230;
+  const LOGO_W = compact ? 108 : 156;
   const file = logoPath(business?.logo_url);
   let drew = false;
   if (file) {
