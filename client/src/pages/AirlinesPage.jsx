@@ -11,6 +11,7 @@ import {
   Modal,
   Pagination,
   EmptyState,
+  RowsPerPage,
 } from "../components/ui";
 import toast from "react-hot-toast";
 import {
@@ -38,6 +39,7 @@ import {
   X,
   Banknote,
   Wallet,
+  Search,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
@@ -81,18 +83,38 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(50);
   const [exporting, setExporting] = useState(false);
   const [selected, setSelected] = useState([]);
   const [paying, setPaying] = useState(false);
 
+  // What is typed, and what has been asked for. Kept apart so the server
+  // isn't queried on every keystroke of a six-character booking reference.
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // A new search or page size makes the current page number meaningless —
+  // staying on page 4 of a result set with one page shows an empty table.
+  useEffect(() => { setPage(1); }, [query, limit]);
+
   const load = useCallback(() => {
     setLoading(true);
     airlinesAPI
-      .passengers(airline, { ...filters, page, limit: 50 })
+      .passengers(airline, {
+        ...filters,
+        page,
+        limit,
+        search: query || undefined,
+      })
       .then((res) => { setData(res.data.data); setSelected([]); })
       .catch(() => toast.error("Failed to load airline detail"))
       .finally(() => setLoading(false));
-  }, [airline, filters, page]);
+  }, [airline, filters, page, limit, query]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -126,7 +148,10 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
   const exportPDF = async () => {
     setExporting(true);
     try {
-      const res = await airlinesAPI.exportPDF(airline, filters);
+      const res = await airlinesAPI.exportPDF(airline, {
+        ...filters,
+        search: query || undefined,
+      });
       downloadBlob(
         res.data,
         `airline-${airline.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.pdf`,
@@ -150,6 +175,7 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
   const account = data?.account || null;
   const passengers = data?.passengers || [];
   const routes = data?.routes || [];
+  const total = data?.meta?.total ?? passengers.length;
   const owed = Number(account?.balance) || 0;
   const owingIds = passengers.filter((p) => Number(p.airline_balance) > 0).map((p) => p.id);
   const selectedOwed = passengers
@@ -233,24 +259,51 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
 
       {/* Passengers */}
       <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3 gap-3 px-6 pt-6 pb-4 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 pt-6 pb-4">
           <div className="flex items-center gap-2">
             <Users className="w-4 h-4 text-blue-600" />
             <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
               Passengers
             </h2>
-            {s.unsettled > 0 && (
+            {query ? (
               <span className="text-xs text-gray-500 dark:text-gray-400">
-                · {s.unsettled} unsettled ({money(s.cost_unpaid)})
+                · {total} match{total === 1 ? "" : "es"} for “{query}”
               </span>
+            ) : (
+              s.unsettled > 0 && (
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  · {s.unsettled} unsettled ({money(s.cost_unpaid)})
+                </span>
+              )
             )}
           </div>
-          {canPay && selected.length > 0 && (
-            <Button loading={paying} onClick={() => settleTickets(selected)}>
-              <Banknote className="w-4 h-4" />
-              Pay {selected.length} selected · {money(selectedOwed)}
-            </Button>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative">
+              <Search className="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search booking reference…"
+                className="pl-8 pr-8 w-60"
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            {canPay && selected.length > 0 && (
+              <Button loading={paying} onClick={() => settleTickets(selected)}>
+                <Banknote className="w-4 h-4" />
+                Pay {selected.length} selected · {money(selectedOwed)}
+              </Button>
+            )}
+          </div>
         </div>
         {loading ? (
           <div className="flex justify-center py-16">
@@ -258,9 +311,20 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
           </div>
         ) : passengers.length === 0 ? (
           <EmptyState
-            icon={Users}
-            title="No passengers"
-            description="No tickets sold on this airline for the selected filters."
+            icon={query ? Search : Users}
+            title={query ? "Nothing matched" : "No passengers"}
+            description={
+              query
+                ? `No booking reference or passenger on ${airline} matches “${query}”.`
+                : "No tickets sold on this airline for the selected filters."
+            }
+            action={
+              query ? (
+                <Button variant="outline" onClick={() => setSearch("")}>
+                  Clear search
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
           <div className="overflow-x-auto">
@@ -375,12 +439,20 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
             </table>
           </div>
         )}
-        <div className="px-4 pb-4">
-          <Pagination
-            page={page}
-            totalPages={data?.meta?.totalPages || 1}
-            onChange={setPage}
-          />
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 pb-5 pt-1">
+          <RowsPerPage value={limit} onChange={setLimit} />
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {total === 0
+              ? "No rows"
+              : `Showing ${(page - 1) * limit + 1}–${Math.min(page * limit, total)} of ${total}`}
+          </p>
+          <div className="-mt-6">
+            <Pagination
+              page={page}
+              totalPages={data?.meta?.totalPages || 1}
+              onChange={setPage}
+            />
+          </div>
         </div>
       </Card>
 

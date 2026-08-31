@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { useTheme } from "../../context/ThemeContext";
+import { fileUrl } from "../../services/api";
 import {
   LayoutDashboard,
   Ticket,
@@ -106,6 +107,43 @@ const NAV_ITEMS = [
   { path: "/users", label: "Team", icon: Settings, roles: ["admin"] },
 ];
 
+/**
+ * The agency's own logo, where the app's plane icon used to be.
+ *
+ * Falls back to the plane on three separate failures — no logo uploaded, a
+ * logo whose file has gone missing, and an image the browser can't decode —
+ * because a broken image in the corner of every screen is a far worse
+ * outcome than the generic mark the app shipped with.
+ */
+const BrandMark = ({ logoUrl, size = "md" }) => {
+  const [failed, setFailed] = useState(false);
+  const box = size === "sm" ? "w-8 h-8" : "w-9 h-9";
+  const pad = size === "sm" ? "p-1.5" : "p-2";
+  const icon = size === "sm" ? "w-4 h-4" : "w-5 h-5";
+
+  if (logoUrl && !failed) {
+    return (
+      <div
+        className={`${box} rounded-xl bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600
+          flex items-center justify-center overflow-hidden flex-shrink-0`}
+      >
+        <img
+          src={fileUrl(logoUrl)}
+          alt=""
+          onError={() => setFailed(true)}
+          className="max-w-full max-h-full object-contain"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`bg-blue-600 ${pad} rounded-xl flex-shrink-0`}>
+      <Plane className={`${icon} text-white`} />
+    </div>
+  );
+};
+
 const NavItem = ({ item, collapsed, onClick }) => {
   const Icon = item.icon;
   return (
@@ -154,16 +192,17 @@ export const Layout = ({ children }) => {
       <div
         className={`flex items-center gap-3 px-4 py-5 border-b border-gray-200 dark:border-gray-700 ${collapsed ? "justify-center" : ""}`}
       >
-        <div className="bg-blue-600 p-2 rounded-xl flex-shrink-0">
-          <Plane className="w-5 h-5 text-white" />
-        </div>
+        <BrandMark logoUrl={user?.logo_url} />
         {!collapsed && (
           <div className="min-w-0">
-            <p className="font-bold text-gray-900 dark:text-white text-sm leading-none">
-              TAMS
+            {/* The agency's name leads once it has one. A member of staff
+                knows which agency they work for; what they need to see is
+                that they are signed into the right one. */}
+            <p className="font-bold text-gray-900 dark:text-white text-sm leading-tight truncate">
+              {user?.business_name || "TAMS"}
             </p>
             <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
-              {user?.business_name || "Platform"}
+              {user?.business_name ? "TAMS" : "Platform"}
             </p>
           </div>
         )}
@@ -196,9 +235,14 @@ export const Layout = ({ children }) => {
             <p className="text-xs font-medium text-gray-900 dark:text-white truncate">
               {user?.name}
             </p>
-            <p className="text-xs text-gray-500 dark:text-gray-400 capitalize">
-              {user?.role?.replace("_", " ")} ·{" "}
-              <span className="text-blue-500">Edit profile</span>
+            {/* The job title if they have one. A role is an access level —
+                useful to an administrator, and not what anyone calls
+                themselves. */}
+            <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+              <span className={user?.title ? "" : "capitalize"}>
+                {user?.title || user?.role?.replace("_", " ")}
+              </span>{" "}
+              · <span className="text-blue-500">Edit profile</span>
             </p>
           </div>
         )}
@@ -249,12 +293,10 @@ export const Layout = ({ children }) => {
           >
             <Menu className="w-6 h-6" />
           </button>
-          <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-1.5 rounded-lg">
-              <Plane className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-bold text-gray-900 dark:text-white text-sm">
-              TAMS
+          <div className="flex items-center gap-2 min-w-0">
+            <BrandMark logoUrl={user?.logo_url} size="sm" />
+            <span className="font-bold text-gray-900 dark:text-white text-sm truncate">
+              {user?.business_name || "TAMS"}
             </span>
           </div>
         </header>

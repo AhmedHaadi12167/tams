@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { businessAPI, authAPI } from "../services/api";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { businessAPI, authAPI, fileUrl } from "../services/api";
 import {
   Button,
   Card,
@@ -22,6 +22,8 @@ import {
   Users,
   Ticket,
   Package,
+  ImagePlus,
+  X,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -36,6 +38,8 @@ const EMPTY_CREATE = {
   business_email: "",
   business_phone: "",
   business_address: "",
+  business_website: "",
+  business_logo_url: "",
   admin_name: "",
   admin_email: "",
   admin_password: "",
@@ -46,8 +50,111 @@ const EMPTY_EDIT = {
   email: "",
   phone: "",
   address: "",
+  website: "",
+  logo_url: "",
   status: "active",
 };
+
+const LOGO_TYPES = ["image/png", "image/jpeg"];
+const LOGO_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Pick, preview and clear an agency logo.
+ *
+ * The file is uploaded the moment it is chosen rather than on submit, and
+ * the form then carries only the returned file name. That is what lets the
+ * same control work on the registration form, where there is no business
+ * row yet to attach an upload to.
+ *
+ * PNG and JPEG only, and the check is repeated here rather than left to the
+ * server: telling someone their file is the wrong type before a 2MB upload
+ * is a better experience than telling them after, and the real check still
+ * runs server-side where it counts.
+ */
+function LogoPicker({ value, onChange, label = "Agency logo" }) {
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  const pick = async (e) => {
+    const file = e.target.files?.[0];
+    // Cleared straight away so choosing the same file twice still fires.
+    e.target.value = "";
+    if (!file) return;
+
+    if (!LOGO_TYPES.includes(file.type))
+      return toast.error("The logo must be a PNG or JPEG file.");
+    if (file.size > LOGO_MAX_BYTES)
+      return toast.error("That logo is over 2 MB. Please use a smaller file.");
+
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("logo", file);
+      const res = await businessAPI.uploadLogo(fd);
+      onChange(res.data.data.logo_url);
+      toast.success("Logo uploaded");
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Could not upload that logo");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+        {label}
+      </label>
+      <div className="flex items-center gap-3">
+        <div className="w-24 h-16 rounded-xl border border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 flex items-center justify-center overflow-hidden shrink-0">
+          {value ? (
+            <img
+              src={fileUrl(value)}
+              alt="Agency logo"
+              className="max-w-full max-h-full object-contain"
+            />
+          ) : (
+            <ImagePlus className="w-5 h-5 text-gray-400" />
+          )}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              loading={busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {value ? "Replace" : "Choose logo"}
+            </Button>
+            {value && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => onChange("")}
+              >
+                <X className="w-3.5 h-3.5" /> Remove
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            PNG or JPEG, up to 2 MB. Printed on this agency's invoices and
+            shown in their sidebar.
+          </p>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg"
+          className="hidden"
+          onChange={pick}
+        />
+      </div>
+    </div>
+  );
+}
 
 export default function BusinessesPage() {
   const [businesses, setBusinesses] = useState([]);
@@ -96,6 +203,8 @@ export default function BusinessesPage() {
       email: biz.email || "",
       phone: biz.phone || "",
       address: biz.address || "",
+      website: biz.website || "",
+      logo_url: biz.logo_url || "",
       status: biz.status || "active",
     });
     setEditModal(biz);
@@ -261,6 +370,15 @@ export default function BusinessesPage() {
               className="p-5 hover:shadow-md transition-shadow"
             >
               <div className="flex items-start justify-between mb-2">
+                {biz.logo_url && (
+                  <div className="w-11 h-11 mr-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white flex items-center justify-center overflow-hidden shrink-0">
+                    <img
+                      src={fileUrl(biz.logo_url)}
+                      alt=""
+                      className="max-w-full max-h-full object-contain"
+                    />
+                  </div>
+                )}
                 <div className="min-w-0 flex-1 mr-2">
                   <h3 className="font-semibold text-gray-900 dark:text-white truncate">
                     {biz.name}
@@ -380,6 +498,19 @@ export default function BusinessesPage() {
                 label="Address"
                 value={createForm.business_address}
                 onChange={setC("business_address")}
+                placeholder="KM5, Hodan District, Mogadishu"
+              />
+              <Input
+                label="Website"
+                value={createForm.business_website}
+                onChange={setC("business_website")}
+                placeholder="www.example.so"
+              />
+              <LogoPicker
+                value={createForm.business_logo_url}
+                onChange={(v) =>
+                  setCreateForm((f) => ({ ...f, business_logo_url: v }))
+                }
               />
             </div>
           </div>
@@ -458,6 +589,16 @@ export default function BusinessesPage() {
             value={editForm.address}
             onChange={setE("address")}
             placeholder="Mogadishu, Somalia"
+          />
+          <Input
+            label="Website"
+            value={editForm.website}
+            onChange={setE("website")}
+            placeholder="www.example.so"
+          />
+          <LogoPicker
+            value={editForm.logo_url}
+            onChange={(v) => setEditForm((f) => ({ ...f, logo_url: v }))}
           />
           <Select
             label="Status"

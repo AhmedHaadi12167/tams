@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { accountsAPI } from "../services/api";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { accountsAPI, fileUrl } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { refreshAccounts } from "../components/AccountSelect";
 import {
@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Search,
   X,
+  ImagePlus,
 } from "lucide-react";
 import { fmtDate, todayInput } from "../utils/date";
 
@@ -79,14 +80,121 @@ const EMPTY_ACCOUNT = {
   kind: "bank",
   opening_balance: "",
   opening_date: "",
+  // All three are printed on customer invoices. All three are optional: an
+  // account with no icon falls back to its name, and one with no number
+  // still appears so the customer knows the agency accepts it.
+  account_number: "",
+  account_holder: "",
+  icon_url: "",
   notes: "",
   is_active: true,
 };
+
+const ICON_TYPES = ["image/png", "image/jpeg"];
+const ICON_MAX_BYTES = 512 * 1024;
+
+/**
+ * Pick, preview and clear the mark shown beside an account on an invoice.
+ *
+ * Uploaded the moment it is chosen rather than on submit, so the same
+ * control works on the form that CREATES an account, where there is no row
+ * yet to attach an upload to.
+ *
+ * The type and size checks are repeated here rather than left to the
+ * server: telling someone their file is wrong before the upload is a better
+ * experience than after, and the real check still runs server-side where it
+ * counts.
+ */
+function IconPicker({ value, onChange }) {
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  const pick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // so picking the same file twice still fires
+    if (!file) return;
+
+    if (!ICON_TYPES.includes(file.type))
+      return toast.error("The icon must be a PNG or JPEG file.");
+    if (file.size > ICON_MAX_BYTES)
+      return toast.error("That icon is over 512 KB. Please use a smaller file.");
+
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("icon", file);
+      const res = await accountsAPI.uploadIcon(fd);
+      onChange(res.data.data.icon_url);
+      toast.success("Icon uploaded");
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Could not upload that icon");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+        Icon
+      </label>
+      <div className="flex items-center gap-3">
+        <div className="w-14 h-14 rounded-xl border border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 flex items-center justify-center overflow-hidden shrink-0">
+          {value ? (
+            <img
+              src={fileUrl(value)}
+              alt=""
+              className="max-w-full max-h-full object-contain"
+            />
+          ) : (
+            <ImagePlus className="w-5 h-5 text-gray-400" />
+          )}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              loading={busy}
+              onClick={() => inputRef.current?.click()}
+            >
+              {value ? "Replace" : "Choose icon"}
+            </Button>
+            {value && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => onChange("")}
+              >
+                <X className="w-3.5 h-3.5" /> Remove
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            The bank or wallet's logo, shown on invoices in place of the name.
+            Square works best. PNG or JPEG, up to 512 KB.
+          </p>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg"
+          className="hidden"
+          onChange={pick}
+        />
+      </div>
+    </div>
+  );
+}
 
 // ── One account's card ───────────────────────────────────────────────────────
 
 const AccountCard = ({ account, selected, onSelect, onEdit }) => {
   const Icon = kindMeta(account.kind).icon;
+  const [iconFailed, setIconFailed] = useState(false);
+  const showIcon = account.icon_url && !iconFailed;
   const negative = Number(account.balance) < 0;
   return (
     <button
@@ -102,10 +210,26 @@ const AccountCard = ({ account, selected, onSelect, onEdit }) => {
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <Icon className="w-4 h-4 text-gray-400 shrink-0" />
-          <span className="text-sm font-medium text-gray-700 dark:text-gray-200 truncate">
-            {account.name}
-          </span>
+          {showIcon ? (
+            <img
+              src={fileUrl(account.icon_url)}
+              alt=""
+              onError={() => setIconFailed(true)}
+              className="w-5 h-5 object-contain shrink-0"
+            />
+          ) : (
+            <Icon className="w-4 h-4 text-gray-400 shrink-0" />
+          )}
+          <div className="min-w-0">
+            <span className="block text-sm font-medium text-gray-700 dark:text-gray-200 truncate">
+              {account.name}
+            </span>
+            {account.account_number && (
+              <span className="block text-[11px] text-gray-400 truncate">
+                {account.account_number}
+              </span>
+            )}
+          </div>
         </div>
         <span
           role="button"
@@ -165,6 +289,9 @@ function AccountModal({ open, onClose, onSaved, initial }) {
             ...initial,
             opening_balance: initial.opening_balance ?? "",
             opening_date: initial.opening_date || "",
+            account_number: initial.account_number || "",
+            account_holder: initial.account_holder || "",
+            icon_url: initial.icon_url || "",
             notes: initial.notes || "",
           }
         : EMPTY_ACCOUNT,
@@ -183,6 +310,10 @@ function AccountModal({ open, onClose, onSaved, initial }) {
         kind: form.kind,
         opening_balance: parseFloat(form.opening_balance) || 0,
         opening_date: form.opening_date || undefined,
+        // Sent even when empty, so clearing a number actually clears it.
+        account_number: (form.account_number || "").trim(),
+        account_holder: (form.account_holder || "").trim(),
+        icon_url: form.icon_url || "",
         notes: form.notes || undefined,
         is_active: form.is_active,
       };
@@ -243,11 +374,37 @@ function AccountModal({ open, onClose, onSaved, initial }) {
           statement by whatever was already there.
         </p>
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+          <Input
+            label="Account number"
+            value={form.account_number}
+            onChange={set("account_number")}
+            placeholder="e.g. 0252619935009"
+          />
+          <Input
+            label="Account holder"
+            value={form.account_holder}
+            onChange={set("account_holder")}
+            placeholder="Name the account is registered to"
+          />
+        </div>
+
+        <IconPicker
+          value={form.icon_url}
+          onChange={(v) => setForm((f) => ({ ...f, icon_url: v }))}
+        />
+
+        <p className="text-xs text-gray-500 dark:text-gray-400 -mt-1">
+          These are printed on customer invoices so people know where to send
+          money. Every active account except Cash is listed; the number and
+          holder are shown when you fill them in.
+        </p>
+
         <Input
           label="Notes"
           value={form.notes}
           onChange={set("notes")}
-          placeholder="Account number, branch, who manages it…"
+          placeholder="Branch, who manages it, anything internal…"
         />
 
         {editing && (

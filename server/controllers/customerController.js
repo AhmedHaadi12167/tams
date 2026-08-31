@@ -2,8 +2,87 @@ const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
 const { generateCustomerStatementPDF } = require("../services/reportService");
-const { hasTable } = require("../services/schemaInfo");
+const { hasTable, hasColumn } = require("../services/schemaInfo");
 const { phoneMatches } = require("../services/phoneMatch");
+
+/**
+ * The agency's own details, for the head and foot of an invoice.
+ *
+ * Returns a usable object even when the row is missing or the columns
+ * haven't been migrated in. An invoice with no logo is a plain invoice; an
+ * invoice that fails to generate is a member of staff on the phone.
+ */
+const fetchBusiness = async (businessId) => {
+  if (!businessId) return null;
+  try {
+    const withWebsite = await hasColumn("businesses", "website");
+    const r = await query(
+      `SELECT id, name, email, phone, address, logo_url${
+        withWebsite ? ", website" : ", NULL::TEXT AS website"
+      }
+         FROM businesses WHERE id = $1`,
+      [businessId],
+    );
+    return r.rows[0] || null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Where a customer can send money — the strip printed at the foot of an
+ * invoice.
+ *
+ * Every ACTIVE account except cash, whether or not anyone has got round to
+ * filling in its number yet. An earlier version required a number and
+ * quietly printed nothing at all on a fresh install, which reads as a
+ * broken invoice rather than as an unfinished setup — and the account name
+ * and icon alone still tell a customer "we accept Premier Bank".
+ *
+ * Cash is excluded in two ways, by kind and by name, so a seeded Cash
+ * account that someone later retyped as another kind still can't reach the
+ * page. Telling someone to pay cash on a document whose whole job is to say
+ * how to transfer money is noise at best.
+ *
+ * Inactive accounts are excluded for the same reason they are hidden from
+ * payment forms: they are closed, and printing a closed account sends a
+ * customer's money somewhere nobody is watching.
+ *
+ * The optional columns are selected as literal NULLs when the migration
+ * that adds them hasn't run, so the shape handed to the renderer never
+ * changes and neither document needs to know which migrations exist.
+ */
+const fetchPaymentMethods = async (businessId) => {
+  if (!businessId) return [];
+  try {
+    if (!(await hasTable("payment_accounts"))) return [];
+
+    const col = async (name, expr) =>
+      (await hasColumn("payment_accounts", name))
+        ? expr
+        : `NULL::TEXT AS ${name}`;
+
+    const selects = [
+      await col("account_number", "NULLIF(TRIM(account_number), '') AS account_number"),
+      await col("account_holder", "NULLIF(TRIM(account_holder), '') AS account_holder"),
+      await col("icon_url", "NULLIF(TRIM(icon_url), '') AS icon_url"),
+    ];
+
+    const r = await query(
+      `SELECT name, kind, ${selects.join(", ")}
+         FROM payment_accounts
+        WHERE business_id = $1
+          AND is_active
+          AND kind <> 'cash'
+          AND LOWER(TRIM(name)) <> 'cash'
+        ORDER BY sort_order, name`,
+      [businessId],
+    );
+    return r.rows;
+  } catch {
+    return [];
+  }
+};
 
 /**
  * Shared query: everything a customer owes / has paid.
@@ -146,7 +225,17 @@ const fetchStatementData = async (
 
   const money = (v) => Number(v || 0).toFixed(2);
 
+  // Branding and payment instructions. Fetched together because neither can
+  // fail the statement — both resolve to a safe empty value — and running
+  // them in parallel keeps the extra work off the response time.
+  const [business, paymentMethods] = await Promise.all([
+    fetchBusiness(businessId),
+    fetchPaymentMethods(businessId),
+  ]);
+
   return {
+    business,
+    payment_methods: paymentMethods,
     customer: customerResult.rows[0],
     tickets,
     visas,
@@ -230,7 +319,22 @@ const exportCustomerStatementPDF = async (req, res, next) => {
       parseTicketIds(req.query.package_ids),
     );
     if (!data) return response.notFound(res, "Customer not found");
-    generateCustomerStatementPDF(res, data);
+    // Who produced the document. It signs the invoice, which is what turns
+    // a printout into something a customer can query with a named person.
+    generateCustomerStatementPDF(res, {
+      ...data,
+      // A4 by default, A5 on request. Anything else is treated as A4 rather
+      // than refused: a mistyped paper size should not stop someone getting
+      // their invoice.
+      page_size:
+        String(req.query.size || "").toUpperCase() === "A5" ? "A5" : "A4",
+      prepared_by: req.user?.name || null,
+      // The job title if the person has one, the access level if not. A
+      // customer reading "Operations Director" learns who signed their
+      // invoice; "admin" tells them only what the software lets that person
+      // click, which is nobody's business but the agency's.
+      prepared_by_role: req.user?.title || req.user?.role || null,
+    });
   } catch (err) {
     next(err);
   }

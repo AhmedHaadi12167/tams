@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 
 const roleBadge = { admin: 'warning', agent: 'info', accountant: 'purple', super_admin: 'danger' };
 
+
 export default function UsersPage() {
   const { user: me } = useAuth();
   const [users, setUsers] = useState([]);
@@ -16,7 +17,7 @@ export default function UsersPage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [modal, setModal] = useState({ open: false, user: null });
-  const [form, setForm] = useState({ name: '', email: '', role: 'agent', password: '' });
+  const [form, setForm] = useState({ name: '', email: '', title: '', role: 'agent', password: '' });
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
@@ -30,12 +31,12 @@ export default function UsersPage() {
   useEffect(() => { load(); }, [load]);
 
   const openCreate = () => {
-    setForm({ name: '', email: '', role: 'agent', password: '' });
+    setForm({ name: '', email: '', title: '', role: 'agent', password: '' });
     setModal({ open: true, user: null });
   };
 
   const openEdit = (u) => {
-    setForm({ name: u.name, email: u.email, role: u.role, password: '' });
+    setForm({ name: u.name, email: u.email, title: u.title || '', role: u.role, password: '' });
     setModal({ open: true, user: u });
   };
 
@@ -44,7 +45,7 @@ export default function UsersPage() {
     setSaving(true);
     try {
       if (modal.user) {
-        await usersAPI.update(modal.user.id, { name: form.name, role: form.role });
+        await usersAPI.update(modal.user.id, { name: form.name, role: form.role, title: form.title });
         toast.success('User updated');
       } else {
         await usersAPI.create(form);
@@ -103,7 +104,7 @@ export default function UsersPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200 dark:border-gray-700">
-                  {['Name', 'Email', 'Role', 'Status', 'Last login', ''].map(h => (
+                  {['Name', 'Title', 'Email', 'Role', 'Status', 'Last login', ''].map(h => (
                     <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3">{h}</th>
                   ))}
                 </tr>
@@ -112,6 +113,9 @@ export default function UsersPage() {
                 {users.map(u => (
                   <tr key={u.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
                     <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{u.name} {u.id === me?.id && <span className="text-xs text-blue-500">(you)</span>}</td>
+                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                      {u.title || <span className="text-gray-400">—</span>}
+                    </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{u.email}</td>
                     <td className="px-4 py-3"><Badge variant={roleBadge[u.role]}>{u.role.replace('_', ' ')}</Badge></td>
                     <td className="px-4 py-3">
@@ -152,6 +156,16 @@ export default function UsersPage() {
           {!modal.user && (
             <Input label="Email" type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} required />
           )}
+          {/* Free text, with no list attached. Every agency invents its own
+              ladder, and a dropdown — even one you can type past — quietly
+              tells people the answer is supposed to be on it. */}
+          <Input
+            label="Job title"
+            value={form.title}
+            onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
+            placeholder="e.g. Operations Director"
+            hint="Shown to customers on invoices. The role below is the access level and stays internal."
+          />
           <Select label="Role" value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}>
             <option value="admin">Admin</option>
             <option value="agent">Agent</option>

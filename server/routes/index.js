@@ -97,6 +97,14 @@ router.get(
   authorize("super_admin"),
   businessController.getPlatformOverview,
 );
+// Declared before /businesses/:id so the literal segment wins, and before
+// the create/update calls that consume the file name it returns.
+router.post(
+  "/businesses/logo",
+  authorize("super_admin"),
+  upload.logo.single("logo"),
+  businessController.uploadLogo,
+);
 router.get(
   "/businesses",
   authorize("super_admin"),
@@ -491,6 +499,14 @@ router.get(
   "/accounts/ledger",
   authorize("super_admin", "admin", "accountant"),
   accountController.getLedger,
+);
+// Declared before /accounts/:id so the literal segment wins, and before the
+// create/update calls that consume the file name it returns.
+router.post(
+  "/accounts/icon",
+  authorize("super_admin", "admin", "accountant"),
+  upload.icon.single("icon"),
+  accountController.uploadIcon,
 );
 router.post(
   "/accounts",

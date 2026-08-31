@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const { withTransaction, query } = require('../config/db');
 const response = require('../utils/response');
+const { hasColumn } = require('../services/schemaInfo');
 const {
   MAX_ATTEMPTS,
   recordAttempt,
@@ -68,12 +69,40 @@ const createBusiness = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
-    const { business_name, business_email, business_phone, business_address, admin_name, admin_email, admin_password } = req.body;
+    const {
+      business_name, business_email, business_phone, business_address,
+      business_logo_url, business_website,
+      admin_name, admin_email, admin_password,
+    } = req.body;
+
+    // website arrives with migration_v19. Naming a column that isn't there
+    // would fail the whole registration, so it is only written when the
+    // database actually has it — registering an agency must not depend on a
+    // migration for an optional footer field.
+    const withWebsite = await hasColumn('businesses', 'website');
 
     const result = await withTransaction(async (client) => {
+      const cols = ['name', 'email', 'phone', 'address', 'logo_url'];
+      const vals = [
+        business_name,
+        business_email,
+        business_phone || null,
+        business_address || null,
+        // A logo is optional and uploaded separately; '' from an untouched
+        // form must land as NULL, not as an empty file name that the
+        // invoice would then try to read.
+        business_logo_url || null,
+      ];
+      if (withWebsite) {
+        cols.push('website');
+        vals.push(business_website || null);
+      }
+
       const bizResult = await client.query(
-        `INSERT INTO businesses (name, email, phone, address) VALUES ($1, $2, $3, $4) RETURNING id, name, email`,
-        [business_name, business_email, business_phone || null, business_address || null]
+        `INSERT INTO businesses (${cols.join(', ')})
+         VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')})
+         RETURNING id, name, email, logo_url`,
+        vals
       );
       const business = bizResult.rows[0];
 
@@ -108,7 +137,7 @@ const login = async (req, res, next) => {
     const result = await query(
       `SELECT u.id, u.business_id, u.name, u.email, u.password_hash, u.role, u.is_active,
               ${trackLockout ? 'u.failed_attempts, u.locked_until,' : ''}
-              b.name AS business_name, b.status AS business_status
+              b.name AS business_name, b.status AS business_status, b.logo_url
        FROM users u
        LEFT JOIN businesses b ON b.id = u.business_id
        WHERE LOWER(u.email) = LOWER($1)`,
@@ -233,8 +262,10 @@ const logout = async (req, res, next) => {
  */
 const getMe = async (req, res, next) => {
   try {
+    const withTitle = await hasColumn('users', 'title');
     const result = await query(
       `SELECT u.id, u.business_id, u.name, u.email, u.role, u.last_login,
+              ${withTitle ? 'u.title,' : 'NULL::TEXT AS title,'}
               b.name AS business_name, b.logo_url
        FROM users u
        LEFT JOIN businesses b ON b.id = u.business_id

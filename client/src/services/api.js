@@ -129,9 +129,11 @@ export const customersAPI = {
   // Omit it entirely for the full statement.
   statement: (id, sel) =>
     api.get(`/customers/${id}/statement`, { params: selectionParams(sel) }),
-  statementPDF: (id, sel) =>
+  // size: "A4" (default) or "A5". The server lays the invoice out once and
+  // scales it, so the two are the same document on different paper.
+  statementPDF: (id, sel, size) =>
     api.get(`/customers/${id}/statement/pdf`, {
-      params: selectionParams(sel),
+      params: { ...selectionParams(sel), size: size || undefined },
       responseType: "blob",
     }),
 };
@@ -252,6 +254,13 @@ export const usersAPI = {
 
 export const accountsAPI = {
   list: () => api.get("/accounts"),
+  // Uploaded on its own, before the account exists, because the icon is
+  // picked on the form that creates it. Returns { icon_url }.
+  uploadIcon: (formData) =>
+    api.post("/accounts/icon", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 60000,
+    }),
   ledger: (params) => api.get("/accounts/ledger", { params }),
   create: (data) => api.post("/accounts", data),
   update: (id, data) => api.put(`/accounts/${id}`, data),
@@ -271,6 +280,14 @@ export const businessAPI = {
   list: (params) => api.get("/businesses", { params }),
   get: (id) => api.get(`/businesses/${id}`),
   update: (id, data) => api.put(`/businesses/${id}`, data),
+  // Uploaded on its own, before the business exists, because a logo is
+  // picked on the registration form. Returns { logo_url } to send along
+  // with the rest of the form.
+  uploadLogo: (formData) =>
+    api.post("/businesses/logo", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 60000,
+    }),
 };
 
 export const profileAPI = {

@@ -4,6 +4,7 @@ const { query } = require("../config/db");
 const response = require("../utils/response");
 const { sendOTPEmail } = require("../services/emailService");
 const { sessionsReady, lockoutReady } = require("../services/loginSecurity");
+const { hasColumn } = require("../services/schemaInfo");
 
 // In-memory OTP store { email: { otp, expiresAt, name } }
 const otpStore = new Map();
@@ -18,6 +19,7 @@ const getProfile = async (req, res, next) => {
   try {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.role, u.last_login, u.created_at,
+              ${await hasColumn("users", "title") ? "u.title," : "NULL::TEXT AS title,"}
               b.name AS business_name, b.email AS business_email, b.phone AS business_phone
        FROM users u
        LEFT JOIN businesses b ON b.id = u.business_id

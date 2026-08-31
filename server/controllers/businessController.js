@@ -1,6 +1,7 @@
 const { body, validationResult } = require("express-validator");
 const { query } = require("../config/db");
 const response = require("../utils/response");
+const { hasColumn } = require("../services/schemaInfo");
 
 /**
  * GET /api/businesses
@@ -94,29 +95,84 @@ const getBusiness = async (req, res, next) => {
 };
 
 /**
+ * POST /api/businesses/logo
+ *
+ * Stores an image and hands back the file name to put on a business.
+ *
+ * Upload and assignment are separate steps on purpose. A logo is chosen
+ * while REGISTERING an agency, at which point there is no business row to
+ * attach it to — so the file is stored first and its name travels with the
+ * rest of the form. The same endpoint serves the edit screen, where the
+ * name is sent to PUT /businesses/:id instead.
+ *
+ * The consequence is that abandoning a half-filled registration form leaves
+ * an orphaned file. That is the right trade: a few kilobytes of litter
+ * costs nothing, whereas the alternative — creating the business first so
+ * there is something to upload against — would leave a real agency record
+ * behind every abandoned form.
+ */
+const uploadLogo = async (req, res, next) => {
+  try {
+    if (!req.file) return response.error(res, "No logo uploaded", 400);
+    // The file NAME, not a path. Uploads are served from UPLOAD_PATH, which
+    // moves between environments; storing a path would break every logo the
+    // day that directory changes.
+    return response.created(
+      res,
+      { logo_url: `logos/${req.file.filename}` },
+      "Logo uploaded",
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * PUT /api/businesses/:id
  * Update business info and/or status
  */
 const updateBusiness = async (req, res, next) => {
   try {
-    const { name, email, phone, address, status } = req.body;
+    const { name, email, phone, address, status, logo_url, website } = req.body;
+
+    // Three states, not two: absent means "leave it alone", a value means
+    // "set it", and an empty string means "remove it". COALESCE alone can
+    // only express the first two, which is why a logo could be replaced but
+    // never taken off.
+    const tri = (v) => (v === undefined ? null : String(v));
+    const triSet = (col, n) =>
+      `${col} = CASE WHEN $${n}::TEXT IS NULL THEN ${col}
+                     WHEN $${n} = '' THEN NULL
+                     ELSE $${n} END`;
+
+    // website arrives with migration_v19. Writing to it unconditionally
+    // would turn editing a business into a 503 on any database that has not
+    // been migrated yet — for a field nobody asked to change.
+    const withWebsite = await hasColumn("businesses", "website");
+
+    const params = [
+      name || null,
+      email || null,
+      phone || null,
+      address || null,
+      status || null,
+      tri(logo_url),
+    ];
+    if (withWebsite) params.push(tri(website));
+    params.push(req.params.id);
+    const idIdx = params.length;
+
     const result = await query(
       `UPDATE businesses SET
         name        = COALESCE($1, name),
         email       = COALESCE($2, email),
         phone       = COALESCE($3, phone),
         address     = COALESCE($4, address),
-        status      = COALESCE($5::business_status, status)
-       WHERE id = $6
+        status      = COALESCE($5::business_status, status),
+        ${triSet("logo_url", 6)}${withWebsite ? `,\n        ${triSet("website", 7)}` : ""}
+       WHERE id = $${idIdx}
        RETURNING *`,
-      [
-        name || null,
-        email || null,
-        phone || null,
-        address || null,
-        status || null,
-        req.params.id,
-      ],
+      params,
     );
     if (result.rows.length === 0)
       return response.notFound(res, "Business not found");
@@ -180,5 +236,6 @@ module.exports = {
   getBusinesses,
   getBusiness,
   updateBusiness,
+  uploadLogo,
   getPlatformOverview,
 };

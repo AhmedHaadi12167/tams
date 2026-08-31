@@ -2,12 +2,30 @@ const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
 const { query } = require('../config/db');
 const response = require('../utils/response');
+const { hasColumn } = require('../services/schemaInfo');
 
 const userValidation = [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
   body('role').isIn(['admin', 'agent', 'accountant']).withMessage('Invalid role'),
+  // Optional, and free text on purpose. Every agency invents its own ladder,
+  // and a fixed list would be wrong for the second one that signed up.
+  body('title').optional({ nullable: true }).trim().isLength({ max: 120 })
+    .withMessage('Title must be 120 characters or fewer'),
 ];
+
+/**
+ * The job title arrives with migration_v20 and is shown to customers on
+ * invoices. Everything below asks before naming the column, so a database
+ * that has not been migrated manages its team exactly as before.
+ */
+const titleReady = () => hasColumn('users', 'title');
+
+/** Trim to null — an empty box means "no title", not an empty string. */
+const blankToNull = (v) => {
+  const t = String(v ?? '').trim();
+  return t === '' ? null : t;
+};
 
 /**
  * GET /api/users
@@ -27,9 +45,16 @@ const getUsers = async (req, res, next) => {
     }
 
     const where = conditions.join(' AND ');
+    const withTitle = await titleReady();
     const [countRes, dataRes] = await Promise.all([
       query(`SELECT COUNT(*) FROM users WHERE ${where}`, params),
-      query(`SELECT id, name, email, role, is_active, last_login, created_at FROM users WHERE ${where} ORDER BY created_at DESC LIMIT $${pi} OFFSET $${pi + 1}`, [...params, parseInt(limit), offset]),
+      query(
+        `SELECT id, name, email, role, ${withTitle ? 'title' : 'NULL::TEXT AS title'},
+                is_active, last_login, created_at
+           FROM users WHERE ${where}
+          ORDER BY created_at DESC LIMIT $${pi} OFFSET $${pi + 1}`,
+        [...params, parseInt(limit), offset],
+      ),
     ]);
 
     return response.paginated(res, dataRes.rows, page, limit, parseInt(countRes.rows[0].count));
@@ -46,14 +71,23 @@ const createUser = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
-    const { name, email, role, password } = req.body;
+    const { name, email, role, password, title } = req.body;
     if (!password || password.length < 8) return response.error(res, 'Password must be at least 8 characters', 422);
 
+    const withTitle = await titleReady();
     const passwordHash = await bcrypt.hash(password, 12);
+
+    const cols = ['business_id', 'name', 'email', 'password_hash', 'role'];
+    const vals = [req.businessId, name, email, passwordHash, role];
+    if (withTitle) { cols.push('title'); vals.push(blankToNull(title)); }
+
     const result = await query(
-      `INSERT INTO users (business_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,$5)
-       RETURNING id, name, email, role, is_active, created_at`,
-      [req.businessId, name, email, passwordHash, role]
+      `INSERT INTO users (${cols.join(', ')})
+       VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')})
+       RETURNING id, name, email, role,
+                 ${withTitle ? 'title' : 'NULL::TEXT AS title'},
+                 is_active, created_at`,
+      vals
     );
 
     return response.created(res, result.rows[0], 'User created');
@@ -70,12 +104,32 @@ const updateUser = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
-    const { name, role, is_active } = req.body;
+    const { name, role, is_active, title } = req.body;
+    const withTitle = await titleReady();
+
+    // Numbered as the values are pushed rather than written out by hand,
+    // because the title column is optional and hand-numbering a list that
+    // changes length is how $4 ends up meaning the user id in one branch
+    // and the business id in the other.
+    const vals = [];
+    const p = (v) => `$${vals.push(v)}`;
+    const sets = [
+      `name = ${p(name)}`,
+      `role = ${p(role)}`,
+      `is_active = COALESCE(${p(is_active !== undefined ? is_active : null)}, is_active)`,
+    ];
+    // Only when the caller sent the field. The activate/deactivate toggle
+    // posts just name, role and is_active, and must not wipe a title it was
+    // never shown.
+    if (withTitle && title !== undefined) sets.push(`title = ${p(blankToNull(title))}`);
+
     const result = await query(
-      `UPDATE users SET name=$1, role=$2, is_active=COALESCE($3, is_active)
-       WHERE id=$4 AND business_id=$5
-       RETURNING id, name, email, role, is_active`,
-      [name, role, is_active !== undefined ? is_active : null, req.params.id, req.businessId]
+      `UPDATE users SET ${sets.join(', ')}
+       WHERE id=${p(req.params.id)} AND business_id=${p(req.businessId)}
+       RETURNING id, name, email, role,
+                 ${withTitle ? 'title' : 'NULL::TEXT AS title'},
+                 is_active`,
+      vals
     );
 
     if (result.rows.length === 0) return response.notFound(res, 'User not found');

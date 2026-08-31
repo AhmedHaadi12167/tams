@@ -19,7 +19,7 @@
 const { body, validationResult } = require("express-validator");
 const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
-const { hasTable } = require("../services/schemaInfo");
+const { hasTable, hasColumn } = require("../services/schemaInfo");
 const { uuidOrThrow, isUuid } = require("../utils/sqlSafe");
 
 const MIGRATION_MSG =
@@ -28,6 +28,32 @@ const MIGRATION_MSG =
 const KINDS = ["cash", "bank", "mobile", "merchant", "other"];
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
+
+/**
+ * The columns that exist only to print an account on an invoice, in the
+ * order they were added: number and holder with migration_v19, icon with
+ * v20.
+ *
+ * Asked for rather than assumed, and asked for one at a time, so a database
+ * sitting between two migrations keeps working on whichever columns it
+ * actually has. The answers are cached in schemaInfo, so this costs one
+ * round trip per column per fifteen seconds at worst.
+ */
+const INVOICE_COLUMNS = ["account_number", "account_holder", "icon_url"];
+
+const presentInvoiceColumns = async () => {
+  const present = [];
+  for (const c of INVOICE_COLUMNS) {
+    if (await hasColumn("payment_accounts", c)) present.push(c);
+  }
+  return present;
+};
+
+/** Trim to null — an empty box means "not recorded", not an empty string. */
+const blankToNull = (v) => {
+  const t = String(v ?? "").trim();
+  return t === "" ? null : t;
+};
 
 /** Which table each ledger source lives in, for assigning an account later. */
 const SOURCE_TABLES = {
@@ -68,9 +94,13 @@ const getAccounts = async (req, res, next) => {
     if (!(await hasTable("payment_accounts")))
       return response.error(res, MIGRATION_MSG, 503);
 
+    const invoiceCols = await presentInvoiceColumns();
+
     const [accountsRes, unassignedRes, tradeRes] = await Promise.all([
       query(
-        `SELECT b.*, a.notes, a.opening_date
+        `SELECT b.*, a.notes, a.opening_date${
+          invoiceCols.map((c) => `, a.${c}`).join("")
+        }
            FROM v_account_balance b
            JOIN payment_accounts a ON a.id = b.account_id
           WHERE b.business_id = $1
@@ -269,6 +299,31 @@ const getLedger = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/accounts/icon
+ *
+ * Stores an image and hands back the file name to put on an account.
+ *
+ * Upload and assignment are separate steps, exactly as they are for an
+ * agency logo, and for the same reason: the icon is chosen on the form that
+ * CREATES the account, when there is no row yet to attach it to. An
+ * abandoned form leaves a few kilobytes of litter, which is a far better
+ * trade than creating the account first so there is something to upload
+ * against.
+ */
+const uploadIcon = async (req, res, next) => {
+  try {
+    if (!req.file) return response.error(res, "No icon uploaded", 400);
+    return response.created(
+      res,
+      { icon_url: `icons/${req.file.filename}` },
+      "Icon uploaded",
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
 /** POST /api/accounts */
 const createAccount = async (req, res, next) => {
   try {
@@ -280,20 +335,28 @@ const createAccount = async (req, res, next) => {
 
     const { name, kind, opening_balance, opening_date, notes } = req.body;
 
+    const cols = [
+      "business_id", "name", "kind", "opening_balance", "opening_date", "notes",
+    ];
+    const vals = [
+      req.businessId,
+      String(name).trim(),
+      KINDS.includes(kind) ? kind : "bank",
+      round2(opening_balance),
+      opening_date || null,
+      notes || null,
+    ];
+    for (const c of await presentInvoiceColumns()) {
+      cols.push(c);
+      vals.push(blankToNull(req.body[c]));
+    }
+
     const result = await query(
-      `INSERT INTO payment_accounts
-         (business_id, name, kind, opening_balance, opening_date, notes, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,
+      `INSERT INTO payment_accounts (${cols.join(", ")}, sort_order)
+       VALUES (${cols.map((_, i) => `$${i + 1}`).join(", ")},
                COALESCE((SELECT MAX(sort_order)+10 FROM payment_accounts WHERE business_id=$1), 0))
        RETURNING *`,
-      [
-        req.businessId,
-        String(name).trim(),
-        KINDS.includes(kind) ? kind : "bank",
-        round2(opening_balance),
-        opening_date || null,
-        notes || null,
-      ],
+      vals,
     );
     return response.created(res, result.rows[0], "Account added");
   } catch (err) {
@@ -310,29 +373,37 @@ const updateAccount = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
-    const { name, kind, opening_balance, opening_date, notes, is_active } = req.body;
+    const { name, kind, opening_balance, opening_date, notes, is_active } =
+      req.body;
+
+    const sets = [];
+    const vals = [];
+    const p = (v) => `$${vals.push(v)}`;
+
+    // Numbered as the values are pushed, because two of these columns are
+    // optional and hand-numbering a list that changes length is how $7 ends
+    // up meaning the account id in one branch and the business id in the
+    // other.
+    sets.push(`name = ${p(String(name).trim())}`);
+    sets.push(`kind = ${p(KINDS.includes(kind) ? kind : "bank")}`);
+    sets.push(`opening_balance = ${p(round2(opening_balance))}`);
+    sets.push(`opening_date = ${p(opening_date || null)}`);
+    sets.push(`notes = ${p(notes || null)}`);
+    sets.push(
+      `is_active = COALESCE(${p(typeof is_active === "boolean" ? is_active : null)}, is_active)`,
+    );
+    for (const c of await presentInvoiceColumns()) {
+      sets.push(`${c} = ${p(blankToNull(req.body[c]))}`);
+    }
+    sets.push("updated_at = NOW()");
 
     const result = await query(
       `UPDATE payment_accounts
-          SET name = $1,
-              kind = $2,
-              opening_balance = $3,
-              opening_date = $4,
-              notes = $5,
-              is_active = COALESCE($6, is_active),
-              updated_at = NOW()
-        WHERE id = $7 AND business_id = $8
+          SET ${sets.join(",\n              ")}
+        WHERE id = ${p(uuidOrThrow(req.params.id, "account id"))}
+          AND business_id = ${p(req.businessId)}
         RETURNING *`,
-      [
-        String(name).trim(),
-        KINDS.includes(kind) ? kind : "bank",
-        round2(opening_balance),
-        opening_date || null,
-        notes || null,
-        typeof is_active === "boolean" ? is_active : null,
-        uuidOrThrow(req.params.id, "account id"),
-        req.businessId,
-      ],
+      vals,
     );
     if (result.rows.length === 0) return response.notFound(res, "Account not found");
     return response.success(res, result.rows[0], "Account updated");
@@ -493,6 +564,7 @@ module.exports = {
   transferValidation,
   getAccounts,
   getLedger,
+  uploadIcon,
   createAccount,
   updateAccount,
   deleteAccount,

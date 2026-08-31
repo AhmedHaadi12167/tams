@@ -84,6 +84,29 @@ const buildFilters = (req, startIdx = 2) => {
 };
 
 /**
+ * Narrow a passenger list to one booking.
+ *
+ * The reference is what an agent is actually holding when they need this —
+ * a customer rings quoting a PNR, or a carrier queries one line on a
+ * settlement sheet. The passenger name is matched too, because the other
+ * half of those calls begins "it's for Hassan Ali" and nobody wants to be
+ * told to go and find the reference first.
+ *
+ * Returns a NEW where clause and mutates `params` in step with it, so the
+ * caller's placeholder numbering stays consistent across every query that
+ * shares the pair.
+ */
+const applyPassengerSearch = (req, where, params, nextIdx) => {
+  const search = String(req.query.search || "").trim();
+  if (!search) return { where, nextIdx };
+  params.push(`%${search}%`);
+  return {
+    where: `${where} AND (t.ticket_reference ILIKE $${nextIdx} OR t.passenger_name ILIKE $${nextIdx})`,
+    nextIdx: nextIdx + 1,
+  };
+};
+
+/**
  * GET /api/airlines
  * Every airline the agency has sold, ranked, with totals.
  * Also returns a plain name list for filter dropdowns.
@@ -216,8 +239,24 @@ const getAirlinePassengers = async (req, res, next) => {
 
     // Force the airline filter onto the request
     req.query.airline_name = airlineName;
-    const { where, params, nextIdx } = buildFilters(req);
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const base = buildFilters(req);
+    const params = base.params;
+    // Search narrows every figure on the screen, not just the table. A
+    // summary that still totalled the whole airline while the list showed
+    // one passenger would read as a bug, and an agent would be right to
+    // distrust the number.
+    const { where, nextIdx } = applyPassengerSearch(
+      req,
+      base.where,
+      params,
+      base.nextIdx,
+    );
+
+    // Bounded, because the page size arrives from the query string and an
+    // unbounded one is a way to ask the server for every ticket at once.
+    const lim = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+    const pageNo = Math.max(parseInt(page) || 1, 1);
+    const offset = (pageNo - 1) * lim;
 
     // Settlement columns only exist after migration v9
     const perTicket = await hasColumn("tickets", "airline_paid");
@@ -271,7 +310,7 @@ const getAirlinePassengers = async (req, res, next) => {
          WHERE ${where}
          ORDER BY t.flight_date DESC, t.created_at DESC
          LIMIT $${nextIdx} OFFSET $${nextIdx + 1}`,
-        [businessId, ...params, parseInt(limit), offset],
+        [businessId, ...params, lim, offset],
       ),
     ]);
 
@@ -287,7 +326,7 @@ const getAirlinePassengers = async (req, res, next) => {
         account: null,
         routes: [],
         passengers: [],
-        meta: { page: 1, limit: parseInt(limit), total: 0, totalPages: 0 },
+        meta: { page: 1, limit: lim, total: 0, totalPages: 0 },
       });
     }
 
@@ -333,10 +372,10 @@ const getAirlinePassengers = async (req, res, next) => {
       })),
       passengers: listRes.rows,
       meta: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNo,
+        limit: lim,
         total,
-        totalPages: Math.ceil(total / parseInt(limit)),
+        totalPages: Math.ceil(total / lim),
       },
     });
   } catch (err) {
@@ -353,7 +392,12 @@ const exportAirlinePDF = async (req, res, next) => {
     const businessId = req.businessId;
     const airlineName = decodeURIComponent(req.params.name);
     req.query.airline_name = airlineName;
-    const { where, params } = buildFilters(req);
+    const base = buildFilters(req);
+    const params = base.params;
+    // Same search the screen applied. Exporting the whole carrier from a
+    // filtered view would hand someone a PDF that disagrees with the page
+    // they pressed the button on.
+    const { where } = applyPassengerSearch(req, base.where, params, base.nextIdx);
 
     const [summaryRes, listRes, routesRes] = await Promise.all([
       query(

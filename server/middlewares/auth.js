@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const { query } = require("../config/db");
 const response = require("../utils/response");
 const { sessionsReady } = require("../services/loginSecurity");
+const { hasColumn } = require("../services/schemaInfo");
 
 const authenticate = async (req, res, next) => {
   try {
@@ -16,9 +17,14 @@ const authenticate = async (req, res, next) => {
     // every request anyway to confirm the user is still active, so adding
     // session_id to the SELECT costs nothing.
     const trackSessions = await sessionsReady();
+    // The job title travels with the user for the same reason the role
+    // does: anything that signs a document on this person's behalf needs it
+    // without going back to the database. Arrives with migration_v20.
+    const withTitle = await hasColumn("users", "title");
 
     const result = await query(
       `SELECT id, business_id, name, email, role, is_active
+              ${withTitle ? ", title" : ""}
               ${trackSessions ? ", session_id" : ""}
          FROM users WHERE id = $1`,
       [decoded.userId],
