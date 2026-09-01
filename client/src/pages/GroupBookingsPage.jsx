@@ -33,6 +33,7 @@ import {
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
+import { openPrintWindow } from "../utils/printWindow";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -448,13 +449,10 @@ const printGroupStatement = (group) => {
     </div>
     <table><thead><tr><th>#</th><th>Passenger</th><th>Route</th><th>Flight</th><th>Airline</th><th>Type</th><th>Selling</th><th>Paid</th><th>Balance</th><th>Payment</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <script>window.onload=function(){window.print()}</script>
     </body></html>`;
 
-  const win = window.open("", "_blank");
+  const win = openPrintWindow(html);
   if (!win) return toast.error("Allow pop-ups to print the statement");
-  win.document.write(html);
-  win.document.close();
 };
 
 // ─── Group Statement Modal ────────────────────────────────────────────────────

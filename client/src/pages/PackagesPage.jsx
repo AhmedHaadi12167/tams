@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
+import { openPrintWindow } from "../utils/printWindow";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -379,12 +380,9 @@ const printQuote = (pkg, items) => {
       <div class="box"><div class="l">Paid</div><div class="v" style="color:#15803d">$${Number(pkg.amount_paid).toFixed(2)}</div></div>
       <div class="box"><div class="l">Balance</div><div class="v" style="color:#b91c1c">$${(Number(pkg.selling_price) - Number(pkg.amount_paid)).toFixed(2)}</div></div>
     </div>
-    <script>window.onload=function(){window.print()}</script>
   </body></html>`;
-  const win = window.open("", "_blank");
+  const win = openPrintWindow(html);
   if (!win) return toast.error("Allow pop-ups to print");
-  win.document.write(html);
-  win.document.close();
 };
 
 function DetailModal({ open, onClose, packageId, onChanged }) {

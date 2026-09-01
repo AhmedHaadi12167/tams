@@ -192,6 +192,55 @@ const INV_CSS = `
  * time either was touched, and the PDF does the same thing for the same
  * reason.
  */
+/**
+ * Make the invoice window work — from this window, not from inside it.
+ *
+ * The invoice opens as about:blank and is written into, so it inherits this
+ * page's Content-Security-Policy. In production that policy forbids inline
+ * script, which is deliberate: it is what stops an injected <script> in a
+ * customer's name from ever running. It also, unavoidably, stopped the
+ * invoice's own <script> block and its onclick="" handlers — so the Print
+ * button did nothing and the dialog never opened. On a local dev server
+ * there is no such policy, which is why it only ever failed in production.
+ *
+ * The fix is not to weaken the policy. A popup opened from here shares this
+ * origin, so script already running here can reach into its DOM and attach
+ * listeners; nothing inline is needed. Same behaviour, nothing relaxed.
+ */
+const wirePrintWindow = (win, paper) => {
+  const doc = win.document;
+  const setPaper = (size) => {
+    const style = doc.getElementById("paper");
+    if (style) style.textContent = PAPER_CSS[size] || PAPER_CSS.A4;
+    const a4 = doc.getElementById("p-a4");
+    const a5 = doc.getElementById("p-a5");
+    if (a4) a4.className = size === "A4" ? "on" : "";
+    if (a5) a5.className = size === "A5" ? "on" : "";
+  };
+
+  doc.getElementById("p-a4")?.addEventListener("click", () => setPaper("A4"));
+  doc.getElementById("p-a5")?.addEventListener("click", () => setPaper("A5"));
+  doc.getElementById("p-go")?.addEventListener("click", () => {
+    win.focus();
+    win.print();
+  });
+
+  setPaper(paper || "A4");
+
+  // Wait for the logo and icons to paint before opening the dialog,
+  // otherwise the first print of a session comes out with empty boxes.
+  const go = () => {
+    try {
+      win.focus();
+      win.print();
+    } catch {
+      // The user closed the window before it settled. Nothing to do.
+    }
+  };
+  if (doc.readyState === "complete") setTimeout(go, 350);
+  else win.addEventListener("load", () => setTimeout(go, 350));
+};
+
 const PAPER_CSS = {
   A4: `@page{size:A4;margin:10mm} body{zoom:1}`,
   A5: `@page{size:A5;margin:7mm} body{zoom:0.706}`,
@@ -368,9 +417,9 @@ const printStatement = (data, preparedBy, paper = "A4") => {
 
     <div class="bar">
       <span>Paper</span>
-      <button type="button" id="p-a4" class="on" onclick="setPaper('A4')">A4</button>
-      <button type="button" id="p-a5" onclick="setPaper('A5')">A5</button>
-      <button type="button" class="go" onclick="window.print()">Print</button>
+      <button type="button" id="p-a4" class="on">A4</button>
+      <button type="button" id="p-a5">A5</button>
+      <button type="button" id="p-go" class="go">Print</button>
     </div>
 
     <div class="band">
@@ -482,29 +531,13 @@ const printStatement = (data, preparedBy, paper = "A4") => {
       <div class="gen">generated ${esc(new Date().toLocaleString("en-GB"))}</div>
     </section>
 
-    <script>
-      var PAPER = ${JSON.stringify(PAPER_CSS)};
-      function setPaper(size) {
-        document.getElementById("paper").textContent = PAPER[size] || PAPER.A4;
-        document.getElementById("p-a4").className = size === "A4" ? "on" : "";
-        document.getElementById("p-a5").className = size === "A5" ? "on" : "";
-      }
-      setPaper(${JSON.stringify(paper)});
-
-      // Wait for the logo and icons to paint before opening the dialog,
-      // otherwise the first print of a session comes out with empty boxes.
-      (function () {
-        function go() { window.focus(); window.print(); }
-        if (document.readyState === "complete") setTimeout(go, 350);
-        else window.addEventListener("load", function () { setTimeout(go, 350); });
-      })();
-    </script>
     </body></html>`;
 
   const win = window.open("", "_blank");
   if (!win) return toast.error("Allow pop-ups to print the invoice");
   win.document.write(html);
   win.document.close();
+  wirePrintWindow(win, paper);
 };
 
 /**

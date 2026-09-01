@@ -33,6 +33,7 @@ import {
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
+import { openPrintWindow } from "../utils/printWindow";
 
 const statusVariant = {
   active: "success",
@@ -450,12 +451,9 @@ const printManifest = (rows, summary, label) => {
       ${summary.balance_due > 0 ? ` · $${Number(summary.balance_due).toFixed(2)} still to collect` : ""}</p>
     <table><thead><tr><th>#</th><th>Passenger</th><th>Phone</th><th>Route</th><th>Airline</th><th>Ref</th><th>Type</th><th>Balance</th></tr></thead>
     <tbody>${body}</tbody></table>
-    <script>window.onload=function(){window.print()}</script>
   </body></html>`;
-  const win = window.open("", "_blank");
+  const win = openPrintWindow(html);
   if (!win) return toast.error("Allow pop-ups to print the manifest");
-  win.document.write(html);
-  win.document.close();
 };
 
 function ManifestModal({ open, onClose }) {
