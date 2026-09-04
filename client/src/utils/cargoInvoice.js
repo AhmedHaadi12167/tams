@@ -8,9 +8,21 @@
  * What differs is only what a parcel has and a seat does not — a tracking
  * number, a weight, and where it has landed — so those replace the flight
  * columns rather than being bolted on beside them.
+ *
+ * It also carries the tracking strip (see invoice.js): the address, the
+ * number, and how to search for it, in Somali. The tracking page existed for
+ * a while and went unused because nothing the customer took home ever
+ * mentioned it — they phoned the office instead.
  */
 
-import { INV_CSS, PAPER_CSS, DISC_ICONS, esc, wirePrintWindow } from "./invoice";
+import {
+  INV_CSS,
+  PAPER_CSS,
+  DISC_ICONS,
+  esc,
+  wirePrintWindow,
+  trackingStrip,
+} from "./invoice";
 
 const money = (v) => `$${(Number(v) || 0).toFixed(2)}`;
 
@@ -179,6 +191,12 @@ export const buildCargoInvoice = (
         <div class="strong"><span class="l">BALANCE</span><span class="v">${money(balance)}</span></div>
       </div>
     </section>
+
+    ${trackingStrip({
+      brand: business.name,
+      trackingNumber: shipment.tracking_number,
+      siteUrl: options.siteUrl,
+    })}
 
     ${
       options.preparedBy

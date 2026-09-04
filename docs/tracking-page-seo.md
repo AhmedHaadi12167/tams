@@ -92,10 +92,20 @@ name and clicking your result, over months. Nothing in a codebase shortcuts it.
 So the reliable route to a customer is still the link, and the link is now
 worth sharing:
 
-- Put `tams.ecosagency.com/track` on the cargo receipt, on WhatsApp Business,
-  and on your Facebook page.
+- **The cargo receipt now prints it.** Every parcel goes home with a dashed
+  strip carrying the address, the tracking number, and — in Somali — how to
+  find it: open `tams.ecosagency.com/track`, or search
+  *"Mubah Travel raadi alaabtaada"*. The page had been sitting there unused
+  because nothing the customer took home ever mentioned it, so they phoned
+  the office instead.
 - Send `tams.ecosagency.com/track/CGO-100001` — it opens straight to that
   parcel, and the preview shows the agency name.
+- Put the same address on WhatsApp Business and on your Facebook page.
+
+Note the search phrase printed on the receipt includes the agency name. That
+is deliberate, and it is the same reasoning as the section above: "raadi
+alaabtaada" on its own competes with every Somali site using two ordinary
+words, while nothing at all competes for your name.
 
 The SEO work makes sure that when someone *does* find the page — searched,
 shared, or remembered — it looks like a real service instead of an internal

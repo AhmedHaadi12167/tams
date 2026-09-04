@@ -130,6 +130,37 @@ const INV_CSS = `
   .method .hold{font-size:10.9px;color:var(--muted);margin-top:2px;
                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+  /* ── Tracking strip: how to find the parcel without phoning the office ──
+     Somali first. The person holding this receipt is being told how to do
+     something, and instructions in a second language are instructions that
+     do not get followed. The English underneath is one line, for whoever
+     else ends up holding the paper.
+
+     Dashed edge and a tinted ground so it reads as a coupon rather than as
+     more of the invoice — it is the one block on the page that asks the
+     customer to go and do something. */
+  .track{margin-top:14px;border:1.6px dashed var(--teal);border-radius:8px;
+         background:var(--teal-pale);padding:11px 14px}
+  .track .th{display:flex;align-items:baseline;gap:9px;margin-bottom:7px}
+  .track .th b{font-size:15.6px;color:var(--teal-deep);letter-spacing:.4px}
+  .track .th span{font-size:11.8px;color:var(--muted)}
+  .track .tb{display:flex;gap:14px;align-items:stretch}
+  .track ol{flex:1;min-width:0;margin:0;padding-left:17px}
+  .track li{font-size:13.6px;line-height:1.62;color:var(--body);overflow-wrap:anywhere}
+  .track li b{color:var(--slate)}
+  /* The two things a customer copies. Set apart from the prose so they can
+     be found by someone squinting at a folded receipt. */
+  .track .q{display:inline-block;background:#fff;border:1px solid var(--teal-soft);
+            border-radius:4px;padding:0 5px;font-weight:bold;color:var(--teal-deep)}
+  .track .tcard{width:196px;flex-shrink:0;background:#fff;border:1.4px solid var(--teal);
+                border-radius:7px;padding:9px 10px;text-align:center;
+                display:flex;flex-direction:column;justify-content:center}
+  .track .tl{font-size:9.6px;font-weight:bold;color:var(--teal);letter-spacing:.9px}
+  .track .tn{font-size:20.5px;font-weight:bold;color:var(--slate);margin:3px 0 4px;
+             overflow-wrap:anywhere;line-height:1.15}
+  .track .tu{font-size:11.2px;color:var(--muted);overflow-wrap:anywhere;line-height:1.4}
+  .track .en{font-size:11.2px;color:var(--muted);margin-top:8px;overflow-wrap:anywhere}
+
   .sign{text-align:center;margin-top:16px}
   .sign .n{font-size:15.6px;font-weight:bold;color:var(--slate)}
   .sign .n span{font-weight:normal;color:var(--muted)}
@@ -236,4 +267,87 @@ const esc = (v) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-export { INV_CSS, PAPER_CSS, DISC_ICONS, esc, wirePrintWindow };
+/**
+ * The public address of this installation, as a customer would type it.
+ *
+ * Taken from the browser rather than from a build-time variable: the receipt
+ * is printed from the live site, so the address in the address bar is by
+ * definition the one that works. A configured constant is one deployment
+ * away from printing an address that does not.
+ */
+const siteHost = (override) => {
+  const raw =
+    override ||
+    (typeof window !== "undefined" ? window.location.origin : "") ||
+    "";
+  return raw.replace(/^https?:\/\//, "").replace(/\/$/, "");
+};
+
+/**
+ * trackingStrip — how to find the parcel, printed on the parcel's receipt.
+ *
+ * The tracking page has existed for a while and almost nobody used it,
+ * because nothing the customer was handed ever mentioned it. They phoned the
+ * office instead. This is the fix, and it belongs on paper rather than in
+ * the app: the receipt is the one thing that goes home with them.
+ *
+ * Written in Somali first. The person holding this is being told how to do
+ * something, and instructions in a language they read second are
+ * instructions that do not get followed. One English line follows for
+ * whoever else ends up with the paper.
+ *
+ * Three routes are given, in order of how likely each is to work:
+ *
+ *   1. the address typed straight in — always works, needs no index
+ *   2. the direct link with the number already in it — one tap from WhatsApp
+ *   3. a search, agency name included, which is the query that can actually
+ *      rank; "raadi alaabtaada" alone competes with every Somali site using
+ *      two ordinary words
+ *
+ * @param {object} args
+ * @param {string} args.brand           the agency's name, for the search
+ * @param {string} [args.trackingNumber]
+ * @param {string} [args.siteUrl]       override, for a different domain
+ */
+const trackingStrip = ({ brand, trackingNumber, siteUrl } = {}) => {
+  const host = siteHost(siteUrl);
+  if (!host) return ""; // nothing sensible to print
+  const name = String(brand || "").trim();
+  const num = String(trackingNumber || "").trim();
+  const search = [name, "raadi alaabtaada"].filter(Boolean).join(" ");
+  const direct = num ? `${host}/track/${num}` : `${host}/track`;
+
+  return `<section class="track">
+    <div class="th"><b>RAADI ALAABTAADA</b><span>Track your shipment</span></div>
+    <div class="tb">
+      <ol>
+        <li>Fur Google ama browser kasta oo taleefankaaga ku jira.</li>
+        <li>Ku qor cinwaankan: <span class="q">${esc(host)}/track</span>
+            ama raadi <span class="q">${esc(search)}</span>.</li>
+        <li>Geli lambarka raadraaca${
+          num ? ` — <b>${esc(num)}</b>` : ""
+        } ka dibna riix <b>Raadi</b>.</li>
+        <li>Waxaad arki doontaa halka ay alaabtaadu maanta joogto, xafiiska
+            haya, iyo lambarka aad wacdo.</li>
+      </ol>
+      <div class="tcard">
+        <div class="tl">LAMBARKA RAADRAACA</div>
+        <div class="tn">${esc(num || "—")}</div>
+        <div class="tu">${esc(direct)}</div>
+      </div>
+    </div>
+    <div class="en">Track your shipment: open <b>${esc(host)}/track</b> and enter
+      ${num ? `<b>${esc(num)}</b>` : "your tracking number"}, or go straight to
+      <b>${esc(direct)}</b>. Keep this number — it is the only one we can look up.</div>
+  </section>`;
+};
+
+export {
+  INV_CSS,
+  PAPER_CSS,
+  DISC_ICONS,
+  esc,
+  wirePrintWindow,
+  trackingStrip,
+  siteHost,
+};
