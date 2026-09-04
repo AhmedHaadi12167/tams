@@ -920,23 +920,27 @@ function StatementModal({
 //
 // A customer used to exist only as a by-product of a booking, so putting a
 // walk-in on file meant inventing a ticket and deleting it afterwards.
+const EMPTY_CUSTOMER = {
+  name: "",
+  phone: "",
+  email: "",
+  passport_number: "",
+  nationality: "",
+  customer_type: "individual",
+  company_name: "",
+};
+
 function AddCustomerModal({ open, onClose, onSaved }) {
-  const empty = {
-    name: "",
-    phone: "",
-    email: "",
-    passport_number: "",
-    nationality: "",
-    customer_type: "individual",
-    company_name: "",
-  };
-  const [form, setForm] = useState(empty);
+  const [form, setForm] = useState(EMPTY_CUSTOMER);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
+  // Blank on every open, so the last person's details are never sitting in
+  // the boxes when the next one walks in. EMPTY_CUSTOMER lives outside the
+  // component: rebuilt on each render it would be a new object every time,
+  // which is a dependency that can never settle.
   useEffect(() => {
-    if (open) setForm(empty);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (open) setForm(EMPTY_CUSTOMER);
   }, [open]);
 
   const submit = async (e) => {

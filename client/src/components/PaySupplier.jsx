@@ -59,13 +59,17 @@ export function PaySupplierModal({ kind, record, open, onClose, onPaid }) {
   // Pre-filled with the whole balance each time it opens, because settling in
   // full is what usually happens and retyping a number the system already
   // knows is a chance to get it wrong.
+  //
+  // `owed` rather than `record.id` in the deps: it is a number, so it only
+  // changes when the balance actually changes, and if the page refetches
+  // underneath an open modal the field follows the truth instead of showing
+  // a figure that was right a minute ago.
   useEffect(() => {
     if (!open) return;
     setAmount(owed.toFixed(2));
     setAccountId("");
     setReference("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, record?.id]);
+  }, [open, owed]);
 
   if (!record) return null;
 
