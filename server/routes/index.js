@@ -18,6 +18,7 @@ const profileController = require("../controllers/profileController");
 const expenseController = require("../controllers/expenseController");
 const financialsController = require("../controllers/financialsController");
 const airlineController = require("../controllers/airlineController");
+const supplierController = require("../controllers/supplierController");
 const agentController = require("../controllers/agentController");
 const visaController = require("../controllers/visaController");
 const packageController = require("../controllers/packageController");
@@ -91,6 +92,12 @@ router.post(
   authorize("super_admin"),
   authController.businessValidation,
   authController.createBusiness,
+);
+// Before /businesses/:id so the literal segment wins.
+router.get(
+  "/businesses/mine",
+  authorize("admin", "agent", "accountant"),
+  businessController.getMyBusiness,
 );
 router.get(
   "/businesses/overview",
@@ -224,6 +231,12 @@ router.post(
   authorize("super_admin", "admin", "agent", "accountant"),
   cargoController.addCargoPayment,
 );
+// Before /cargo/:id so the literal segment wins.
+router.get(
+  "/cargo/:id/payments",
+  authorize("admin", "agent", "accountant"),
+  cargoController.getCargoPayments,
+);
 router.get(
   "/cargo",
   authorize("admin", "agent", "accountant"),
@@ -252,6 +265,12 @@ router.delete(
 );
 
 // ── Customers ─────────────────────────────────────────────
+router.post(
+  "/customers",
+  authorize("admin", "agent"),
+  customerController.customerValidation,
+  customerController.createCustomer,
+);
 router.get(
   "/customers",
   authorize("admin", "agent", "accountant"),
@@ -261,6 +280,21 @@ router.get(
   "/customers/:id",
   authorize("admin", "agent", "accountant"),
   customerController.getCustomer,
+);
+router.post(
+  "/customers/:id/deposit",
+  authorize("admin", "agent", "accountant"),
+  customerController.addDeposit,
+);
+router.post(
+  "/customers/:id/deposit/apply",
+  authorize("admin", "agent", "accountant"),
+  customerController.applyDepositToBooking,
+);
+router.get(
+  "/customers/:id/deposits",
+  authorize("admin", "agent", "accountant"),
+  customerController.getDeposits,
 );
 router.get(
   "/customers/:id/statement",
@@ -358,6 +392,28 @@ router.post(
   "/airlines/:id/payments",
   authorize("super_admin", "admin", "accountant"),
   airlineController.payAirline,
+);
+
+// ── Suppliers (embassies, tour operators, cargo carriers) ──
+//
+// Reading what is owed is open to anyone who can see the records. Sending
+// money is not: paying is restricted to admin and accountant, the same rule
+// that guards paying an airline.
+router.get(
+  "/suppliers/:kind",
+  authorize("admin", "agent", "accountant"),
+  supplierController.getSupplierAccount,
+);
+router.get(
+  "/suppliers/:kind/:id/payments",
+  authorize("admin", "agent", "accountant"),
+  supplierController.getSupplierPayments,
+);
+router.post(
+  "/suppliers/:kind/:id/pay",
+  authorize("admin", "accountant"),
+  supplierController.supplierPaymentValidation,
+  supplierController.paySupplier,
 );
 
 // ── Airlines (airline performance + passenger manifests) ──

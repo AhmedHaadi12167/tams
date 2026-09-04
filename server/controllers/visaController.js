@@ -13,6 +13,7 @@
 
 const { body, validationResult } = require("express-validator");
 const { query, withTransaction } = require("../config/db");
+const { resolveOrCreateCustomer } = require("../services/customerLink");
 const response = require("../utils/response");
 const { hasTable } = require("../services/schemaInfo");
 const { resolveAccount, requireAccount } = require("../services/accountResolver");
@@ -214,15 +215,17 @@ const createVisa = async (req, res, next) => {
     }
     const paymentStatus = calcPaymentStatus(paid, selling);
 
-    // Link to an existing customer by phone when one wasn't picked
-    let finalCustomerId = customer_id || null;
-    if (!finalCustomerId && contact_number) {
-      const byPhone = await query(
-        `SELECT id FROM customers WHERE business_id = $1 AND phone = $2 LIMIT 1`,
-        [req.businessId, contact_number.trim()],
-      );
-      if (byPhone.rows.length > 0) finalCustomerId = byPhone.rows[0].id;
-    }
+    // Find them, or put them on file — the same rule tickets have always
+    // used. Matching only on an exactly equal phone string missed
+    // '+252 61 …' against '061 …', and never created anyone, so a visa
+    // applicant who had never flown had no customer record, no statement and
+    // no way to spend a deposit.
+    const finalCustomerId = await resolveOrCreateCustomer({
+      businessId: req.businessId,
+      customerId: customer_id,
+      name: applicant_name,
+      phone: contact_number,
+    });
 
     const visa = await withTransaction(async (client) => {
       const r = await client.query(

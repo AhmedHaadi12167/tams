@@ -29,7 +29,8 @@ console.log("  starting columns:", (await cols()).join(", "));
 for (const f of ["migration_v10.sql","migration_v11.sql","migration_v12.sql",
                  "migration_v13.sql","migration_v14.sql","migration_v15.sql",
                  "migration_v16.sql","migration_v17.sql","migration_v18.sql",
-                 "migration_v19.sql","migration_v20.sql","migration_v21.sql"]) {
+                 "migration_v19.sql","migration_v20.sql","migration_v21.sql",
+                 "migration_v22.sql","migration_v23.sql"]) {
   try { await db.exec(read(f)); console.log("  OK   " + f); }
   catch (e) { console.log("  FAIL " + f + "\n       " + e.message); try{await db.exec("ROLLBACK;")}catch{}; process.exit(1); }
 }
@@ -38,7 +39,8 @@ console.log("  final columns:", (await cols()).join(", "));
 // And re-running the last two, in both orders, must stay safe.
 for (const f of ["migration_v14.sql","migration_v15.sql","migration_v14.sql",
                  "migration_v17.sql","migration_v16.sql","migration_v17.sql","migration_v18.sql",
-                 "migration_v19.sql","migration_v20.sql","migration_v21.sql"]) {
+                 "migration_v19.sql","migration_v20.sql","migration_v21.sql",
+                 "migration_v22.sql","migration_v23.sql"]) {
   try { await db.exec(read(f)); console.log("  re-run OK   " + f); }
   catch (e) { console.log("  re-run FAIL " + f + " — " + e.message); process.exit(1); }
 }

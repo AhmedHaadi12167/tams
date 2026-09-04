@@ -232,7 +232,38 @@ const getPlatformOverview = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/businesses/mine
+ *
+ * The signed-in user's own agency — name, logo and contact strip.
+ *
+ * Every printed document needs this, and the alternative was for each page
+ * to reach for whatever fragment of it happened to be nearby: the customer
+ * statement got it bundled with the statement, the cargo receipt had no way
+ * to get it at all. One endpoint, one shape, so both documents carry the
+ * same letterhead.
+ */
+const getMyBusiness = async (req, res, next) => {
+  try {
+    if (!req.businessId)
+      return response.error(res, "No business on this account", 400);
+
+    const result = await query(
+      `SELECT id, name, email, phone, address,
+              ${(await hasColumn("businesses", "logo_url")) ? "logo_url," : "NULL::TEXT AS logo_url,"}
+              ${(await hasColumn("businesses", "website")) ? "website" : "NULL::TEXT AS website"}
+         FROM businesses WHERE id = $1`,
+      [req.businessId],
+    );
+    if (result.rows.length === 0) return response.notFound(res, "Business not found");
+    return response.success(res, result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
+  getMyBusiness,
   getBusinesses,
   getBusiness,
   updateBusiness,

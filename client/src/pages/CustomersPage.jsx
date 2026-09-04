@@ -28,10 +28,22 @@ import {
   Wallet,
   Stamp,
   Luggage,
+  Plus,
+  PiggyBank,
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
-import AccountSelect from "../components/AccountSelect";
+import AccountSelect, { refreshAccounts } from "../components/AccountSelect";
+// The invoice stylesheet, paper sizes and print plumbing are shared with
+// the cargo receipt, so the two documents stay the same document.
+import {
+  INV_CSS,
+  PAPER_CSS,
+  DISC_ICONS,
+  esc,
+  wirePrintWindow,
+} from "../utils/invoice";
+import ActionsMenu from "../components/ActionsMenu";
 
 const money = (v) => `$${Number(v || 0).toFixed(2)}`;
 const payBadge = { paid: "success", partial: "warning", unpaid: "danger" };
@@ -43,224 +55,6 @@ const payBadge = { paid: "success", partial: "warning", unpaid: "danger" };
 // handed the printed page and later receives the PDF must be looking at the
 // same document, or the two become "the invoice" and "the other invoice" and
 // someone has to reconcile them.
-const INV_CSS = `
-  :root{
-    --teal:#0F766E; --teal-deep:#134E4A; --teal-soft:#5EEAD4; --teal-pale:#F0FDFA;
-    --slate:#0F172A; --body:#334155; --muted:#64748B; --line:#E2E8F0;
-    --rowalt:#F8FAFC; --green:#15803D; --red:#B91C1C;
-  }
-  *{box-sizing:border-box}
-  html,body{margin:0}
-  body{
-    font-family:Arial,Helvetica,sans-serif; color:var(--body); font-size:11.5px;
-    padding:24px 28px 0;
-    /* Without this most browsers drop every background when printing, and
-       the invoice comes out as white boxes with white text in them. */
-    -webkit-print-color-adjust:exact; print-color-adjust:exact;
-  }
-
-  /* ── Masthead: mark, name, stamp — one row, read left to right ────────
-     Who this is from, then what it is. The stamp is pushed right and kept
-     narrow so the middle slot, which holds a name of unknown length, gets
-     the room. INVOICE is eight fixed characters; a business name is not. */
-  .band{display:flex;align-items:stretch;height:66px;overflow:hidden}
-  .brand{display:flex;align-items:center;flex-shrink:0;max-width:200px}
-  .brand img{max-height:58px;max-width:196px;object-fit:contain}
-  .mark{width:58px;height:58px;border-radius:8px;background:var(--teal);color:#fff;
-        display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:bold;flex-shrink:0}
-  /* The one element on the page that is purely the agency's, so the one
-     worth setting like a wordmark rather than like data. */
-  .agency{
-    flex:1;min-width:0;display:flex;align-items:center;padding:0 14px;
-    font-family:Georgia,"Times New Roman",Times,serif;font-weight:bold;font-size:15px;
-    line-height:1.15;
-  }
-  .agency .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .agency .a{color:var(--teal)}
-  .agency .b{color:var(--slate)}
-  .slash{width:13px;background:var(--teal);transform:skewX(-19deg);margin-right:7px;flex-shrink:0}
-  .slash.soft{background:var(--teal-soft)}
-  .stamp{width:150px;background:var(--teal);transform:skewX(-19deg);flex-shrink:0;
-         display:flex;align-items:center;justify-content:flex-end;margin-right:-30px;padding-right:42px}
-  .stamp span{transform:skewX(19deg);color:#fff;font-size:12px;font-weight:bold;letter-spacing:2.5px}
-  .rule{height:3px;background:var(--teal);margin:8px 0 15px}
-
-  .cols{display:flex;gap:30px}
-  .cols>div{flex:1;min-width:0}
-  .right{text-align:right}
-  h2{font-size:10px;color:var(--teal);margin:0 0 7px;display:inline-block;
-     border-bottom:1px solid var(--teal);padding-bottom:2px}
-  .hwrap{margin-bottom:7px}
-  .kv{font-size:9.5px;line-height:1.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .kv b{color:var(--slate)}
-
-  /* ── Service costs: the block the customer actually reads ────────────── */
-  .tablewrap{border:1.6px solid var(--teal);border-radius:7px;overflow:hidden;background:var(--teal-pale)}
-  table{width:100%;border-collapse:collapse;font-size:9px;table-layout:fixed}
-  thead th{background:var(--teal);color:#fff;text-align:left;padding:6px;
-           font-size:7.5px;letter-spacing:.4px;text-transform:uppercase;font-weight:bold}
-  tbody td{padding:5.5px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  tbody tr:nth-child(odd) td{background:#fff}
-  td.who{font-weight:bold;color:var(--slate)}
-  td.num{text-align:right}
-  td.owing{color:var(--red);font-weight:bold}
-  td.clear{color:var(--green);font-weight:bold}
-  td.none{text-align:center;color:var(--muted);padding:13px}
-
-  .panels{display:flex;gap:14px;margin-top:15px;align-items:flex-start}
-  .receipts{flex:1;min-width:0;background:var(--teal-pale);border:1px solid var(--line);
-            border-radius:6px;padding:10px 12px;min-height:78px}
-  .receipts .rh{font-size:8px;font-weight:bold;color:var(--teal-deep);letter-spacing:.6px;
-                display:flex;justify-content:space-between;margin-bottom:6px}
-  .receipts table{font-size:8.5px}
-  .receipts td{border:0;padding:2.5px 0;background:transparent}
-  .receipts tr:nth-child(odd) td{background:transparent}
-  .empty{text-align:center;padding:18px 6px;color:var(--muted)}
-  .empty b{display:block;color:var(--body);font-size:10px;margin-bottom:3px}
-  .totals{width:210px;flex-shrink:0}
-  .totals div{display:flex;justify-content:space-between;align-items:center;
-              padding:6.5px 13px;color:#fff;background:var(--teal)}
-  .totals div:nth-child(2){background:#128077}
-  .totals div.strong{background:var(--teal-deep)}
-  .totals span.l{font-size:8.5px;font-weight:bold;letter-spacing:.5px}
-  .totals span.v{font-size:10.5px;font-weight:bold}
-  .totals div.strong span.v{font-size:12px}
-  .note{font-size:7.5px;color:var(--muted);margin-top:8px}
-
-  /* ── Payment methods: the bank's own mark leads, the number is the text ──
-     White throughout, including behind the mark. A bank's logo is drawn to
-     sit on white; putting it on a tint changes the colour it was designed
-     against, and on the two-colour marks most Somali banks use it looks
-     like a printing fault. The teal edge is a border, not a background. */
-  .methods{display:flex;flex-wrap:wrap;gap:9px;margin-top:3px}
-  .method{width:calc((100% - 18px)/3);display:flex;align-items:center;
-          border:1.1px solid var(--teal-soft);border-radius:8px;overflow:hidden;
-          background:#fff;box-shadow:2px 2.5px 0 var(--teal-pale)}
-  .method .panel{width:42px;flex-shrink:0;background:#fff;
-                 border-left:3.5px solid var(--teal);align-self:stretch;
-                 display:flex;align-items:center;justify-content:center}
-  .method .panel img{max-width:26px;max-height:26px;object-fit:contain}
-  .method .panel .ini{font-size:11px;font-weight:bold;color:var(--teal)}
-  .method .body{padding:7px 9px;min-width:0;flex:1}
-  .method .num{font-size:9.5px;font-weight:bold;color:var(--slate);
-               white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .method .hold{font-size:7px;color:var(--muted);margin-top:2px;
-                white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-  .sign{text-align:center;margin-top:16px}
-  .sign .n{font-size:10px;font-weight:bold;color:var(--slate)}
-  .sign .n span{font-weight:normal;color:var(--muted)}
-  .sign .d{font-size:8px;color:var(--muted);margin-top:3px}
-
-  /* ── Footer: the only place the contact details live ─────────────────── */
-  .foot{margin-top:22px}
-  .foot .ty{text-align:center;font-family:Georgia,"Times New Roman",Times,serif;
-            font-style:italic;font-size:9px;color:var(--teal);margin-bottom:8px}
-  .foot .fr{height:1.6px;background:var(--teal)}
-  .foot .fc{display:flex;margin-top:9px}
-  .foot .fc>div{flex:1;min-width:0;padding-right:10px;display:flex;gap:7px;align-items:flex-start}
-  .disc{width:17px;height:17px;border-radius:50%;background:var(--teal);flex-shrink:0;
-        display:flex;align-items:center;justify-content:center;margin-top:1px}
-  .disc svg{width:11px;height:11px;display:block}
-  .foot .ft{min-width:0}
-  .foot .fl{font-size:6.5px;font-weight:bold;color:var(--teal);letter-spacing:.9px}
-  .foot .fv{font-size:7.5px;color:var(--body);margin-top:1px;
-            white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .foot .gen{text-align:right;font-size:6.5px;color:var(--muted);margin-top:9px}
-
-  section{page-break-inside:avoid}
-  thead{display:table-header-group}
-  tr{page-break-inside:avoid}
-
-  /* The toolbar exists so the paper can be changed after the dialog has
-     been dismissed once. It is never printed. */
-  .bar{position:sticky;top:0;z-index:9;display:flex;gap:8px;align-items:center;
-       padding:8px 0 12px;font-size:12px;color:var(--muted)}
-  .bar button{font:inherit;padding:4px 12px;border-radius:6px;cursor:pointer;
-              border:1px solid var(--line);background:#fff;color:var(--body)}
-  .bar button.on{background:var(--teal);border-color:var(--teal);color:#fff;font-weight:bold}
-  .bar .go{background:var(--slate);border-color:var(--slate);color:#fff}
-  @media print{.bar{display:none !important}}
-`;
-
-/**
- * Paper size, as a stylesheet the print window can swap at will.
- *
- * A5 is the A4 layout at 70.6% rather than a second set of rules — the A
- * series is defined so each size is its predecessor halved, so one scale
- * lands on A5 exactly. Two hand-written layouts would drift apart the first
- * time either was touched, and the PDF does the same thing for the same
- * reason.
- */
-/**
- * Make the invoice window work — from this window, not from inside it.
- *
- * The invoice opens as about:blank and is written into, so it inherits this
- * page's Content-Security-Policy. In production that policy forbids inline
- * script, which is deliberate: it is what stops an injected <script> in a
- * customer's name from ever running. It also, unavoidably, stopped the
- * invoice's own <script> block and its onclick="" handlers — so the Print
- * button did nothing and the dialog never opened. On a local dev server
- * there is no such policy, which is why it only ever failed in production.
- *
- * The fix is not to weaken the policy. A popup opened from here shares this
- * origin, so script already running here can reach into its DOM and attach
- * listeners; nothing inline is needed. Same behaviour, nothing relaxed.
- */
-const wirePrintWindow = (win, paper) => {
-  const doc = win.document;
-  const setPaper = (size) => {
-    const style = doc.getElementById("paper");
-    if (style) style.textContent = PAPER_CSS[size] || PAPER_CSS.A4;
-    const a4 = doc.getElementById("p-a4");
-    const a5 = doc.getElementById("p-a5");
-    if (a4) a4.className = size === "A4" ? "on" : "";
-    if (a5) a5.className = size === "A5" ? "on" : "";
-  };
-
-  doc.getElementById("p-a4")?.addEventListener("click", () => setPaper("A4"));
-  doc.getElementById("p-a5")?.addEventListener("click", () => setPaper("A5"));
-  doc.getElementById("p-go")?.addEventListener("click", () => {
-    win.focus();
-    win.print();
-  });
-
-  setPaper(paper || "A4");
-
-  // Wait for the logo and icons to paint before opening the dialog,
-  // otherwise the first print of a session comes out with empty boxes.
-  const go = () => {
-    try {
-      win.focus();
-      win.print();
-    } catch {
-      // The user closed the window before it settled. Nothing to do.
-    }
-  };
-  if (doc.readyState === "complete") setTimeout(go, 350);
-  else win.addEventListener("load", () => setTimeout(go, 350));
-};
-
-const PAPER_CSS = {
-  A4: `@page{size:A4;margin:10mm} body{zoom:1}`,
-  A5: `@page{size:A5;margin:7mm} body{zoom:0.706}`,
-};
-
-// White glyphs on the teal disc. Inline SVG rather than an icon font so the
-// page needs no network access at print time — the print window is opened
-// with document.write and has nothing to fetch from.
-const DISC_ICONS = {
-  phone: `<svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.2" fill="#fff"/><rect x="10" y="4.2" width="4" height="1.2" fill="#0F766E"/><circle cx="12" cy="19" r="1.1" fill="#0F766E"/></svg>`,
-  pin: `<svg viewBox="0 0 24 24"><path d="M12 2.2a6.8 6.8 0 0 0-6.8 6.8c0 5 6.8 12.8 6.8 12.8s6.8-7.8 6.8-12.8A6.8 6.8 0 0 0 12 2.2z" fill="#fff"/><circle cx="12" cy="9" r="2.5" fill="#0F766E"/></svg>`,
-  mail: `<svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff"/><path d="M3.6 6.6 12 12.7l8.4-6.1" fill="none" stroke="#0F766E" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-};
-
-const esc = (v) =>
-  String(v ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 
 /** Initials for the lettermark used when no image has been uploaded. */
 const brandInitials = (name) => {
@@ -336,7 +130,18 @@ const printStatement = (data, preparedBy, paper = "A4") => {
   const methods = data.payment_methods || [];
   const lines = invoiceLines(data);
   const balanceDue = Number(summary.total_balance) || 0;
-  const settled = balanceDue <= 0.001;
+
+  // Money the agency is holding that this invoice has not spent yet. The
+  // part already spent is not added anywhere here — it is inside RECEIVED
+  // already, through the payment row the application wrote on the booking.
+  const held = Number(summary.deposit_held ?? data.deposit?.held) || 0;
+  const netDue = Number(summary.net_due ?? balanceDue - held) || 0;
+  const hasDeposit = held > 0.001 || Number(summary.deposit_taken) > 0.001;
+
+  // "Paid" means nothing left to find, so a balance covered by a deposit
+  // counts: the money is already in the agency's hands.
+  const settled = netDue <= 0.001;
+  const inCredit = netDue < -0.001;
 
   const brand = business.logo_url
     ? `<img src="${esc(fileUrl(business.logo_url))}" alt="" />`
@@ -445,9 +250,16 @@ const printStatement = (data, preparedBy, paper = "A4") => {
         <div class="kv"><b>Invoice No:</b> ${esc(invoiceNumber(customer))}</div>
         <div class="kv"><b>Issued:</b> ${esc(fmtDate(new Date()))}</div>
         <div class="kv"><b>Services:</b> ${lines.length} item${lines.length === 1 ? "" : "s"}</div>
+        ${
+          held > 0.001
+            ? `<div class="kv"><b>On Deposit:</b> <span style="font-weight:bold;color:var(--green)">${money(held)}</span></div>`
+            : ""
+        }
         <div class="kv"><b>Balance:</b> <span style="font-weight:bold;color:${
           settled ? "var(--green)" : "var(--red)"
-        }">${money(balanceDue)} · ${settled ? "PAID" : "UNPAID"}</span></div>
+        }">${money(Math.max(netDue, 0))} · ${
+          inCredit ? "IN CREDIT" : settled ? "PAID" : "UNPAID"
+        }</span></div>
       </div>
     </div>
 
@@ -477,9 +289,33 @@ const printStatement = (data, preparedBy, paper = "A4") => {
       <div class="totals">
         <div><span class="l">SALES</span><span class="v">${money(summary.total_amount)}</span></div>
         <div><span class="l">RECEIVED</span><span class="v">${money(summary.total_paid)}</span></div>
-        <div class="strong"><span class="l">BALANCE</span><span class="v">${money(summary.total_balance)}</span></div>
+        ${
+          // Without a deposit the panel stays the three rows it has always
+          // been. With one, the balance stops being the last word: the
+          // deposit is subtracted in front of the customer and the bottom
+          // row is what they actually have to hand over.
+          held > 0.001
+            ? `<div><span class="l">BALANCE</span><span class="v">${money(balanceDue)}</span></div>
+               <div class="credit"><span class="l">ON DEPOSIT</span><span class="v">−${money(held)}</span></div>
+               <div class="strong"><span class="l">${
+                 inCredit ? "IN CREDIT" : "NET DUE"
+               }</span><span class="v">${money(Math.abs(netDue))}</span></div>`
+            : `<div class="strong"><span class="l">BALANCE</span><span class="v">${money(balanceDue)}</span></div>`
+        }
       </div>
     </section>
+
+    ${
+      hasDeposit
+        ? `<div class="note"><b>Deposit:</b> ${money(summary.deposit_taken ?? data.deposit?.taken)} received,
+             ${money(summary.deposit_applied ?? data.deposit?.applied)} already used on the services above,
+             <b>${money(held)} still held</b> on this account.${
+               inCredit
+                 ? ` ${money(Math.abs(netDue))} of it is over and above what is owed.`
+                 : ""
+             }</div>`
+        : ""
+    }
 
     ${
       lines.some((r) => String(r.who).endsWith(" *"))
@@ -571,6 +407,13 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
     );
   const t = sum(tickets), v = sum(visas), p = sum(packages);
 
+  // The deposit is a fact about the customer, not about the rows that were
+  // ticked, so it survives the filter untouched — but the net due has to be
+  // recomputed, or a three-passenger invoice would carry the net figure for
+  // all seven.
+  const balance = t.balance + v.balance + p.balance;
+  const held = Number(data.summary?.deposit_held ?? data.deposit?.held) || 0;
+
   return {
     ...data,
     tickets,
@@ -578,13 +421,15 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
     packages,
     payments,
     summary: {
+      ...data.summary,
       ticket_count: tickets.length,
       visa_count: visas.length,
       package_count: packages.length,
       item_count: tickets.length + visas.length + packages.length,
       total_amount: (t.amount + v.amount + p.amount).toFixed(2),
       total_paid: (t.paid + v.paid + p.paid).toFixed(2),
-      total_balance: (t.balance + v.balance + p.balance).toFixed(2),
+      total_balance: balance.toFixed(2),
+      net_due: (balance - held).toFixed(2),
     },
   };
 };
@@ -719,6 +564,30 @@ function StatementModal({
     balance: st.balance + sv.balance + sp.balance,
   };
 
+  // What the agency is holding for this customer. Shown here so the tiles
+  // say the same thing the printed invoice will — a member of staff reading
+  // "Balance 190" on screen and "Net due 0" on paper would rightly assume
+  // one of them is lying.
+  const held = Number(summary?.deposit_held ?? data.deposit?.held) || 0;
+  const netDue = sel.balance - held;
+
+  const tiles = [
+    ["Items", totalSelected, ""],
+    ["Total", money(sel.total), ""],
+    ["Paid", money(sel.paid), "text-green-600"],
+    ["Balance", money(sel.balance), "text-red-600"],
+    ...(held > 0.001
+      ? [
+          ["On deposit", money(held), "text-green-600"],
+          [
+            netDue < -0.001 ? "In credit" : "Net due",
+            money(Math.abs(netDue)),
+            netDue > 0.001 ? "text-red-600" : "text-green-600",
+          ],
+        ]
+      : []),
+  ];
+
   return (
     <div className="space-y-5">
       {/* Actions */}
@@ -752,13 +621,12 @@ function StatementModal({
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-4 gap-3 text-center">
-        {[
-          ["Items", totalSelected, ""],
-          ["Total", money(sel.total), ""],
-          ["Paid", money(sel.paid), "text-green-600"],
-          ["Balance", money(sel.balance), "text-red-600"],
-        ].map(([label, val, cls]) => (
+      <div
+        className={`grid gap-3 text-center ${
+          tiles.length > 4 ? "grid-cols-3 sm:grid-cols-6" : "grid-cols-4"
+        }`}
+      >
+        {tiles.map(([label, val, cls]) => (
           <div
             key={label}
             className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-3"
@@ -1048,8 +916,203 @@ function StatementModal({
   );
 }
 
+// ── Add a customer, before there is anything to sell them ────────────────
+//
+// A customer used to exist only as a by-product of a booking, so putting a
+// walk-in on file meant inventing a ticket and deleting it afterwards.
+function AddCustomerModal({ open, onClose, onSaved }) {
+  const empty = {
+    name: "",
+    phone: "",
+    email: "",
+    passport_number: "",
+    nationality: "",
+    customer_type: "individual",
+    company_name: "",
+  };
+  const [form, setForm] = useState(empty);
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  useEffect(() => {
+    if (open) setForm(empty);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.name.trim()) return toast.error("Enter a name");
+    setSaving(true);
+    try {
+      const res = await customersAPI.create(form);
+      toast.success(res.data.message || "Customer added");
+      onSaved?.();
+      onClose();
+    } catch (err) {
+      // The 409 here is the duplicate-phone guard, and its message names the
+      // person already on file — far more use than "already exists".
+      toast.error(err.response?.data?.message || "Could not add the customer");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Add customer">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input label="Full name *" value={form.name} onChange={set("name")} />
+          <Input
+            label="Phone"
+            value={form.phone}
+            onChange={set("phone")}
+            placeholder="0618344223"
+            hint="Used to find them later, and to spot duplicates"
+          />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input label="Email" type="email" value={form.email} onChange={set("email")} />
+          <Input
+            label="Passport number"
+            value={form.passport_number}
+            onChange={set("passport_number")}
+          />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input label="Nationality" value={form.nationality} onChange={set("nationality")} />
+          <Select label="Type" value={form.customer_type} onChange={set("customer_type")}>
+            <option value="individual">Individual</option>
+            <option value="company">Company</option>
+          </Select>
+        </div>
+        {form.customer_type === "company" && (
+          <Input label="Company name" value={form.company_name} onChange={set("company_name")} />
+        )}
+        <div className="flex gap-3 justify-end pt-1">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            <Plus className="w-4 h-4" /> Add customer
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ── Money taken with nothing booked ──────────────────────────────────────
+//
+// This is not income. The agency has not earned it and may have to hand it
+// back, so it is recorded as a deposit — cash in the account and a debt on
+// the balance sheet — rather than as a payment against some unrelated
+// booking, which was the only thing possible before and made that booking's
+// balance wrong.
+function DepositModal({ customer, onClose, onDone }) {
+  const [amount, setAmount] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [note, setNote] = useState("");
+  const [held, setHeld] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!customer) return;
+    setAmount("");
+    setAccountId("");
+    setNote("");
+    customersAPI
+      .deposits(customer.id)
+      .then((r) => setHeld(r.data.data))
+      .catch(() => setHeld(null));
+  }, [customer]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const val = parseFloat(amount);
+    if (!val) return toast.error("Enter an amount");
+    setSaving(true);
+    try {
+      const res = await customersAPI.deposit(customer.id, {
+        amount: val,
+        account_id: accountId || undefined,
+        note: note || undefined,
+      });
+      toast.success(res.data.message);
+      refreshAccounts();
+      onDone?.();
+      onClose();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Could not record it");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(customer)}
+      onClose={onClose}
+      title={customer ? `Hold money for ${customer.name}` : ""}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 p-3">
+          <p className="text-sm text-blue-900 dark:text-blue-100">
+            Money taken before anything is booked. It goes into the account
+            you choose, and shows on the balance sheet as money owed back
+            until it is used or returned — it is not counted as income.
+          </p>
+          {held && (
+            <p className="text-xs text-blue-800 dark:text-blue-200 mt-1.5">
+              Currently holding{" "}
+              <strong>${Number(held.balance || 0).toFixed(2)}</strong> for this
+              customer.
+            </p>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input
+            label="Amount"
+            type="number"
+            step="0.01"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="300.00"
+            hint="A negative amount hands money back"
+          />
+          <AccountSelect
+            direction={parseFloat(amount) < 0 ? "out" : "in"}
+            label={parseFloat(amount) < 0 ? "Returned from *" : "Received into *"}
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+          />
+        </div>
+
+        <Input
+          label="Note (optional)"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Deposit for Umrah in Ramadan"
+        />
+
+        <div className="flex gap-3 justify-end pt-1">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            <PiggyBank className="w-4 h-4" /> Record
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 export default function CustomersPage() {
-  const { isAdmin, user } = useAuth();
+  const { isAdmin, canWrite, user } = useAuth();
+  const [addOpen, setAddOpen] = useState(false);
+  // Which customer we're taking money from with nothing booked yet.
+  const [depositFor, setDepositFor] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(true);
@@ -1060,6 +1123,34 @@ export default function CustomersPage() {
   const [sort, setSort] = useState("recent");
   const [viewModal, setViewModal] = useState(null);
   const [viewData, setViewData] = useState(null);
+  const [viewDeposit, setViewDeposit] = useState(null);
+  const [applying, setApplying] = useState(null);
+
+  /**
+   * Spend the customer's deposit on one of their bookings.
+   *
+   * No cash moves — the money arrived when the deposit was taken and is
+   * already in an account. What changes is that the agency stops owing it
+   * and the booking stops being unpaid. The server applies the smaller of
+   * what is held and what is owed, so this can never overpay.
+   */
+  const useDepositOn = async (kind, recordId) => {
+    if (!viewModal) return;
+    setApplying(recordId);
+    try {
+      const res = await customersAPI.applyDeposit(viewModal.id, {
+        kind,
+        record_id: recordId,
+      });
+      toast.success(res.data.message);
+      await openView(viewModal);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Could not use the deposit");
+    } finally {
+      setApplying(null);
+    }
+  };
   const [viewLoading, setViewLoading] = useState(false);
   const [stmtModal, setStmtModal] = useState(null);
   const [stmtData, setStmtData] = useState(null);
@@ -1147,6 +1238,13 @@ export default function CustomersPage() {
     try {
       const res = await customersAPI.get(customer.id);
       setViewData(res.data.data);
+      // What is being held for them, and what it has already paid for. A
+      // deposit the customer can see on their receipt but not on their
+      // profile is a support call waiting to happen.
+      customersAPI
+        .deposits(customer.id)
+        .then((d) => setViewDeposit(d.data.data))
+        .catch(() => setViewDeposit(null));
     } catch {
       toast.error("Failed to load customer details");
     } finally {
@@ -1189,6 +1287,13 @@ export default function CustomersPage() {
             )}
           </p>
         </div>
+        {canWrite() && (
+          <div className="flex gap-2">
+            <Button onClick={() => setAddOpen(true)}>
+              <Plus className="w-4 h-4" /> Add customer
+            </Button>
+          </div>
+        )}
       </div>
 
       <Card className="p-4">
@@ -1251,7 +1356,14 @@ export default function CustomersPage() {
           <EmptyState
             icon={Users}
             title="No customers yet"
-            description="Customers are automatically saved when you create tickets."
+            description="A customer is saved automatically whenever you book a ticket — or add one here first, which is what you want for a walk-in you expect to see again."
+            action={
+              canWrite() ? (
+                <Button onClick={() => setAddOpen(true)}>
+                  <Plus className="w-4 h-4" /> Add customer
+                </Button>
+              ) : null
+            }
           />
         ) : (
           <div className="overflow-x-auto">
@@ -1309,39 +1421,35 @@ export default function CustomersPage() {
                       ) : (
                         <span className="text-gray-400">Settled</span>
                       )}
+                      {/* Money the agency is holding for them, after
+                          whatever has already been spent. Shown next to what
+                          they owe because the two answer the same question
+                          from opposite sides — someone owing $50 while $190
+                          of their own money sits in the drawer is not a
+                          customer to chase. */}
+                      {Number(c.deposit_balance) > 0 && (
+                        <span className="block text-xs text-blue-600 dark:text-blue-400 font-medium mt-0.5">
+                          {money(c.deposit_balance)} on deposit
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-500 dark:text-gray-400 text-xs">
                       {format(new Date(c.created_at), "dd MMM yyyy")}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openView(c)}
-                        >
-                          <Eye className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openStatement(c)}
-                          title="Statement (balance & payments)"
-                          className="text-blue-500 hover:text-blue-700 hover:bg-blue-50 dark:hover:bg-blue-900/20"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </Button>
-                        {isAdmin() && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDelete(c)}
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        )}
-                      </div>
+                      <ActionsMenu
+                        items={[
+                          { label: "View", icon: Eye, onClick: () => openView(c) },
+                          // Available whatever the balance says. Taking a
+                          // deposit from someone who owes nothing is the
+                          // normal case, not the exception.
+                          { label: "Hold money (deposit)", icon: PiggyBank, onClick: () => setDepositFor(c) },
+                          { label: "Statement", icon: FileText, onClick: () => openStatement(c) },
+                          isAdmin()
+                            ? { label: "Delete", icon: Trash2, danger: true, onClick: () => handleDelete(c) }
+                            : null,
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -1364,6 +1472,7 @@ export default function CustomersPage() {
         onClose={() => {
           setViewModal(null);
           setViewData(null);
+          setViewDeposit(null);
         }}
         title="Customer Profile"
         size="lg"
@@ -1403,49 +1512,115 @@ export default function CustomersPage() {
                 ))}
               </div>
 
-              <div>
-                <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
-                  <Ticket className="w-4 h-4" /> Booking History (
-                  {viewData.tickets.length})
-                </h4>
-                {viewData.tickets.length === 0 ? (
-                  <p className="text-sm text-gray-400">No tickets yet</p>
-                ) : (
-                  <div className="space-y-2">
-                    {viewData.tickets.map((t) => (
-                      <div
-                        key={t.id}
-                        className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
-                      >
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-white">
-                            {t.from_city} → {t.to_city}
-                          </p>
-                          <p className="text-xs text-gray-500">
-                            {t.airline_name} ·{" "}
-                            {t.flight_date
-                              ? fmtDate(t.flight_date, "dd MMM yyyy")
-                              : "—"}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm font-semibold text-green-600">
-                            ${Number(t.revenue).toFixed(2)}
-                          </p>
-                          <Badge
-                            variant={
-                              t.status === "active" ? "success" : "danger"
-                            }
-                            className="text-xs"
-                          >
-                            {t.status}
-                          </Badge>
-                        </div>
-                      </div>
-                    ))}
+              {viewDeposit && Number(viewDeposit.balance) > 0 && (
+                <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-blue-900 dark:text-blue-100 flex items-center gap-2">
+                        <PiggyBank className="w-4 h-4" />
+                        {money(viewDeposit.balance)} held on deposit
+                      </p>
+                      <p className="text-xs text-blue-800 dark:text-blue-200 mt-0.5">
+                        Taken {money(viewDeposit.taken)} · used{" "}
+                        {money(viewDeposit.applied)}. Use it on any unpaid
+                        booking below — no money moves, the cash is already in
+                        your account.
+                      </p>
+                    </div>
                   </div>
-                )}
-              </div>
+                  {viewDeposit.applications?.length > 0 && (
+                    <ul className="mt-2 space-y-0.5">
+                      {viewDeposit.applications.map((a) => (
+                        <li
+                          key={a.id}
+                          className="text-xs text-blue-800 dark:text-blue-200"
+                        >
+                          {money(a.amount)} → {a.applied_to}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {[
+                { key: "tickets", kind: "ticket", icon: Ticket, title: "Flights",
+                  describe: (r) => `${r.from_city} → ${r.to_city}`,
+                  detail: (r) => `${r.airline_name || "—"} · ${r.flight_date ? fmtDate(r.flight_date, "dd MMM yyyy") : "—"}` },
+                { key: "visas", kind: "visa", icon: Stamp, title: "Visas",
+                  describe: (r) => r.destination_country,
+                  detail: (r) => r.visa_type || "—" },
+                { key: "packages", kind: "package", icon: Luggage, title: "Packages",
+                  describe: (r) => r.label,
+                  detail: (r) => `${r.package_type || ""} · ${r.pilgrim_count || 1} pilgrim(s)` },
+                { key: "cargo", kind: "cargo", icon: Luggage, title: "Cargo",
+                  describe: (r) => r.tracking_number || r.item_description || "Shipment",
+                  detail: (r) => `${r.from_city} → ${r.to_city}` },
+              ].map((svc) => {
+                const rows = viewData[svc.key] || [];
+                if (rows.length === 0) return null;
+                const Icon = svc.icon;
+                return (
+                  <div key={svc.key}>
+                    <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                      <Icon className="w-4 h-4" /> {svc.title} ({rows.length})
+                    </h4>
+                    <div className="space-y-2">
+                      {rows.map((r) => {
+                        const owing =
+                          Math.round(
+                            ((Number(r.selling_price) || 0) -
+                              (Number(r.amount_paid) || 0)) * 100,
+                          ) / 100;
+                        return (
+                          <div
+                            key={r.id}
+                            className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+                          >
+                            <div>
+                              <p className="text-sm font-medium text-gray-900 dark:text-white">
+                                {svc.describe(r)}
+                              </p>
+                              <p className="text-xs text-gray-500">{svc.detail(r)}</p>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              {/* Offered on whatever is unpaid, whichever
+                                  service it is. A deposit that could only be
+                                  spent on a flight was no use to someone who
+                                  had paid ahead for a package. */}
+                              {viewDeposit &&
+                                Number(viewDeposit.balance) > 0 &&
+                                r.status !== "cancelled" &&
+                                owing > 0.001 && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    loading={applying === r.id}
+                                    onClick={() => useDepositOn(svc.kind, r.id)}
+                                  >
+                                    <PiggyBank className="w-3.5 h-3.5" /> Use deposit
+                                  </Button>
+                                )}
+                              <div className="text-right">
+                                <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                                  {money(r.selling_price)}
+                                </p>
+                                <p
+                                  className={`text-xs ${
+                                    owing > 0 ? "text-red-500 font-medium" : "text-gray-400"
+                                  }`}
+                                >
+                                  {owing > 0 ? `${money(owing)} due` : "paid"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )
         )}
@@ -1535,6 +1710,17 @@ export default function CustomersPage() {
           />
         )}
       </Modal>
+      <AddCustomerModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onSaved={load}
+      />
+      <DepositModal
+        customer={depositFor}
+        onClose={() => setDepositFor(null)}
+        onDone={load}
+      />
+
     </div>
   );
 }

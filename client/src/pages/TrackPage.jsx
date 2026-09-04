@@ -48,6 +48,19 @@ export default function TrackPage() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // The served HTML already carries the right title for a crawler; this is
+  // for the browser tab, the bookmark, and the share sheet on a phone — all
+  // of which read the live document, not the response body.
+  useEffect(() => {
+    const previous = document.title;
+    document.title = codeFromUrl
+      ? `${codeFromUrl} — Raadi Alaabtaada`
+      : "Raadi Alaabtaada — Track your cargo";
+    return () => {
+      document.title = previous;
+    };
+  }, [codeFromUrl]);
+
   const lookup = useCallback(async (raw) => {
     const trimmed = String(raw || "").trim();
     if (!trimmed) return;

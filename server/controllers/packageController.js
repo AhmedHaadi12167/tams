@@ -13,6 +13,7 @@
 
 const { body, validationResult } = require("express-validator");
 const { query, withTransaction } = require("../config/db");
+const { resolveOrCreateCustomer } = require("../services/customerLink");
 const response = require("../utils/response");
 const { hasTable } = require("../services/schemaInfo");
 const { resolveAccount, requireAccount } = require("../services/accountResolver");
@@ -244,6 +245,17 @@ const createPackage = async (req, res, next) => {
       );
     }
 
+    // The lead pilgrim is the customer. Same rule as tickets and visas:
+    // find them by number or name, otherwise put them on file — a package
+    // buyer with no customer record has no statement and cannot spend a
+    // deposit on their own trip.
+    const finalCustomerId = await resolveOrCreateCustomer({
+      businessId: req.businessId,
+      customerId: customer_id,
+      name: lead_name,
+      phone: contact_number,
+    });
+
     const pkg = await withTransaction(async (client) => {
       const r = await client.query(
         `INSERT INTO packages (
@@ -255,7 +267,7 @@ const createPackage = async (req, res, next) => {
          RETURNING *`,
         [
           req.businessId,
-          customer_id || null,
+          finalCustomerId,
           req.user.id,
           package_type || null,
           label.trim(),

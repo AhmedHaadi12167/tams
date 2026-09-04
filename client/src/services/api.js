@@ -103,6 +103,7 @@ export const cargoAPI = {
     }),
   deletePhoto: (id) => api.delete(`/cargo/${id}/photo`),
   addPayment: (id, data) => api.post(`/cargo/${id}/payments`, data),
+  payments: (id) => api.get(`/cargo/${id}/payments`),
 };
 
 // Uploaded files are served from the API host, not the SPA route
@@ -122,7 +123,13 @@ const selectionParams = (sel) => {
 export const customersAPI = {
   list: (params) => api.get("/customers", { params }),
   get: (id) => api.get(`/customers/${id}`),
-  create: (data) => api.post("/customers", data), // ← add this
+  create: (data) => api.post("/customers", data),
+  // Money taken from a customer with nothing booked. Negative hands it back.
+  deposit: (id, data) => api.post(`/customers/${id}/deposit`, data),
+  deposits: (id) => api.get(`/customers/${id}/deposits`),
+  // Spend a held deposit on one of the customer's bookings. Moves no cash:
+  // the money arrived when the deposit was taken.
+  applyDeposit: (id, data) => api.post(`/customers/${id}/deposit/apply`, data),
   update: (id, data) => api.put(`/customers/${id}`, data),
   delete: (id) => api.delete(`/customers/${id}`),
   // sel: optional { ticket_ids, visa_ids, package_ids } to invoice a subset.
@@ -136,6 +143,15 @@ export const customersAPI = {
       params: { ...selectionParams(sel), size: size || undefined },
       responseType: "blob",
     }),
+};
+
+// Embassies, tour operators and cargo carriers — whatever the agency buys
+// from. `kind` is "visa", "package" or "cargo".
+export const suppliersAPI = {
+  account: (kind, params) => api.get(`/suppliers/${kind}`, { params }),
+  payments: (kind, id) => api.get(`/suppliers/${kind}/${id}/payments`),
+  // Omit the amount to settle the whole balance.
+  pay: (kind, id, data) => api.post(`/suppliers/${kind}/${id}/pay`, data),
 };
 
 export const groupBookingsAPI = {
@@ -277,6 +293,8 @@ export const taxAPI = {
 
 export const businessAPI = {
   overview: () => api.get("/businesses/overview"),
+  // The signed-in user's own agency, for letterheads on printed documents.
+  mine: () => api.get("/businesses/mine"),
   list: (params) => api.get("/businesses", { params }),
   get: (id) => api.get(`/businesses/${id}`),
   update: (id, data) => api.put(`/businesses/${id}`, data),

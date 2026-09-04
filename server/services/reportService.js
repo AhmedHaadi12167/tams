@@ -1056,7 +1056,15 @@ const generateCustomerStatementPDF = (res, data) => {
     ly = labelled(doc, "Passport:", customer.passport_number, IM, ly, colW);
 
   const balanceDue = Number(summary.total_balance) || 0;
-  const settled = balanceDue <= 0.001;
+
+  // A deposit the agency is still holding. It is shown as its own line and
+  // subtracted at the bottom rather than folded into "received": the spent
+  // part of a deposit is already inside total_paid, and adding it twice
+  // would print an invoice claiming money that never arrived twice over.
+  const held = Number(summary.deposit_held ?? data.deposit?.held) || 0;
+  const netDue = Number(summary.net_due ?? balanceDue - held) || 0;
+  const settled = netDue <= 0.001;
+  const inCredit = netDue < -0.001;
 
   let ry = rightTop;
   ry = labelled(
@@ -1089,12 +1097,17 @@ const generateCustomerStatementPDF = (res, data) => {
     "right",
   );
 
+  if (held > 0.001)
+    ry = labelled(doc, "On Deposit:", money(held), rightX, ry, colW, "right");
+
   // The status is the one thing on this page a reader looks for first, so it
   // is coloured rather than left to be found among the rest.
   doc.font("Helvetica-Bold").fontSize(8).fillColor(INV.slate);
   const bl = "Balance: ";
   const blw = doc.widthOfString(bl);
-  const bv = `${money(balanceDue)}  ·  ${settled ? "PAID" : "UNPAID"}`;
+  const bv = `${money(Math.max(netDue, 0))}  ·  ${
+    inCredit ? "IN CREDIT" : settled ? "PAID" : "UNPAID"
+  }`;
   doc.font("Helvetica-Bold").fontSize(8);
   const bvw = doc.widthOfString(bv);
   const bx = rightX + colW - (blw + bvw);
@@ -1249,16 +1262,36 @@ const generateCustomerStatementPDF = (res, data) => {
     y = drawInvoiceHeader(doc, business, { compact: true });
   }
 
-  const totalRows = [
-    ["Sales", money(summary.total_amount), INV.slate, false],
-    ["Received", money(summary.total_paid), INV.green, false],
-    [
-      "Balance",
-      money(summary.total_balance),
-      settled ? INV.green : INV.red,
-      true,
-    ],
-  ];
+  // Three rows when there is no deposit — exactly what this panel has always
+  // been. With one, the balance stops being the last word: the held deposit
+  // is subtracted in front of the customer and the bottom row is what they
+  // actually have to hand over.
+  const totalRows =
+    held > 0.001
+      ? [
+          ["Sales", money(summary.total_amount), INV.slate, false, false],
+          ["Received", money(summary.total_paid), INV.green, false, false],
+          ["Balance", money(balanceDue), INV.slate, false, false],
+          ["On Deposit", `-${money(held)}`, INV.green, false, true],
+          [
+            inCredit ? "In Credit" : "Net Due",
+            money(Math.abs(netDue)),
+            INV.white,
+            true,
+            false,
+          ],
+        ]
+      : [
+          ["Sales", money(summary.total_amount), INV.slate, false, false],
+          ["Received", money(summary.total_paid), INV.green, false, false],
+          [
+            "Balance",
+            money(summary.total_balance),
+            settled ? INV.green : INV.red,
+            true,
+            false,
+          ],
+        ];
   const TR_H = 26;
   const totalsH = TR_H * totalRows.length;
 
@@ -1343,10 +1376,14 @@ const generateCustomerStatementPDF = (res, data) => {
   }
 
   // Totals panel
-  totalRows.forEach(([label, value, color, strong], i) => {
+  totalRows.forEach(([label, value, color, strong, credit], i) => {
     const ty = y + i * TR_H;
-    doc.rect(totalsX, ty, totalsW, TR_H).fill(strong ? INV.tealDeep : INV.teal);
-    if (!strong && i % 2 === 1) {
+    doc
+      .rect(totalsX, ty, totalsW, TR_H)
+      // Green for the row that counts in the customer's favour, so it cannot
+      // be mistaken for another charge in a column of teal.
+      .fill(credit ? INV.green : strong ? INV.tealDeep : INV.teal);
+    if (!strong && !credit && i % 2 === 1) {
       doc.rect(totalsX, ty, totalsW, TR_H).fillOpacity(0.12).fill(INV.white);
       doc.fillOpacity(1);
     }
@@ -1371,6 +1408,32 @@ const generateCustomerStatementPDF = (res, data) => {
   });
 
   y += Math.max(receiptsH, totalsH) + 8;
+
+  // Where the deposit came from and where it went, in one sentence. The
+  // panel shows what is left; a customer who handed over 400 wants to read
+  // the 400 back, not work it out from the 190 that remains.
+  if (
+    held > 0.001 ||
+    Number(summary.deposit_taken ?? data.deposit?.taken) > 0.001
+  ) {
+    const taken = Number(summary.deposit_taken ?? data.deposit?.taken) || 0;
+    const used = Number(summary.deposit_applied ?? data.deposit?.applied) || 0;
+    doc
+      .font("Helvetica")
+      .fontSize(7)
+      .fillColor(INV.muted)
+      .text(
+        `Deposit: ${money(taken)} received, ${money(used)} already used on the services above, ` +
+          `${money(held)} still held on this account.` +
+          (inCredit
+            ? ` ${money(Math.abs(netDue))} of it is over and above what is owed.`
+            : ""),
+        IM,
+        y,
+        { width: IW, lineBreak: false },
+      );
+    y += 15;
+  }
 
   if (rows.some((r) => String(r.who).endsWith(" *"))) {
     doc

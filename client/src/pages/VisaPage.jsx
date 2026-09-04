@@ -26,6 +26,8 @@ import {
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
+import { PaySupplierModal, supplierBalance } from "../components/PaySupplier";
+import ActionsMenu from "../components/ActionsMenu";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -333,6 +335,9 @@ function CollectModal({ open, onClose, visa, onDone }) {
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VisaPage() {
+  // The modal lives here, not in the menu: the menu unmounts the moment it
+  // closes, and a modal that dies with its trigger never appears at all.
+  const [paySupplier, setPaySupplier] = useState(null);
   const { hasRole } = useAuth();
   const canWrite = hasRole("admin", "agent");
   const canDelete = hasRole("admin");
@@ -483,26 +488,23 @@ export default function VisaPage() {
                           <td className="px-4 py-3 text-green-600 dark:text-green-400">{money(v.amount_paid)}</td>
                           <td className={`px-4 py-3 font-semibold ${balance > 0 ? "text-red-600" : "text-gray-400"}`}>{money(balance)}</td>
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-1">
-                              <button onClick={() => setView(v)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700">
-                                <Eye className="w-4 h-4" />
-                              </button>
-                              {balance > 0 && (
-                                <Button size="sm" onClick={() => setCollect(v)}>
-                                  <Banknote className="w-3.5 h-3.5" /> Collect
-                                </Button>
-                              )}
-                              {canWrite && (
-                                <button onClick={() => setModal({ open: true, initial: v })} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700">
-                                  <Pencil className="w-4 h-4" />
-                                </button>
-                              )}
-                              {canDelete && (
-                                <button onClick={() => remove(v)} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-gray-700">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              )}
-                            </div>
+                            <ActionsMenu
+                              items={[
+                                { label: "View", icon: Eye, onClick: () => setView(v) },
+                                balance > 0
+                                  ? { label: "Collect payment", icon: Banknote, onClick: () => setCollect(v) }
+                                  : null,
+                                supplierBalance("visa", v) > 0
+                                  ? { label: "Pay embassy fee", icon: Banknote, onClick: () => setPaySupplier(v) }
+                                  : null,
+                                canWrite
+                                  ? { label: "Edit", icon: Pencil, onClick: () => setModal({ open: true, initial: v }) }
+                                  : null,
+                                canDelete
+                                  ? { label: "Delete", icon: Trash2, danger: true, onClick: () => remove(v) }
+                                  : null,
+                              ]}
+                            />
                           </td>
                         </tr>
                       );
@@ -557,6 +559,13 @@ export default function VisaPage() {
           </div>
         )}
       </Modal>
+      <PaySupplierModal
+        kind="visa"
+        record={paySupplier}
+        open={Boolean(paySupplier)}
+        onClose={() => setPaySupplier(null)}
+        onPaid={load}
+      />
     </div>
   );
 }

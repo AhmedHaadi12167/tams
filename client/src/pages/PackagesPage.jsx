@@ -29,6 +29,8 @@ import {
 import { fmtDate, toDateInput } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 import { openPrintWindow } from "../utils/printWindow";
+import { PaySupplierModal, supplierBalance } from "../components/PaySupplier";
+import ActionsMenu from "../components/ActionsMenu";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -542,6 +544,9 @@ function CollectModal({ open, onClose, pkg, onDone }) {
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function PackagesPage() {
+  // The modal lives here, not in the menu: the menu unmounts the moment it
+  // closes, and a modal that dies with its trigger never appears at all.
+  const [paySupplier, setPaySupplier] = useState(null);
   const { hasRole } = useAuth();
   const canWrite = hasRole("admin", "agent");
   const canDelete = hasRole("admin");
@@ -700,26 +705,23 @@ export default function PackagesPage() {
                           <td className="px-4 py-3 text-green-600 dark:text-green-400">{money(p.amount_paid)}</td>
                           <td className={`px-4 py-3 font-semibold ${balance > 0 ? "text-red-600" : "text-gray-400"}`}>{money(balance)}</td>
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-1">
-                              <button onClick={() => setDetail(p.id)} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700">
-                                <Eye className="w-4 h-4" />
-                              </button>
-                              {balance > 0 && (
-                                <Button size="sm" onClick={() => setCollect(p)}>
-                                  <Banknote className="w-3.5 h-3.5" /> Collect
-                                </Button>
-                              )}
-                              {canWrite && (
-                                <button onClick={() => setModal({ open: true, id: p.id })} className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700">
-                                  <Pencil className="w-4 h-4" />
-                                </button>
-                              )}
-                              {canDelete && (
-                                <button onClick={() => remove(p)} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-gray-700">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              )}
-                            </div>
+                            <ActionsMenu
+                              items={[
+                                { label: "View", icon: Eye, onClick: () => setDetail(p.id) },
+                                balance > 0
+                                  ? { label: "Collect payment", icon: Banknote, onClick: () => setCollect(p) }
+                                  : null,
+                                supplierBalance("package", p) > 0
+                                  ? { label: "Pay operator", icon: Banknote, onClick: () => setPaySupplier(p) }
+                                  : null,
+                                canWrite
+                                  ? { label: "Edit", icon: Pencil, onClick: () => setModal({ open: true, id: p.id }) }
+                                  : null,
+                                canDelete
+                                  ? { label: "Delete", icon: Trash2, danger: true, onClick: () => remove(p) }
+                                  : null,
+                              ]}
+                            />
                           </td>
                         </tr>
                       );
@@ -743,6 +745,13 @@ export default function PackagesPage() {
       />
       <DetailModal open={Boolean(detail)} packageId={detail} onClose={() => setDetail(null)} onChanged={load} />
       <CollectModal open={Boolean(collect)} pkg={collect} onClose={() => setCollect(null)} onDone={load} />
+      <PaySupplierModal
+        kind="package"
+        record={paySupplier}
+        open={Boolean(paySupplier)}
+        onClose={() => setPaySupplier(null)}
+        onPaid={load}
+      />
     </div>
   );
 }

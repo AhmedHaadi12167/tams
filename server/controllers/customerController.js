@@ -1,9 +1,12 @@
 const { body, validationResult } = require("express-validator");
-const { query } = require("../config/db");
+const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const { generateCustomerStatementPDF } = require("../services/reportService");
 const { hasTable, hasColumn } = require("../services/schemaInfo");
-const { phoneMatches } = require("../services/phoneMatch");
+const { phoneMatches, digitsOf } = require("../services/phoneMatch");
+const { uuidOrThrow } = require("../utils/sqlSafe");
+const { requireAccount } = require("../services/accountResolver");
+const { applyDeposit, depositBalance } = require("../services/depositService");
 
 /**
  * The agency's own details, for the head and foot of an invoice.
@@ -81,6 +84,65 @@ const fetchPaymentMethods = async (businessId) => {
     return r.rows;
   } catch {
     return [];
+  }
+};
+
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+
+/**
+ * The deposit side of a statement: money handed over before there was a
+ * booking to put it against.
+ *
+ * Three numbers, and the difference between them is the whole point:
+ *
+ *   taken    every deposit movement, refunds included as negatives
+ *   applied  how much of it has since been spent on bookings
+ *   held     what is left — the agency's debt to this customer
+ *
+ * `applied` is deliberately NOT added to the invoice's "received" line. When
+ * a deposit is spent, depositService writes a real payment row against the
+ * booking, so that money is already inside total_paid. Counting it a second
+ * time here would print an invoice claiming more money than ever arrived,
+ * which is the exact class of double-count this system has spent the week
+ * removing.
+ *
+ * `held` is floored at zero. A deposit cannot be overspent; a negative would
+ * quietly become a credit nobody granted.
+ *
+ * Returns zeros when the tables aren't there, so an agency that has not run
+ * migration v22/v23 still gets its invoices, just without a deposit line.
+ */
+const fetchDeposit = async (customerId, businessId) => {
+  const empty = { taken: 0, applied: 0, held: 0 };
+  try {
+    if (!(await hasTable("customer_deposits"))) return empty;
+
+    const taken = round2(
+      (
+        await query(
+          `SELECT COALESCE(SUM(amount), 0) AS t
+             FROM customer_deposits WHERE business_id = $1 AND customer_id = $2`,
+          [businessId, customerId],
+        )
+      ).rows[0].t,
+    );
+
+    const applied = (await hasTable("deposit_applications"))
+      ? round2(
+          (
+            await query(
+              `SELECT COALESCE(SUM(amount), 0) AS t
+                 FROM deposit_applications
+                WHERE business_id = $1 AND customer_id = $2`,
+              [businessId, customerId],
+            )
+          ).rows[0].t,
+        )
+      : 0;
+
+    return { taken, applied, held: Math.max(round2(taken - applied), 0) };
+  } catch {
+    return empty;
   }
 };
 
@@ -228,14 +290,23 @@ const fetchStatementData = async (
   // Branding and payment instructions. Fetched together because neither can
   // fail the statement — both resolve to a safe empty value — and running
   // them in parallel keeps the extra work off the response time.
-  const [business, paymentMethods] = await Promise.all([
+  const [business, paymentMethods, deposit] = await Promise.all([
     fetchBusiness(businessId),
     fetchPaymentMethods(businessId),
+    fetchDeposit(customerId, businessId),
   ]);
+
+  // What the agency is holding for this customer, set against what this
+  // invoice says they owe. See fetchDeposit for why `held` is not added to
+  // "received": the part of the deposit already spent is inside total_paid
+  // through the booking's own payment rows, and adding it again would make
+  // the invoice claim twice the money that actually changed hands.
+  const netDue = round2(totals.total_balance - deposit.held);
 
   return {
     business,
     payment_methods: paymentMethods,
+    deposit,
     customer: customerResult.rows[0],
     tickets,
     visas,
@@ -275,6 +346,12 @@ const fetchStatementData = async (
       total_amount: money(totals.total_amount),
       total_paid: money(totals.total_paid),
       total_balance: money(totals.total_balance),
+      // Deposit still unspent, and what the customer owes once it is taken
+      // into account. Negative net_due means the agency owes *them*.
+      deposit_taken: money(deposit.taken),
+      deposit_applied: money(deposit.applied),
+      deposit_held: money(deposit.held),
+      net_due: money(netDue),
     },
   };
 };
@@ -340,10 +417,324 @@ const exportCustomerStatementPDF = async (req, res, next) => {
   }
 };
 
+/** Run a query only if its table exists, so an un-migrated database still
+ *  renders the profile instead of 500ing on a missing relation. */
+const optionalRows = async (table, sql, params) =>
+  (await hasTable(table)) ? query(sql, params) : { rows: [] };
+
 const customerValidation = [
   body("name").trim().notEmpty().withMessage("Customer name is required"),
-  body("email").optional().isEmail().withMessage("Valid email required"),
+  // checkFalsy, not bare optional(). A form always sends every field, so an
+  // untouched email box arrives as "" — and "" is present, so bare
+  // optional() ran isEmail() against it and failed with a bare "Validation
+  // failed" naming nothing. Every optional text field on this form has the
+  // same hazard.
+  body("email").optional({ checkFalsy: true }).isEmail().withMessage("Valid email required"),
+  body("phone").optional({ checkFalsy: true }).trim().isLength({ max: 50 }),
+  body("passport_number").optional({ checkFalsy: true }).trim().isLength({ max: 100 }),
+  body("nationality").optional({ checkFalsy: true }).trim().isLength({ max: 100 }),
+  body("customer_type").optional({ checkFalsy: true }).isIn(["individual", "company"])
+    .withMessage("Type must be individual or company"),
+  body("company_name").optional({ checkFalsy: true }).trim().isLength({ max: 255 }),
 ];
+
+/**
+ * POST /api/customers
+ *
+ * A customer created deliberately, before there is anything to sell them.
+ *
+ * Until now a customer could only appear as a side effect of a booking, so
+ * the walk-in who wants to be on file, or the company account being set up
+ * before the first trip, had no way in. Worse, the only way to create one
+ * was to book something you then had to delete.
+ *
+ * The phone number is what people search by, so a duplicate is worth
+ * catching here rather than leaving two half-histories for the same person.
+ */
+const createCustomer = async (req, res, next) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return response.validationError(res, errors.array());
+
+    const {
+      name,
+      phone,
+      email,
+      passport_number,
+      nationality,
+      customer_type,
+      company_name,
+      date_of_birth,
+    } = req.body;
+
+    const clean = (v) => {
+      const t = String(v ?? "").trim();
+      return t === "" ? null : t;
+    };
+
+    // Same-number check, done the way the search does it, so "0618344223"
+    // and "+252 61 834 4223" count as the same person.
+    if (clean(phone)) {
+      const existing = await query(
+        `SELECT id, name, phone FROM customers
+          WHERE business_id = $1 AND COALESCE(phone, '') <> ''`,
+        [req.businessId],
+      );
+      // phoneMatches() builds a SQL fragment — it returns a string, which is
+      // truthy for every row, so using it as a comparison flagged the first
+      // customer in the table as a duplicate of everybody. samePhone() is the
+      // in-memory one.
+      //
+      // And samePhone is deliberately loose, because it backs a search box
+      // where typing the last four digits should find someone. Loose is wrong
+      // for "is this the same person": it would refuse to create a customer
+      // whose number merely contains another's. Duplicate detection compares
+      // the national number, or the whole thing when it is too short to have
+      // one.
+      const sameNumber = (a, b) => {
+        const x = digitsOf(a);
+        const y = digitsOf(b);
+        if (!x || !y) return false;
+        return x.length >= 9 && y.length >= 9
+          ? x.slice(-9) === y.slice(-9)
+          : x === y;
+      };
+
+      const match = existing.rows.find((c) => sameNumber(c.phone, phone));
+      if (match)
+        return response.error(
+          res,
+          `${match.name} (${match.phone}) is already on file with this number. ` +
+            `Open that record instead of creating a second one.`,
+          409,
+        );
+    }
+
+    const result = await query(
+      `INSERT INTO customers
+         (business_id, name, phone, email, passport_number, nationality,
+          customer_type, company_name, date_of_birth)
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,'individual'),$8,$9)
+       RETURNING *`,
+      [
+        req.businessId,
+        String(name).trim(),
+        clean(phone),
+        clean(email),
+        clean(passport_number),
+        clean(nationality),
+        clean(customer_type),
+        clean(company_name),
+        clean(date_of_birth),
+      ],
+    );
+
+    return response.created(res, result.rows[0], "Customer added");
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/customers/:id/deposit
+ *
+ * Take money from a customer who owes nothing yet.
+ *
+ * The agency has not earned this. It is cash in hand and a debt owed back
+ * until it is applied to a booking or returned, which is why it lands in
+ * customer_deposits and shows on the balance sheet as a liability rather
+ * than as revenue. Recording it as a payment against an unrelated ticket —
+ * the only thing possible before — made that ticket's balance wrong and
+ * quietly turned a deposit into income.
+ *
+ * A negative amount hands it back.
+ */
+const addDeposit = async (req, res, next) => {
+  try {
+    if (!(await hasTable("customer_deposits")))
+      return response.error(
+        res,
+        "Taking a deposit needs a database update. Ask your administrator to run migration_v22.sql.",
+        503,
+      );
+
+    const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
+    if (!amount)
+      return response.error(res, "Enter an amount", 400);
+
+    const customer = await query(
+      `SELECT id, name FROM customers WHERE id = $1 AND business_id = $2`,
+      [uuidOrThrow(req.params.id, "customer id"), req.businessId],
+    );
+    if (customer.rows.length === 0)
+      return response.notFound(res, "Customer not found");
+
+    // Giving money back can't exceed what is being held, or the customer
+    // ends up owing the agency a deposit, which is not a thing.
+    if (amount < 0) {
+      const held = await query(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM customer_deposits WHERE business_id = $1 AND customer_id = $2`,
+        [req.businessId, req.params.id],
+      );
+      const balance = Math.round(Number(held.rows[0].total) * 100) / 100;
+      if (Math.abs(amount) > balance + 0.001)
+        return response.error(
+          res,
+          `Only $${balance.toFixed(2)} is being held for ${customer.rows[0].name}.`,
+          400,
+        );
+    }
+
+    const accountId = await requireAccount(
+      req.body,
+      req.businessId,
+      null,
+      amount > 0 ? "deposit" : "deposit refund",
+    );
+
+    const result = await query(
+      `INSERT INTO customer_deposits
+         (business_id, customer_id, amount, account_id, collected_by, method, reference, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING *`,
+      [
+        req.businessId,
+        req.params.id,
+        amount,
+        accountId,
+        req.user.id,
+        (req.body.method || "cash").trim() || "cash",
+        req.body.reference || null,
+        req.body.note || null,
+      ],
+    );
+
+    return response.created(
+      res,
+      result.rows[0],
+      amount > 0
+        ? `$${amount.toFixed(2)} held for ${customer.rows[0].name}`
+        : `$${Math.abs(amount).toFixed(2)} returned to ${customer.rows[0].name}`,
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/customers/:id/deposits
+ * What is being held, and every movement behind it.
+ */
+const getDeposits = async (req, res, next) => {
+  try {
+    if (!(await hasTable("customer_deposits")))
+      return response.success(res, { balance: 0, movements: [] });
+
+    const id = uuidOrThrow(req.params.id, "customer id");
+    const rows = await query(
+      `SELECT d.id, d.amount, d.method, d.reference, d.note, d.created_at,
+              a.name AS account_name, u.name AS collected_by_name
+         FROM customer_deposits d
+         LEFT JOIN payment_accounts a ON a.id = d.account_id
+         LEFT JOIN users u            ON u.id = d.collected_by
+        WHERE d.business_id = $1 AND d.customer_id = $2
+        ORDER BY d.created_at DESC`,
+      [req.businessId, id],
+    );
+
+    // Taken, less spent. The movements list shows the money coming in; the
+    // applications show where it went, so the balance is never a number the
+    // customer has to take on trust.
+    const applied = (await hasTable("deposit_applications"))
+      ? await query(
+          `SELECT a.id, a.amount, a.created_at, a.note,
+                  COALESCE(t.passenger_name, v.applicant_name, pk.label,
+                           cs.tracking_number, 'Booking') AS applied_to
+             FROM deposit_applications a
+             LEFT JOIN tickets t           ON t.id  = a.ticket_id
+             LEFT JOIN visa_applications v ON v.id  = a.visa_id
+             LEFT JOIN packages pk         ON pk.id = a.package_id
+             LEFT JOIN cargo_shipments cs  ON cs.id = a.cargo_id
+            WHERE a.business_id = $1 AND a.customer_id = $2
+            ORDER BY a.created_at DESC`,
+          [req.businessId, id],
+        )
+      : { rows: [] };
+
+    const taken =
+      Math.round(rows.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) / 100;
+    const spent =
+      Math.round(applied.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) / 100;
+    const balance = Math.round((taken - spent) * 100) / 100;
+
+    return response.success(res, {
+      balance,
+      taken,
+      applied: spent,
+      movements: rows.rows,
+      applications: applied.rows,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/customers/:id/deposit/apply
+ *
+ * Spend a customer's deposit on one of their bookings.
+ *
+ * No cash moves — see services/depositService.js for why that is the whole
+ * point. The booking becomes paid, the agency stops owing the money back,
+ * and every account balance stays exactly where it was.
+ */
+const applyDepositToBooking = async (req, res, next) => {
+  try {
+    if (!(await hasTable("deposit_applications")))
+      return response.error(
+        res,
+        "Using a deposit needs a database update. Ask your administrator to run migration_v23.sql.",
+        503,
+      );
+
+    const customerId = uuidOrThrow(req.params.id, "customer id");
+    const { kind, record_id, amount } = req.body;
+    if (!kind || !record_id)
+      return response.error(res, "Say which booking to apply it to", 400);
+
+    const result = await withTransaction(async (client) =>
+      applyDeposit(client, {
+        businessId: req.businessId,
+        customerId,
+        userId: req.user.id,
+        kind,
+        recordId: record_id,
+        amount,
+      }),
+    );
+
+    if (result.applied <= 0)
+      return response.error(
+        res,
+        result.outstanding <= 0
+          ? "That booking is already paid in full."
+          : "There is no deposit left to use.",
+        400,
+      );
+
+    return response.success(
+      res,
+      result,
+      `$${result.applied.toFixed(2)} of deposit used. ` +
+        (result.remaining > 0
+          ? `$${result.remaining.toFixed(2)} still held.`
+          : "Nothing left on deposit."),
+    );
+  } catch (err) {
+    next(err);
+  }
+};
 
 /**
  * GET /api/customers
@@ -380,6 +771,17 @@ const getCustomers = async (req, res, next) => {
 
     // What each customer still owes — on their own tickets and on any they
     // booked for someone else. Matches the statement page's definition.
+    // Zero on a database that hasn't run migration_v23, so the list keeps
+    // working rather than 500ing on a missing table.
+    const depositExpr = (await hasTable("deposit_applications"))
+      ? `GREATEST(
+           COALESCE((SELECT SUM(d.amount) FROM customer_deposits d
+                      WHERE d.customer_id = c.id AND d.business_id = c.business_id), 0)
+         - COALESCE((SELECT SUM(a.amount) FROM deposit_applications a
+                      WHERE a.customer_id = c.id AND a.business_id = c.business_id), 0),
+           0)`
+      : "0";
+
     const balanceExpr = `(
       SELECT COALESCE(SUM(t.selling_price - t.amount_paid), 0)
       FROM tickets t
@@ -417,7 +819,13 @@ const getCustomers = async (req, res, next) => {
           (SELECT COALESCE(SUM(t.amount_paid), 0) FROM tickets t
            WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
              AND t.business_id = c.business_id
-             AND t.status != 'cancelled') AS total_paid
+             AND t.status != 'cancelled') AS total_paid,
+          -- What the agency is still holding for them: deposits taken, less
+          -- whatever has already been spent on their bookings. Shown beside
+          -- the balance because the two answer the same question from
+          -- opposite sides — a customer owing $50 while $190 of their money
+          -- sits in the drawer is not a customer to chase.
+          ${depositExpr} AS deposit_balance
          FROM customers c
          WHERE ${whereClause}
          ORDER BY ${orderBy}
@@ -468,17 +876,55 @@ const getCustomer = async (req, res, next) => {
     if (customerResult.rows.length === 0)
       return response.notFound(res, "Customer not found");
 
-    const ticketsResult = await query(
-      `SELECT id, ticket_type, from_city, to_city, flight_date, airline_name,
-              selling_price, revenue, status, created_at
-       FROM tickets WHERE customer_id = $1 AND business_id = $2
-       ORDER BY created_at DESC`,
-      [req.params.id, req.businessId],
-    );
+    // Everything the customer has bought, not only their flights.
+    //
+    // The profile listed tickets alone, which meant a deposit could only be
+    // spent on a ticket — a customer holding $300 against an Umrah package
+    // had no way to use it, and their statement told half the story.
+    const p = [req.params.id, req.businessId];
+    const [ticketsResult, visasResult, packagesResult, cargoResult] =
+      await Promise.all([
+        query(
+          `SELECT id, ticket_type, from_city, to_city, flight_date, airline_name,
+                  selling_price, amount_paid, revenue, status, created_at
+             FROM tickets WHERE customer_id = $1 AND business_id = $2
+            ORDER BY created_at DESC`,
+          p,
+        ),
+        optionalRows(
+          "visa_applications",
+          `SELECT id, applicant_name, destination_country, visa_type,
+                  selling_price, amount_paid, revenue, status::TEXT AS status, created_at
+             FROM visa_applications WHERE customer_id = $1 AND business_id = $2
+            ORDER BY created_at DESC`,
+          p,
+        ),
+        optionalRows(
+          "packages",
+          `SELECT id, label, package_type::TEXT AS package_type, pilgrim_count,
+                  selling_price, amount_paid, revenue, status::TEXT AS status, created_at
+             FROM packages WHERE customer_id = $1 AND business_id = $2
+            ORDER BY created_at DESC`,
+          p,
+        ),
+        (await hasColumn("cargo_shipments", "customer_id"))
+          ? query(
+              `SELECT id, tracking_number, item_description, from_city, to_city,
+                      total_price AS selling_price, amount_paid,
+                      cargo_status::TEXT AS status, created_at
+                 FROM cargo_shipments WHERE customer_id = $1 AND business_id = $2
+                ORDER BY created_at DESC`,
+              p,
+            )
+          : { rows: [] },
+      ]);
 
     return response.success(res, {
       customer: customerResult.rows[0],
       tickets: ticketsResult.rows,
+      visas: visasResult.rows,
+      packages: packagesResult.rows,
+      cargo: cargoResult.rows,
     });
   } catch (err) {
     next(err);
@@ -536,6 +982,10 @@ const deleteCustomer = async (req, res, next) => {
 };
 
 module.exports = {
+  createCustomer,
+  addDeposit,
+  getDeposits,
+  applyDepositToBooking,
   getCustomers,
   getCustomer,
   updateCustomer,

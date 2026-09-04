@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { cargoAPI, fileUrl } from "../services/api";
+import { cargoAPI, businessAPI, fileUrl } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
   Button,
@@ -14,12 +14,15 @@ import {
 } from "../components/ui";
 import toast from "react-hot-toast";
 import {
-  Package, Plus, Eye, Pencil, Trash2,
+  Package, Plus, Eye, Pencil, Trash2, Printer,
   Camera, Upload, X, Loader2, Image as ImageIcon, Banknote,
 } from "lucide-react";
 import { format } from "date-fns";
 import AccountSelect from "../components/AccountSelect";
 import { compressImage, humanSize } from "../utils/compressImage";
+import { printCargoInvoice } from "../utils/cargoInvoice";
+import { PaySupplierModal, supplierBalance } from "../components/PaySupplier";
+import ActionsMenu from "../components/ActionsMenu";
 
 /** What the sender still owes on a shipment. */
 const balanceOf = (c) =>
@@ -58,6 +61,13 @@ const EMPTY_FORM = {
   // "weight" or "flat" — decides which price fields the form shows.
   pricing: "weight",
   flat_price: "",
+  // What the agency keeps. A per-kilo price is sometimes the whole margin
+  // and sometimes mostly the carrier's fee, and only the person at the
+  // counter knows which — so they say, rather than the system assuming.
+  // The margin, quoted the way the price is: per kilo when charging by
+  // weight, a lump sum when charging a flat price.
+  profit_per_kg: "",
+  profit_flat: "",
   // Filled in when the shipment lands, so the customer can be told where to
   // collect it and who to ring.
   arrived_city: "",
@@ -301,6 +311,62 @@ const CargoForm = ({ form, setForm, onSave, onCancel, saving }) => {
               ${totalPrice}
             </div>
           </div>
+
+          {form.pricing === "weight" ? (
+            <Input
+              label="Your profit per kg ($)"
+              type="number"
+              min="0"
+              step="0.01"
+              value={form.profit_per_kg}
+              onChange={setField("profit_per_kg")}
+              placeholder="Leave blank if it's all profit"
+              hint={
+                form.profit_per_kg === ""
+                  ? "Blank means the whole price is profit"
+                  : `Margin ${(
+                      (parseFloat(form.weight_kg) || 0) *
+                      (parseFloat(form.profit_per_kg) || 0)
+                    ).toFixed(2)} · carrier cost ${Math.max(
+                      (parseFloat(totalPrice) || 0) -
+                        (parseFloat(form.weight_kg) || 0) *
+                          (parseFloat(form.profit_per_kg) || 0),
+                      0,
+                    ).toFixed(2)}`
+              }
+              error={
+                parseFloat(form.profit_per_kg) >
+                parseFloat(form.price_per_kg) + 0.001
+                  ? "More than the price per kg"
+                  : undefined
+              }
+            />
+          ) : (
+            <Input
+              label="Your profit ($)"
+              type="number"
+              min="0"
+              step="0.01"
+              value={form.profit_flat}
+              onChange={setField("profit_flat")}
+              placeholder="Leave blank if it's all profit"
+              hint={
+                form.profit_flat === ""
+                  ? "Blank means the whole price is profit"
+                  : `Carrier cost ${Math.max(
+                      (parseFloat(totalPrice) || 0) -
+                        (parseFloat(form.profit_flat) || 0),
+                      0,
+                    ).toFixed(2)}`
+              }
+              error={
+                parseFloat(form.profit_flat) > parseFloat(totalPrice) + 0.001
+                  ? "More than the total price"
+                  : undefined
+              }
+            />
+          )}
+
         </div>
       </div>
 
@@ -468,7 +534,37 @@ const CargoForm = ({ form, setForm, onSave, onCancel, saving }) => {
 
 // ── Main Page ────────────────────────────────────────────────
 export default function CargoPage() {
-  const { canWrite } = useAuth();
+  // The modal lives here, not in the menu: the menu unmounts the moment it
+  // closes, and a modal that dies with its trigger never appears at all.
+  const [paySupplier, setPaySupplier] = useState(null);
+  const { canWrite, user } = useAuth();
+
+  /**
+   * Print, or save as PDF — the browser's own dialog does both, so there is
+   * one document and one code path rather than a printed version and a
+   * separately generated file that drift apart.
+   */
+  const printReceipt = async (item) => {
+    try {
+      const [payRes, bizRes] = await Promise.all([
+        cargoAPI.payments(item.id).catch(() => ({ data: { data: [] } })),
+        businessAPI.mine().catch(() => ({ data: { data: {} } })),
+      ]);
+      const business = bizRes.data?.data || {};
+      const ok = printCargoInvoice(
+        item,
+        business,
+        payRes.data?.data || [],
+        {
+          logoUrl: business.logo_url ? fileUrl(business.logo_url) : null,
+          preparedBy: user ? { name: user.name, title: user.title } : null,
+        },
+      );
+      if (!ok) toast.error("Allow pop-ups to print the receipt");
+    } catch {
+      toast.error("Couldn't build the receipt");
+    }
+  };
   const [items, setItems] = useState([]);
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(true);
@@ -513,6 +609,14 @@ export default function CargoPage() {
     setForm({
       item_description: item.item_description,
       weight_kg: item.weight_kg,
+      profit_per_kg:
+        item.profit_per_kg === null || item.profit_per_kg === undefined
+          ? ""
+          : String(item.profit_per_kg),
+      profit_flat:
+        item.profit_flat === null || item.profit_flat === undefined
+          ? ""
+          : String(item.profit_flat),
       price_per_kg: item.price_per_kg,
       sender_name: item.sender_name,
       sender_contact: item.sender_contact || "",
@@ -753,46 +857,20 @@ export default function CargoPage() {
                       </Badge>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openView(item)}
-                        >
-                          <Eye className="w-4 h-4" />
-                        </Button>
-                        {balanceOf(item) > 0 &&
-                          item.cargo_status !== "cancelled" && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => setPayItem(item)}
-                              title="Collect payment"
-                              className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                            >
-                              <Banknote className="w-4 h-4" />
-                            </Button>
-                          )}
-                        {canWrite() && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openEdit(item)}
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDelete(item)}
-                              className="text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
-                          </>
-                        )}
-                      </div>
+                      <ActionsMenu
+                        items={[
+                          { label: "View", icon: Eye, onClick: () => openView(item) },
+                          { label: "Print receipt", icon: Printer, onClick: () => printReceipt(item) },
+                          balanceOf(item) > 0 && item.cargo_status !== "cancelled"
+                            ? { label: "Collect payment", icon: Banknote, onClick: () => setPayItem(item) }
+                            : null,
+                          supplierBalance("cargo", item) > 0
+                            ? { label: "Pay carrier", icon: Banknote, onClick: () => setPaySupplier(item) }
+                            : null,
+                          canWrite() ? { label: "Edit", icon: Pencil, onClick: () => openEdit(item) } : null,
+                          canWrite() ? { label: "Delete", icon: Trash2, danger: true, onClick: () => handleDelete(item) } : null,
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -913,6 +991,13 @@ export default function CargoPage() {
           />
         )}
       </Modal>
+      <PaySupplierModal
+        kind="cargo"
+        record={paySupplier}
+        open={Boolean(paySupplier)}
+        onClose={() => setPaySupplier(null)}
+        onPaid={load}
+      />
     </div>
   );
 }

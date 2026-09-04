@@ -34,6 +34,7 @@ import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 import { openPrintWindow } from "../utils/printWindow";
+import ActionsMenu from "../components/ActionsMenu";
 
 const statusVariant = {
   active: "success",
@@ -880,57 +881,19 @@ export default function TicketsPage() {
                       </Badge>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openView(ticket)}
-                        >
-                          <Eye className="w-4 h-4" />
-                        </Button>
-                        {!isSettled(ticket) &&
-                          ticket.status === "active" && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => setPayModal(ticket)}
-                              title="Collect payment"
-                              className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                            >
-                              <Banknote className="w-4 h-4" />
-                            </Button>
-                          )}
-                        {ticket.status === "active" && canCancel && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setCancelModal(ticket)}
-                            title="Cancel and refund"
-                            className="text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
-                          >
-                            <Ban className="w-4 h-4" />
-                          </Button>
-                        )}
-                        {canWrite() && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openEdit(ticket)}
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDelete(ticket)}
-                              className="text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
-                          </>
-                        )}
-                      </div>
+                      <ActionsMenu
+                        items={[
+                          { label: "View", icon: Eye, onClick: () => openView(ticket) },
+                          !isSettled(ticket) && ticket.status === "active"
+                            ? { label: "Collect payment", icon: Banknote, onClick: () => setPayModal(ticket) }
+                            : null,
+                          ticket.status === "active" && canCancel
+                            ? { label: "Cancel & refund", icon: Ban, onClick: () => setCancelModal(ticket) }
+                            : null,
+                          canWrite() ? { label: "Edit", icon: Pencil, onClick: () => openEdit(ticket) } : null,
+                          canWrite() ? { label: "Delete", icon: Trash2, danger: true, onClick: () => handleDelete(ticket) } : null,
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}

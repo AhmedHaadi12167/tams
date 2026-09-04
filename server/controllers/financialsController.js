@@ -143,7 +143,13 @@ const getProfitLoss = async (req, res, next) => {
           `SELECT
              COUNT(*)                                 AS shipment_count,
              COALESCE(SUM(cs.total_price), 0)         AS gross_sales,
-             COALESCE(SUM(cs.amount_paid), 0)         AS collected
+             COALESCE(SUM(cs.amount_paid), 0)         AS collected,
+             -- Cargo used to be counted as pure margin, because the agency
+             -- was assumed to have no cost. True for a parcel carried on a
+             -- flight already booked; false whenever a carrier charges per
+             -- kilo. Where a profit has been entered, the rest is cost.
+             COALESCE(SUM(GREATEST(cs.total_price - cs.profit_total, 0))
+                      FILTER (WHERE cs.profit_total IS NOT NULL), 0) AS carrier_cost
            FROM cargo_shipments cs
            WHERE cs.business_id = $1 AND cs.cargo_status <> 'cancelled'${cRange.clause}`,
           [businessId, ...cRange.params],
@@ -211,7 +217,10 @@ const getProfitLoss = async (req, res, next) => {
       n(t.gross_sales) + n(c.gross_sales) + n(v.gross_sales) + n(pk.gross_sales),
     );
     const costOfSales = round2(
-      n(t.cost_of_sales) + n(v.cost_of_sales) + n(pk.cost_of_sales),
+      n(t.cost_of_sales) +
+        n(v.cost_of_sales) +
+        n(pk.cost_of_sales) +
+        n(c.carrier_cost),
     );
     const grossProfit = round2(grossSales - costOfSales);
     const commission = round2(t.agent_commission);
@@ -260,6 +269,7 @@ const getProfitLoss = async (req, res, next) => {
         airline_tickets: round2(t.cost_of_sales),
         visa_fees: round2(v.cost_of_sales),
         package_suppliers: round2(pk.cost_of_sales),
+        cargo_carriers: round2(c.carrier_cost),
         total: costOfSales,
       },
       gross_profit: grossProfit,
@@ -328,6 +338,9 @@ const getBalanceSheet = async (req, res, next) => {
       packageRes,
       airlinePaidRes,
       agentPaidRes,
+      supplierPaidRes,
+      depositRes,
+      depositUsedRes,
     ] = await Promise.all([
       query(
         `SELECT name, opening_cash, fixed_assets, liabilities, owner_capital, financials_start
@@ -347,7 +360,13 @@ const getBalanceSheet = async (req, res, next) => {
       query(
         `SELECT
            COALESCE(SUM(total_price), 0) AS gross_sales,
-           COALESCE(SUM(amount_paid), 0) AS collected
+           COALESCE(SUM(amount_paid), 0) AS collected,
+           -- A shipment with a profit entered has a carrier cost behind it:
+           -- whatever the customer paid, less the margin the agency kept.
+           -- One with no profit entered is treated as pure margin, exactly
+           -- as every shipment was before this field existed.
+           COALESCE(SUM(GREATEST(total_price - profit_total, 0))
+                    FILTER (WHERE profit_total IS NOT NULL), 0) AS carrier_cost
          FROM cargo_shipments
          WHERE business_id = $1 AND cargo_status <> 'cancelled'${asOfClause}`,
         p,
@@ -391,6 +410,27 @@ const getBalanceSheet = async (req, res, next) => {
         p,
         { total: 0 },
       ),
+      optional(
+        "supplier_payments",
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM supplier_payments WHERE business_id = $1${asOfClause}`,
+        p,
+        { total: 0 },
+      ),
+      optional(
+        "customer_deposits",
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM customer_deposits WHERE business_id = $1${asOfClause}`,
+        p,
+        { total: 0 },
+      ),
+      optional(
+        "deposit_applications",
+        `SELECT COALESCE(SUM(amount), 0) AS total
+         FROM deposit_applications WHERE business_id = $1${asOfClause}`,
+        p,
+        { total: 0 },
+      ),
     ]);
 
     const biz = bizRes.rows[0] || {};
@@ -400,6 +440,41 @@ const getBalanceSheet = async (req, res, next) => {
     const pk = packageRes.rows[0];
     const airlinePaid = round2(airlinePaidRes.rows[0].total);
     const agentPaid = round2(agentPaidRes.rows[0].total);
+    const supplierPaid = round2(supplierPaidRes.rows[0].total);
+    // Money the agency is holding for customers against nothing yet. It is
+    // in the bank, so it is in cash — and it is owed back, so it has to be
+    // in liabilities too, or the sheet balances by pretending a deposit is
+    // profit.
+    // Taken, LESS what has since been spent on the customer's bookings.
+    //
+    // Leaving the applications out was a real error, caught by the test that
+    // spends a deposit: the receivable fell by $250 while the liability
+    // stayed at $300, so the sheet came out $250 short. A deposit the agency
+    // has already delivered against is not money it still owes.
+    const customerDeposits = round2(
+      Math.max(n(depositRes.rows[0].total) - n(depositUsedRes.rows[0].total), 0),
+    );
+
+    // What the agency's accounts actually hold. This is the same figure the
+    // Accounts page shows, computed the same way — opening balances plus
+    // every movement in the ledger — because there is only one right answer
+    // to "how much money do we have" and it is the one you can check against
+    // a bank statement.
+    const held = await query(
+      `SELECT COALESCE(SUM(balance), 0) AS total
+         FROM v_account_balance WHERE business_id = $1`,
+      [businessId],
+    );
+    // Money received but not yet filed against an account is still money the
+    // agency holds. Leaving it out would make the sheet disagree with the
+    // Accounts page, which shows it separately rather than pretending it
+    // isn't there.
+    const loose = await query(
+      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END), 0) AS net
+         FROM v_cash_ledger
+        WHERE business_id = $1 AND account_id IS NULL`,
+      [businessId],
+    );
 
     const openingCash = round2(biz.opening_cash);
     const fixedAssets = round2(biz.fixed_assets);
@@ -414,20 +489,22 @@ const getBalanceSheet = async (req, res, next) => {
     const airlineCost = round2(t.cost_of_sales);
     // Visa fees and package suppliers are settled when the work is done —
     // TAMS keeps no account for them, so they leave cash immediately.
-    const directPaidCost = round2(n(v.cost) + n(pk.cost));
+    const directPaidCost = round2(n(v.cost) + n(pk.cost) + n(c.carrier_cost));
     const costOfSales = round2(airlineCost + directPaidCost);
     const commission = round2(t.commission);
     const expensesPaid = round2(expenseRes.rows[0].total);
 
     // ── Assets ──────────────────────────────────────────────
-    const cash = round2(
-      openingCash +
-        collected -
-        expensesPaid -
-        airlinePaid -
-        agentPaid -
-        directPaidCost,
-    );
+    //
+    // Cash used to be *derived*: opening balance, plus everything collected,
+    // minus everything assumed paid. The last of those assumptions was the
+    // bug — it subtracted the cost price typed on every visa and package as
+    // though the embassy had already been paid, so one visa costing 1,900
+    // silently removed 1,900 from the agency's cash while the money sat in
+    // the bank. Cash & bank read 130 where the Accounts page read 2,030.
+    //
+    // Cash is not a derivation. It is a fact, and the ledger holds it.
+    const cash = round2(n(held.rows[0].total) + n(loose.rows[0].net));
     const receivables = round2(grossSales - collected);
     const totalAssets = round2(cash + receivables + fixedAssets);
 
@@ -435,9 +512,17 @@ const getBalanceSheet = async (req, res, next) => {
     // Only what is genuinely still owed: airline cost not yet settled and
     // commission not yet paid out.
     const airlinePayable = round2(airlineCost - airlinePaid);
+    // An embassy fee or a tour operator's bill is owed until someone pays
+    // it, exactly like an airline fare. Recording it as a cost while
+    // pretending the cash had already gone was what unbalanced the sheet.
+    const supplierPayable = round2(Math.max(directPaidCost - supplierPaid, 0));
     const commissionPayable = round2(commission - agentPaid);
     const totalLiabilities = round2(
-      airlinePayable + commissionPayable + manualLiabilities,
+      airlinePayable +
+        commissionPayable +
+        supplierPayable +
+        customerDeposits +
+        manualLiabilities,
     );
 
     // ── Equity ──────────────────────────────────────────────
@@ -464,6 +549,8 @@ const getBalanceSheet = async (req, res, next) => {
       },
       liabilities: {
         payable_to_airlines: airlinePayable,
+        payable_to_suppliers: supplierPayable,
+        customer_deposits: customerDeposits,
         agent_commission_payable: commissionPayable,
         other_liabilities: manualLiabilities,
         total: totalLiabilities,
