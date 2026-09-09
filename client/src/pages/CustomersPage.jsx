@@ -99,6 +99,11 @@ const invoiceLines = (data) => {
       date: t.flight_date,
       total: t.selling_price,
       balance: t.balance,
+      // A seat on somebody else's booking. It belongs on this person's
+      // statement so they can see their itinerary, but its money is not
+      // theirs — printing a balance here invoices them for a debt the
+      // system knows is being paid by a relative.
+      not_billed: t.billed_to_me === false,
     }),
   );
   (data.visas || []).forEach((v) =>
@@ -164,7 +169,9 @@ const printStatement = (data, preparedBy, paper = "A4") => {
         <td>${esc(r.reference || "—")}</td>
         <td>${esc(fmtDate(r.date))}</td>
         <td class="num">${money(r.total)}</td>
-        <td class="num ${Number(r.balance) > 0.001 ? "owing" : "clear"}">${money(r.balance)}</td>
+        <td class="num ${
+          r.not_billed ? "" : Number(r.balance) > 0.001 ? "owing" : "clear"
+        }">${r.not_billed ? "—" : money(r.balance)}</td>
       </tr>`,
     )
     .join("");
@@ -320,6 +327,14 @@ const printStatement = (data, preparedBy, paper = "A4") => {
     ${
       lines.some((r) => String(r.who).endsWith(" *"))
         ? '<div class="note">* booked by this customer for a family member or friend</div>'
+        : ""
+    }
+
+    ${
+      lines.some((r) => r.not_billed)
+        ? `<div class="note">A dash in the balance column means that seat is
+             billed to whoever made the booking, not to you. It is listed here
+             so your itinerary is complete.</div>`
         : ""
     }
 
@@ -1422,8 +1437,20 @@ export default function CustomersPage() {
                         <span className="font-semibold text-red-600 dark:text-red-400">
                           ${Number(c.balance).toFixed(2)}
                         </span>
+                      ) : Number(c.guest_ticket_count) > 0 &&
+                        Number(c.total_billed) === 0 ? (
+                        // Flying on somebody else's booking. Saying "Settled"
+                        // would imply they had a bill and cleared it; the
+                        // truth is the bill was never theirs, and the agent
+                        // needs to know whose it is.
+                        <span className="text-gray-400">Not billed</span>
                       ) : (
                         <span className="text-gray-400">Settled</span>
+                      )}
+                      {Number(c.guest_ticket_count) > 0 && c.billed_to_name && (
+                        <span className="block text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                          Billed to {c.billed_to_name}
+                        </span>
                       )}
                       {/* Money the agency is holding for them, after
                           whatever has already been spent. Shown next to what

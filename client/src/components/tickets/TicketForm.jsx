@@ -12,6 +12,10 @@ import {
   Phone,
   X,
   UserCheck,
+  Plus,
+  Trash2,
+  Users,
+  AlertTriangle,
 } from "lucide-react";
 
 // ─── Helpers (v3: round trip + commission-aware revenue) ─────────────────────
@@ -78,6 +82,40 @@ const INITIAL = {
   passport_expiry_date: "",
   visa_type: "",
   visa_expiry_date: "",
+};
+
+/**
+ * One blank passenger row.
+ *
+ * A row is a name and that passenger's own ticket number, because a group
+ * itinerary issues one number per traveller — the document Ahmed sent lists
+ * KMUMGQ-16226-000011 against one name and …000010 against the other, and
+ * storing the same number on both would make the two tickets impossible to
+ * tell apart at the airline's counter.
+ */
+const blankPassenger = () => ({
+  passenger_name: "",
+  ticket_reference: "",
+  passport_number: "",
+});
+
+const money = (v) => `$${(Number(v) || 0).toFixed(2)}`;
+
+/**
+ * Show the agent exactly what each passenger's ticket will be worth.
+ *
+ * The server does the real division in whole cents; this repeats it so the
+ * form can show the answer before anything is saved. Same rule, so the two
+ * always agree: the spare cents go to the earliest passengers.
+ */
+const previewShares = (total, n) => {
+  const cents = Math.round((Number(total) || 0) * 100);
+  if (!n) return [];
+  const sign = cents < 0 ? -1 : 1;
+  const abs = Math.abs(cents);
+  const base = Math.floor(abs / n);
+  const rem = abs - base * n;
+  return Array.from({ length: n }, (_, i) => (sign * (base + (i < rem ? 1 : 0))) / 100);
 };
 
 // ─── Booked By Search ─────────────────────────────────────────────────────────
@@ -241,6 +279,50 @@ export default function TicketForm({
     visa_expiry_date: toDateInput(initial.visa_expiry_date),
   });
 
+  /**
+   * The passengers travelling on this booking.
+   *
+   * One row is the ordinary case and behaves exactly as the form always
+   * has. Adding rows turns the booking into a group: one price, one person
+   * paying, several seats.
+   *
+   * Editing an existing ticket never shows this — a ticket is one seat, and
+   * adding passengers to it would have to mean re-splitting money that has
+   * already been collected against it.
+   */
+  const [passengers, setPassengers] = useState([
+    {
+      ...blankPassenger(),
+      passenger_name: initial.passenger_name || "",
+      ticket_reference: initial.ticket_reference || "",
+      passport_number: initial.passport_number || "",
+    },
+  ]);
+  // Who pays. Separate from the passengers because it is a different role:
+  // the money, the balance and the statement all follow this person, who may
+  // not be travelling at all.
+  const [contact, setContact] = useState({
+    contact_name: initial.contact_name || "",
+    contact_number: initial.contact_number || "",
+  });
+  // Set when the document claimed a different number of passengers than the
+  // AI could actually read. Never reconciled silently — a missing passenger
+  // is a seat somebody paid for.
+  const [countWarning, setCountWarning] = useState(null);
+
+  const isGroup = mode === "create" && passengers.length > 1;
+  const namedPassengers = passengers.filter((p) => p.passenger_name.trim());
+
+  const setPassenger = (i, key) => (e) => {
+    const val = e.target.value;
+    setPassengers((list) =>
+      list.map((p, idx) => (idx === i ? { ...p, [key]: val } : p)),
+    );
+  };
+  const addPassenger = () => setPassengers((l) => [...l, blankPassenger()]);
+  const removePassenger = (i) =>
+    setPassengers((l) => (l.length === 1 ? l : l.filter((_, idx) => idx !== i)));
+
   // Commission is the exception, not the rule — keep it out of the way until
   // it's actually needed. Editing a ticket that already has one opens it.
   const [hasCommission, setHasCommission] = useState(
@@ -342,11 +424,23 @@ export default function TicketForm({
       fd.append("ticket_file", file);
       const res = await ticketsAPI.extract(fd);
       const { extracted, source_file_url } = res.data.data;
+
+      // The passenger list is handled on its own — spreading it into `form`
+      // would put an array where the flight fields live.
+      const {
+        passengers: readPassengers,
+        contact_name,
+        passenger_count,
+        passenger_count_stated,
+        passenger_count_mismatch,
+        ...flat
+      } = extracted;
+
       setForm((f) => {
         const updated = {
           ...f,
           ...Object.fromEntries(
-            Object.entries(extracted).filter(([, v]) => v !== null && v !== ""),
+            Object.entries(flat).filter(([, v]) => v !== null && v !== ""),
           ),
           source_file_url: source_file_url || f.source_file_url,
         };
@@ -359,9 +453,37 @@ export default function TicketForm({
         }
         return updated;
       });
-      toast.success("Ticket data extracted! Review and confirm.", {
-        id: "extract",
-      });
+
+      if (Array.isArray(readPassengers) && readPassengers.length > 0) {
+        setPassengers(
+          readPassengers.map((p) => ({
+            passenger_name: p.passenger_name || "",
+            ticket_reference: p.ticket_reference || "",
+            passport_number: p.passport_number || "",
+          })),
+        );
+      }
+      setContact((c) => ({
+        contact_name: contact_name || c.contact_name,
+        contact_number: extracted.contact_number || c.contact_number,
+      }));
+
+      // Reported, never quietly fixed. If the itinerary says three people
+      // and only two names could be read, the third is a seat somebody paid
+      // for and a human has to go and look.
+      setCountWarning(
+        passenger_count_mismatch
+          ? `The document mentions ${passenger_count_stated} passengers but only ${passenger_count} could be read. Check the ticket and add anyone missing.`
+          : null,
+      );
+
+      const n = readPassengers?.length || 0;
+      toast.success(
+        n > 1
+          ? `${n} passengers read from the ticket. Review and confirm.`
+          : "Ticket data extracted! Review and confirm.",
+        { id: "extract" },
+      );
     } catch (err) {
       toast.error(
         err.response?.data?.message || "Extraction failed. Fill in manually.",
@@ -375,6 +497,10 @@ export default function TicketForm({
   // ── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (mode === "create" && namedPassengers.length === 0) {
+      return toast.error("Add at least one passenger");
+    }
 
     setLoading(true);
     try {
@@ -390,8 +516,21 @@ export default function TicketForm({
       };
 
       if (mode === "create") {
-        await ticketsAPI.create(payload);
-        toast.success("Ticket created successfully!");
+        // The passenger list goes up whenever there is a list to send —
+        // which is always, on create. The server treats one passenger
+        // exactly as it treats one ticket, so nothing changes for an
+        // ordinary booking except that the contact is named explicitly.
+        payload.passengers = namedPassengers.map((p) => ({
+          passenger_name: p.passenger_name.trim(),
+          ticket_reference: p.ticket_reference.trim() || null,
+          passport_number: p.passport_number.trim() || null,
+        }));
+        payload.passenger_name = payload.passengers[0].passenger_name;
+        payload.contact_name = contact.contact_name.trim() || null;
+        payload.contact_number = contact.contact_number.trim() || null;
+
+        const res = await ticketsAPI.create(payload);
+        toast.success(res.data?.message || "Ticket created successfully!");
       } else {
         await ticketsAPI.update(initial.id, payload);
         toast.success("Ticket updated successfully!");
@@ -491,8 +630,13 @@ export default function TicketForm({
         )}
       </div>
 
-      {/* ── Travel documents (international only) ── */}
-      {form.ticket_type === "INTERNATIONAL" && (
+      {/* ── Travel documents (international only) ──
+          Hidden for a group booking. Every field here belongs to one
+          person — a passport number, a date of birth, a visa expiry — and
+          copying one traveller's onto all of them would be worse than
+          leaving them blank. Group passports go on the passenger rows;
+          the rest is filled in per ticket afterwards. */}
+      {form.ticket_type === "INTERNATIONAL" && !isGroup && (
         <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 p-4">
           <h3 className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide mb-3">
             Travel documents
@@ -542,27 +686,158 @@ export default function TicketForm({
         </div>
       )}
 
-      {/* ── Passenger ── */}
-      <div>
-        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
-          Passenger
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Input
-            label="Passenger name *"
-            value={form.passenger_name}
-            onChange={set("passenger_name")}
-            placeholder="Full name"
-            required
-          />
-          <Input
-            label="Contact number"
-            value={form.contact_number}
-            onChange={set("contact_number")}
-            placeholder="+252 XX XXX XXXX"
-          />
+      {/* ── Passenger (editing one existing ticket) ── */}
+      {mode === "edit" && (
+        <div>
+          <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+            Passenger
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input
+              label="Passenger name *"
+              value={form.passenger_name}
+              onChange={set("passenger_name")}
+              placeholder="Full name"
+              required
+            />
+            <Input
+              label="Contact number"
+              value={form.contact_number}
+              onChange={set("contact_number")}
+              placeholder="+252 XX XXX XXXX"
+            />
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* ── Contact and passengers (new booking) ──
+          Two sections, because they are two different things. The contact
+          is who the money comes from — one person, who owes the balance and
+          receives the statement. The passengers are who flies. On a family
+          booking the contact is usually the first passenger as well; that
+          needs no special handling, they simply appear in both places. */}
+      {mode === "create" && (
+        <>
+          <div>
+            <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+              Contact — who pays
+            </h3>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
+              The balance, the statement and the invoice all go to this
+              person. One only, even when several people are travelling.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Input
+                label="Contact name"
+                value={contact.contact_name}
+                onChange={(e) =>
+                  setContact((c) => ({ ...c, contact_name: e.target.value }))
+                }
+                placeholder="Leave empty if the first passenger is paying"
+              />
+              <Input
+                label="Contact number"
+                value={contact.contact_number}
+                onChange={(e) =>
+                  setContact((c) => ({ ...c, contact_number: e.target.value }))
+                }
+                placeholder="+252 XX XXX XXXX"
+              />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                Passengers — who flies
+              </h3>
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-gray-400">
+                <Users className="w-3.5 h-3.5" />
+                {namedPassengers.length || passengers.length}{" "}
+                {(namedPassengers.length || passengers.length) === 1
+                  ? "passenger"
+                  : "passengers"}
+              </span>
+            </div>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
+              One ticket is created for each. They share the flight and the
+              price below.
+            </p>
+
+            {countWarning && (
+              <div className="flex items-start gap-2 mb-3 p-3 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800">
+                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-800 dark:text-amber-300">
+                  {countWarning}
+                </p>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {passengers.map((p, i) => (
+                <div
+                  key={i}
+                  className="flex gap-2 items-start rounded-xl border border-gray-200 dark:border-gray-700 p-3"
+                >
+                  <span className="mt-2.5 w-6 h-6 shrink-0 rounded-full bg-gray-100 dark:bg-gray-700 text-xs font-semibold text-gray-600 dark:text-gray-300 flex items-center justify-center">
+                    {i + 1}
+                  </span>
+                  <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <Input
+                      label={i === 0 ? "Passenger name *" : "Passenger name"}
+                      value={p.passenger_name}
+                      onChange={setPassenger(i, "passenger_name")}
+                      placeholder="Full name"
+                      required={i === 0}
+                    />
+                    <Input
+                      label="Ticket number"
+                      value={p.ticket_reference}
+                      onChange={setPassenger(i, "ticket_reference")}
+                      placeholder="KMUMGQ-16226-000011"
+                      hint={
+                        i === 0
+                          ? "Each passenger has their own on a group ticket"
+                          : undefined
+                      }
+                    />
+                    {form.ticket_type === "INTERNATIONAL" &&
+                      passengers.length > 1 && (
+                        <Input
+                          label="Passport number"
+                          value={p.passport_number}
+                          onChange={setPassenger(i, "passport_number")}
+                          placeholder="A12345678"
+                        />
+                      )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePassenger(i)}
+                    disabled={passengers.length === 1}
+                    title={
+                      passengers.length === 1
+                        ? "A booking needs at least one passenger"
+                        : `Remove passenger ${i + 1}`
+                    }
+                    className="mt-2 p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={addPassenger}
+              className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-600 dark:text-gray-300 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors"
+            >
+              <Plus className="w-4 h-4" /> Add another passenger
+            </button>
+          </div>
+        </>
+      )}
 
       {/* ── Flight Details ── */}
       <div>
@@ -679,9 +954,16 @@ export default function TicketForm({
 
       {/* ── Pricing ── */}
       <div>
-        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
           Pricing
         </h3>
+        {isGroup && (
+          <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
+            The combined price for all {namedPassengers.length || passengers.length}{" "}
+            passengers, exactly as the ticket quotes it. It is divided between
+            them below.
+          </p>
+        )}
 
         {/* Breakdown */}
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
@@ -721,6 +1003,47 @@ export default function TicketForm({
             </div>
           </div>
         </div>
+
+        {/* What each passenger's ticket will actually be worth.
+            Shown before saving, not after, because the split is the one
+            thing about a group booking an agent cannot check by eye — and
+            the cent that cannot divide evenly has to land somewhere
+            visible rather than disappear. */}
+        {isGroup && Number(form.selling_price) > 0 && (
+          <div className="mb-4 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="px-4 py-2 bg-gray-50 dark:bg-gray-800 text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wide">
+              How the {money(form.selling_price)} splits
+            </div>
+            <div className="divide-y divide-gray-100 dark:divide-gray-700">
+              {previewShares(form.selling_price, namedPassengers.length).map(
+                (share, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between px-4 py-2 text-sm"
+                  >
+                    <span className="text-gray-700 dark:text-gray-200 truncate">
+                      {namedPassengers[i].passenger_name || `Passenger ${i + 1}`}
+                    </span>
+                    <span className="font-semibold text-gray-900 dark:text-white tabular-nums">
+                      {money(share)}
+                    </span>
+                  </div>
+                ),
+              )}
+            </div>
+            <div className="flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-800 text-sm font-bold">
+              <span className="text-gray-600 dark:text-gray-300">Total</span>
+              <span className="text-gray-900 dark:text-white tabular-nums">
+                {money(
+                  previewShares(
+                    form.selling_price,
+                    namedPassengers.length,
+                  ).reduce((a, b) => a + b, 0),
+                )}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Cost / Selling / Revenue */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">

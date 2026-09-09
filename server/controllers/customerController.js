@@ -175,7 +175,13 @@ const fetchStatementData = async (
             (t.selling_price - t.amount_paid) AS balance,
             t.payment_status, t.created_at AS booked_date,
             u.name AS agent_name,
-            (t.customer_id = $1 OR LOWER(TRIM(t.passenger_name)) = LOWER(TRIM($3))) AS is_self
+            (t.customer_id = $1 OR LOWER(TRIM(t.passenger_name)) = LOWER(TRIM($3))) AS is_self,
+            -- Is THIS customer the one who owes for this seat? A passenger
+            -- flying on a relative's booking appears on their own statement
+            -- — they want their itinerary — but the money is not theirs, and
+            -- an invoice showing them a balance somebody else is paying is
+            -- how a customer gets chased for a debt they do not have.
+            (COALESCE(t.booked_by_customer_id, t.customer_id) = $1) AS billed_to_me
      FROM tickets t
      LEFT JOIN users u ON u.id = t.created_by
      WHERE t.business_id = $2
@@ -265,9 +271,14 @@ const fetchStatementData = async (
     ? paymentsResult.rows.filter((p) => visibleIds.has(String(p.ticket_id)))
     : paymentsResult.rows;
 
+  // Only what this customer is actually billed for is added up. Visas and
+  // packages are always their own — a ticket is the only thing one person
+  // can buy for another — so `billed_to_me` is absent there and everything
+  // counts, exactly as before.
   const sum = (rows) =>
     rows.reduce(
       (acc, r) => {
+        if (r.billed_to_me === false) return acc;
         acc.total_amount += parseFloat(r.selling_price) || 0;
         acc.total_paid += parseFloat(r.amount_paid) || 0;
         acc.total_balance += parseFloat(r.balance) || 0;
@@ -782,10 +793,22 @@ const getCustomers = async (req, res, next) => {
            0)`
       : "0";
 
+    // ONE TICKET, ONE DEBTOR.
+    //
+    // A ticket is owed for by whoever the booking was billed to, and by
+    // nobody else. This used to read "the passenger OR the person who booked
+    // it", which counted a family booking twice: the $5 still owed on
+    // Sahro's seat appeared under Sahro *and* under Abdifatah who is paying
+    // for it, so the agency's receivables read $10 against $5 of real debt.
+    //
+    // The passenger still appears in the list, still shows the ticket they
+    // are flying on, and shows nothing owing — because they owe nothing.
+    const debtorMatch = `COALESCE(t.booked_by_customer_id, t.customer_id) = c.id`;
+
     const balanceExpr = `(
       SELECT COALESCE(SUM(t.selling_price - t.amount_paid), 0)
       FROM tickets t
-      WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
+      WHERE ${debtorMatch}
         AND t.business_id = c.business_id
         AND t.status != 'cancelled'
     )`;
@@ -807,19 +830,39 @@ const getCustomers = async (req, res, next) => {
       query(`SELECT COUNT(*) FROM customers c WHERE ${whereClause}`, params),
       query(
         `SELECT c.*,
+          -- Every ticket they appear on, travelling or paying. This is the
+          -- one figure that is deliberately NOT limited to what they owe:
+          -- a passenger flying on somebody else's booking still has a
+          -- ticket, and showing them "0 tickets" would be a lie.
           (SELECT COUNT(*) FROM tickets t
            WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
              AND t.business_id = c.business_id
              AND t.status != 'cancelled') AS ticket_count,
           ${balanceExpr} AS balance,
           (SELECT COALESCE(SUM(t.selling_price), 0) FROM tickets t
-           WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
+           WHERE ${debtorMatch}
              AND t.business_id = c.business_id
              AND t.status != 'cancelled') AS total_billed,
           (SELECT COALESCE(SUM(t.amount_paid), 0) FROM tickets t
-           WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
+           WHERE ${debtorMatch}
              AND t.business_id = c.business_id
              AND t.status != 'cancelled') AS total_paid,
+          -- Tickets they are flying on that somebody else is paying for,
+          -- and who that is. Without this the row reads "1 ticket, $0.00"
+          -- and looks like a bug rather than an answer.
+          (SELECT COUNT(*) FROM tickets t
+           WHERE t.customer_id = c.id
+             AND t.booked_by_customer_id IS NOT NULL
+             AND t.booked_by_customer_id <> c.id
+             AND t.business_id = c.business_id
+             AND t.status != 'cancelled') AS guest_ticket_count,
+          (SELECT payer.name FROM tickets t
+             JOIN customers payer ON payer.id = t.booked_by_customer_id
+            WHERE t.customer_id = c.id
+              AND t.booked_by_customer_id <> c.id
+              AND t.business_id = c.business_id
+              AND t.status != 'cancelled'
+            ORDER BY t.created_at DESC LIMIT 1) AS billed_to_name,
           -- What the agency is still holding for them: deposits taken, less
           -- whatever has already been spent on their bookings. Shown beside
           -- the balance because the two answer the same question from

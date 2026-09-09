@@ -2,6 +2,7 @@ const { body, validationResult } = require("express-validator");
 const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const { extractTicketData } = require("../services/aiExtraction");
+const { cleanName } = require("../services/nameClean");
 const {
   resolveAirline,
   findAirlineMatch,
@@ -12,6 +13,11 @@ const { resolveAgent } = require("../services/agentService");
 const { phoneMatches } = require("../services/phoneMatch");
 const { resolveAccount, requireAccount } = require("../services/accountResolver");
 const { uuidOrThrow } = require("../utils/sqlSafe");
+const {
+  createGroupedTickets,
+  normalisePassengers,
+} = require("../services/groupTicketBooking");
+const { resolveOrCreateCustomer } = require("../services/customerLink");
 
 // Compute payment status from amounts
 const calcPaymentStatus = (amountPaid, sellingPrice) => {
@@ -38,10 +44,23 @@ const ticketValidation = [
   // details following later, and blocking the sale until then just teaches
   // staff to type something false into the box.
   body("passport_number").optional({ nullable: true }).trim(),
-  body("passenger_name")
-    .trim()
-    .notEmpty()
-    .withMessage("Passenger name is required"),
+  // Required only when the booking is for one passenger. A group booking
+  // sends passengers[] instead, and demanding a top-level name as well would
+  // mean the form had to send the first passenger twice.
+  body("passenger_name").custom((value, { req }) => {
+    const list = req.body?.passengers;
+    if (Array.isArray(list) && list.length > 0) return true;
+    if (!String(value ?? "").trim())
+      throw new Error("Passenger name is required");
+    return true;
+  }),
+  body("passengers")
+    .optional()
+    .isArray()
+    .withMessage("passengers must be a list"),
+  body("passengers.*.passenger_name")
+    .optional()
+    .trim(),
   body("from_city").trim().notEmpty().withMessage("Departure city is required"),
   body("to_city").trim().notEmpty().withMessage("Destination city is required"),
   body("flight_date")
@@ -177,13 +196,82 @@ const createTicket = async (req, res, next) => {
       commissionAgentId = agent.id;
     }
 
-    // Force uppercase on names
-    const passenger_name = req.body.passenger_name?.toUpperCase().trim();
+    // Force uppercase on names, and drop any title in front of them. A
+    // ticket printed "MR ABDIFATAH MOHAMED MOHAMUD" is the same man as the
+    // customer already on file as "ABDIFATAH MOHAMED MOHAMUD"; stored with
+    // the title he becomes a second customer, and his balance splits in two.
+    const passenger_name = (
+      cleanName(req.body.passenger_name) || ""
+    ).toUpperCase().trim();
 
     // Resolve the typed airline to the agency's master row, so
     // "Star Airline" and "Star Airlines" don't become two carriers.
     const airline = await resolveAirline(req.body.airline_name, businessId);
     const airline_name = airline.name;
+
+    // ── Group booking ──────────────────────────────────────────────────
+    //
+    // One document, one price, several travellers. Handed off whole rather
+    // than woven into the single-ticket path below: that path is the one
+    // every existing booking goes through, and the safest change to it is
+    // none at all.
+    const passengers = normalisePassengers(req.body.passengers);
+    if (passengers.length > 0) {
+      // Who owes the money. Named explicitly when the document has a
+      // contact section, otherwise the person the booking is filed under.
+      const contactId = await resolveOrCreateCustomer({
+        businessId,
+        customerId: booked_by_customer_id || customer_id || null,
+        name: req.body.contact_name || passengers[0].passenger_name,
+        phone: contact_number,
+      });
+
+      const result = await withTransaction((client) =>
+        createGroupedTickets(client, {
+          businessId,
+          userId: req.user.id,
+          passengers,
+          contactId,
+          flight: {
+            ticket_type,
+            from_city,
+            to_city,
+            flight_date,
+            airline_name,
+            ticket_reference: ticket_reference || null,
+            contact_number: contact_number || null,
+            source_file_url: source_file_url || null,
+            trip_type: tripType,
+            return_date: return_date || null,
+          },
+          totals: {
+            base_price: base_price || 0,
+            tax: tax || 0,
+            surcharge: surcharge || 0,
+            cost_price: cost_price || 0,
+            selling_price: selling_price || 0,
+            agent_commission: agent_commission || 0,
+          },
+          paid,
+          method,
+          accountId,
+          agentId: commissionAgentId,
+          airlineId: airline.id,
+          groupType: req.body.group_type || "family",
+          groupLabel: req.body.group_label || null,
+          notes: req.body.notes || null,
+        }),
+      );
+
+      const count = result.tickets.length;
+      return response.created(
+        res,
+        { group: result.group, tickets: result.tickets, ticket: result.tickets[0] },
+        count === 1
+          ? "Ticket created successfully"
+          : `${count} tickets created for this booking`,
+      );
+    }
 
     // ── Duplicate check ──────────────────────────────────────
     const duplicate = await query(

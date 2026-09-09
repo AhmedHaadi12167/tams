@@ -923,6 +923,10 @@ const serviceRows = (data) => {
       total: t.selling_price,
       balance: t.balance,
       status: t.payment_status,
+      // A seat on a relative's booking. Listed so the itinerary is complete,
+      // but its balance belongs to whoever made the booking — printing it
+      // here would invoice this passenger for somebody else's debt.
+      not_billed: t.billed_to_me === false,
     });
   });
 
@@ -1184,11 +1188,11 @@ const generateCustomerStatementPDF = (res, data) => {
         r.reference || "—",
         formatDate(r.date),
         money(r.total),
-        money(r.balance),
+        r.not_billed ? "—" : money(r.balance),
       ];
       values.forEach((v, ci) => {
         const [, x, w, align] = cols[ci];
-        const owing = Number(r.balance) > 0.001;
+        const owing = !r.not_billed && Number(r.balance) > 0.001;
         doc
           .font(ci === 1 ? "Helvetica-Bold" : "Helvetica")
           .fontSize(7.5)
