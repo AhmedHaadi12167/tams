@@ -193,7 +193,11 @@ export const buildCargoInvoice = (
     </section>
 
     ${trackingStrip({
-      brand: business.name,
+      // The platform's name, set once at build time — NOT business.name.
+      // TAMS is multi-tenant: this agency is one of many sharing a single
+      // public tracking page, so the phrase printed here has to be the one
+      // that actually finds that page.
+      brand: options.trackBrand || process.env.REACT_APP_TRACK_BRAND || "",
       trackingNumber: shipment.tracking_number,
       siteUrl: options.siteUrl,
     })}

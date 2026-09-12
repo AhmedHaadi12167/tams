@@ -305,16 +305,24 @@ const siteHost = (override) => {
  *      two ordinary words
  *
  * @param {object} args
- * @param {string} args.brand           the agency's name, for the search
+ * @param {string} [args.brand]         the PLATFORM's name, for the search
+ *                                      phrase — not the agency's. Defaults
+ *                                      to the host when not configured.
  * @param {string} [args.trackingNumber]
  * @param {string} [args.siteUrl]       override, for a different domain
  */
 const trackingStrip = ({ brand, trackingNumber, siteUrl } = {}) => {
   const host = siteHost(siteUrl);
   if (!host) return ""; // nothing sensible to print
-  const name = String(brand || "").trim();
+  // The PLATFORM's name, not the agency's. One tracking page serves every
+  // agency on the system, so it is the platform a search has to find —
+  // telling a customer to search for their own agency sends them to a page
+  // that does not carry that name and will not rank for it. The agency is
+  // already all over this receipt, and the tracking result names it again
+  // once a number is entered.
   const num = String(trackingNumber || "").trim();
-  const search = [name, "raadi alaabtaada"].filter(Boolean).join(" ");
+  const name = String(brand || "").trim() || host;
+  const search = `${name} raadi alaabtaada`;
   const direct = num ? `${host}/track/${num}` : `${host}/track`;
 
   return `<section class="track">
