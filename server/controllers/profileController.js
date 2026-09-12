@@ -34,16 +34,58 @@ const getProfile = async (req, res, next) => {
 
 /**
  * PUT /api/profile
- * Update own name
+ * Update your own name and job title.
+ *
+ * The title is safe to let anyone set for themselves, and that is not an
+ * oversight — it is the reason `role` and `title` are separate columns. A
+ * role is an access level the system enforces; a title is what the person
+ * does, printed under their signature on an invoice. Editing your own title
+ * changes what a customer reads, never what you are allowed to do, so no
+ * amount of creativity in that box can promote anybody.
+ *
+ * Admins could already set titles for their whole team through
+ * /api/users/:id — including, in principle, their own row. But the place a
+ * person looks to correct their own details is their profile, and it had a
+ * name field and nothing else. An accountant who wanted "Finance Manager"
+ * under their name on a statement had to ask an admin to do it for them.
+ *
+ * The same rules as the admin route on purpose: trimmed, blank means "no
+ * title" rather than an empty string, and capped at the column's 120
+ * characters. Two routes writing one column must not disagree about what
+ * that column may contain.
  */
+const TITLE_MAX = 120;
+
 const updateProfile = async (req, res, next) => {
   try {
-    const { name } = req.body;
+    const { name, title } = req.body;
     if (!name || !name.trim())
       return response.error(res, "Name is required", 422);
+
+    const sets = ["name = $1"];
+    const vals = [name.trim()];
+
+    // Asked, not assumed: a database that predates migration_v20 has no
+    // title column, and should keep updating names rather than 500.
+    if (title !== undefined && (await hasColumn("users", "title"))) {
+      const clean = String(title ?? "").trim();
+      if (clean.length > TITLE_MAX)
+        return response.error(
+          res,
+          `Job title must be ${TITLE_MAX} characters or fewer`,
+          422,
+        );
+      vals.push(clean === "" ? null : clean);
+      sets.push(`title = $${vals.length}`);
+    }
+
+    vals.push(req.user.id);
     const result = await query(
-      `UPDATE users SET name = $1 WHERE id = $2 RETURNING id, name, email, role`,
-      [name.trim(), req.user.id],
+      `UPDATE users SET ${sets.join(", ")}
+        WHERE id = $${vals.length}
+        RETURNING id, name, email, role,
+                  ${(await hasColumn("users", "title")) ? "title" : "NULL::TEXT AS title"}`,
+      vals,
     );
     return response.success(res, result.rows[0], "Profile updated");
   } catch (err) {

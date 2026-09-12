@@ -14,7 +14,9 @@ const roleBadge = {
 
 export default function ProfilePage() {
   const [profile, setProfile] = useState(null);
-  const [nameForm, setNameForm] = useState({ name: "" });
+  // Name and job title save together — they are the two things about
+  // yourself a customer sees, and they sit on the same line of an invoice.
+  const [nameForm, setNameForm] = useState({ name: "", title: "" });
   const [passForm, setPassForm] = useState({
     current_password: "",
     new_password: "",
@@ -28,7 +30,10 @@ export default function ProfilePage() {
       .get()
       .then((res) => {
         setProfile(res.data.data);
-        setNameForm({ name: res.data.data.name });
+        setNameForm({
+          name: res.data.data.name,
+          title: res.data.data.title || "",
+        });
       })
       .catch(console.error);
   }, []);
@@ -38,8 +43,8 @@ export default function ProfilePage() {
     setSavingName(true);
     try {
       await profileAPI.update(nameForm);
-      toast.success("Name updated successfully");
-      setProfile((p) => ({ ...p, name: nameForm.name }));
+      toast.success("Profile updated");
+      setProfile((p) => ({ ...p, name: nameForm.name, title: nameForm.title }));
     } catch (err) {
       toast.error(err.response?.data?.message || "Failed to update");
     } finally {
@@ -126,18 +131,36 @@ export default function ProfilePage() {
           ))}
         </div>
 
-        <form onSubmit={handleNameSave} className="flex gap-3 items-end">
-          <div className="flex-1">
+        <form onSubmit={handleNameSave} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input
               label="Full name"
               value={nameForm.name}
-              onChange={(e) => setNameForm({ name: e.target.value })}
+              onChange={(e) =>
+                setNameForm((f) => ({ ...f, name: e.target.value }))
+              }
               required
             />
+            {/* Your job title, not your access level. This is what a
+                customer reads under your signature on an invoice — the role
+                badge above is what the system lets you do, and the two are
+                deliberately different things. */}
+            <Input
+              label="Job title"
+              value={nameForm.title}
+              onChange={(e) =>
+                setNameForm((f) => ({ ...f, title: e.target.value }))
+              }
+              maxLength={120}
+              placeholder="Operations Director"
+              hint="Printed on invoices you prepare. Leave empty to show your role instead."
+            />
           </div>
-          <Button type="submit" loading={savingName}>
-            Save
-          </Button>
+          <div className="flex justify-end">
+            <Button type="submit" loading={savingName}>
+              Save
+            </Button>
+          </div>
         </form>
       </Card>
 
