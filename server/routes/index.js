@@ -99,6 +99,15 @@ router.get(
   authorize("admin", "agent", "accountant"),
   businessController.getMyBusiness,
 );
+// An agency edits its own letterhead. Admin only — an agent booking tickets
+// has no business changing the name and phone number printed on every
+// invoice the agency issues. There is no :id in the path, so the route can
+// only ever reach the caller's own agency.
+router.put(
+  "/businesses/mine",
+  authorize("admin"),
+  businessController.updateMyBusiness,
+);
 router.get(
   "/businesses/overview",
   authorize("super_admin"),
@@ -106,9 +115,13 @@ router.get(
 );
 // Declared before /businesses/:id so the literal segment wins, and before
 // the create/update calls that consume the file name it returns.
+// Admins too: an agency that may change its own name may change its own
+// logo. The endpoint only stores a file and returns its name — it attaches
+// nothing to anything, so the worst an admin can do with it is leave an
+// unused image on disk.
 router.post(
   "/businesses/logo",
-  authorize("super_admin"),
+  authorize("admin", "super_admin"),
   upload.logo.single("logo"),
   businessController.uploadLogo,
 );

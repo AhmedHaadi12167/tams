@@ -128,52 +128,77 @@ const uploadLogo = async (req, res, next) => {
 };
 
 /**
+ * The one place a business row is written.
+ *
+ * Two callers reach it and they are trusted with different things. The
+ * platform owner editing any agency may set `status` — that is the switch
+ * that suspends a tenant. An agency's own admin editing their own record may
+ * not: a suspended agency that can un-suspend itself is not suspended. So
+ * the capability is a parameter rather than something each caller remembers
+ * to strip, because the version that is remembered is the version that is
+ * eventually forgotten.
+ *
+ * @param {string} id            which business
+ * @param {object} body          the submitted fields
+ * @param {boolean} allowStatus  may this caller change the status flag?
+ */
+const applyBusinessUpdate = async (id, body, { allowStatus }) => {
+  const { name, email, phone, address, status, logo_url, website } = body;
+
+  // Three states, not two: absent means "leave it alone", a value means
+  // "set it", and an empty string means "remove it". COALESCE alone can
+  // only express the first two, which is why a logo could be replaced but
+  // never taken off.
+  const tri = (v) => (v === undefined ? null : String(v));
+  const triSet = (col, n) =>
+    `${col} = CASE WHEN $${n}::TEXT IS NULL THEN ${col}
+                   WHEN $${n} = '' THEN NULL
+                   ELSE $${n} END`;
+
+  // website arrives with migration_v19. Writing to it unconditionally
+  // would turn editing a business into a 503 on any database that has not
+  // been migrated yet — for a field nobody asked to change.
+  const withWebsite = await hasColumn("businesses", "website");
+
+  const params = [
+    name || null,
+    email || null,
+    phone || null,
+    address || null,
+    allowStatus ? status || null : null,
+    tri(logo_url),
+  ];
+  if (withWebsite) params.push(tri(website));
+  params.push(id);
+  const idIdx = params.length;
+
+  return query(
+    `UPDATE businesses SET
+      name        = COALESCE($1, name),
+      email       = COALESCE($2, email),
+      phone       = COALESCE($3, phone),
+      address     = COALESCE($4, address),
+      status      = COALESCE($5::business_status, status),
+      ${triSet("logo_url", 6)}${withWebsite ? `,\n      ${triSet("website", 7)}` : ""}
+     WHERE id = $${idIdx}
+     RETURNING *`,
+    params,
+  );
+};
+
+/** Two agencies cannot share a sign-in address, so say so in plain words. */
+const duplicateEmail = (err) =>
+  err && err.code === "23505" && String(err.constraint || "").includes("email");
+
+/**
  * PUT /api/businesses/:id
- * Update business info and/or status
+ * Update business info and/or status — platform owner, any agency.
  */
 const updateBusiness = async (req, res, next) => {
   try {
-    const { name, email, phone, address, status, logo_url, website } = req.body;
-
-    // Three states, not two: absent means "leave it alone", a value means
-    // "set it", and an empty string means "remove it". COALESCE alone can
-    // only express the first two, which is why a logo could be replaced but
-    // never taken off.
-    const tri = (v) => (v === undefined ? null : String(v));
-    const triSet = (col, n) =>
-      `${col} = CASE WHEN $${n}::TEXT IS NULL THEN ${col}
-                     WHEN $${n} = '' THEN NULL
-                     ELSE $${n} END`;
-
-    // website arrives with migration_v19. Writing to it unconditionally
-    // would turn editing a business into a 503 on any database that has not
-    // been migrated yet — for a field nobody asked to change.
-    const withWebsite = await hasColumn("businesses", "website");
-
-    const params = [
-      name || null,
-      email || null,
-      phone || null,
-      address || null,
-      status || null,
-      tri(logo_url),
-    ];
-    if (withWebsite) params.push(tri(website));
-    params.push(req.params.id);
-    const idIdx = params.length;
-
-    const result = await query(
-      `UPDATE businesses SET
-        name        = COALESCE($1, name),
-        email       = COALESCE($2, email),
-        phone       = COALESCE($3, phone),
-        address     = COALESCE($4, address),
-        status      = COALESCE($5::business_status, status),
-        ${triSet("logo_url", 6)}${withWebsite ? `,\n        ${triSet("website", 7)}` : ""}
-       WHERE id = $${idIdx}
-       RETURNING *`,
-      params,
-    );
+    const result = await applyBusinessUpdate(req.params.id, req.body, {
+      allowStatus: true,
+    });
     if (result.rows.length === 0)
       return response.notFound(res, "Business not found");
     return response.success(
@@ -182,6 +207,49 @@ const updateBusiness = async (req, res, next) => {
       "Business updated successfully",
     );
   } catch (err) {
+    if (duplicateEmail(err))
+      return response.error(
+        res,
+        "Another agency is already using that email address",
+        409,
+      );
+    next(err);
+  }
+};
+
+/**
+ * PUT /api/businesses/mine  — edit my own agency
+ *
+ * Everything a customer sees: the name on the invoice, the phone they ring,
+ * the address they walk to, the logo at the top of the receipt. An agency
+ * that moves office should not have to ask the platform owner to change its
+ * own address.
+ *
+ * What it cannot touch is `status`. That is the platform's switch for
+ * suspending a tenant, and it is passed through applyBusinessUpdate with
+ * allowStatus:false so the field is ignored however it is sent.
+ */
+const updateMyBusiness = async (req, res, next) => {
+  try {
+    if (!req.businessId)
+      return response.error(
+        res,
+        "This account is not attached to an agency",
+        400,
+      );
+    const result = await applyBusinessUpdate(req.businessId, req.body, {
+      allowStatus: false,
+    });
+    if (result.rows.length === 0)
+      return response.notFound(res, "Agency not found");
+    return response.success(res, result.rows[0], "Agency details updated");
+  } catch (err) {
+    if (duplicateEmail(err))
+      return response.error(
+        res,
+        "Another agency is already using that email address",
+        409,
+      );
     next(err);
   }
 };
@@ -264,6 +332,7 @@ const getMyBusiness = async (req, res, next) => {
 
 module.exports = {
   getMyBusiness,
+  updateMyBusiness,
   getBusinesses,
   getBusiness,
   updateBusiness,

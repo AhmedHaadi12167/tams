@@ -91,12 +91,14 @@ ck("saving only a name leaves the title alone",
 //
 // The whole reason this is safe to expose: the route writes two columns and
 // no others. Anything else in the body is ignored, however it is spelled.
+// Email is deliberately absent here — it has its own guard (a password) and
+// its own tests in tenancy_test.mjs. This payload is about the fields that
+// are silently ignored rather than challenged.
 const sneaky = await call({
   name: "Faarax C. Xasan",
   title: "Chief Executive Officer",
   role: "super_admin",
   is_active: false,
-  email: "attacker@evil.com",
   business_id: "00000000-0000-0000-0000-000000000000",
   password_hash: "x",
 });
@@ -104,8 +106,15 @@ ck("a grand title is allowed", sneaky.code === 200, String(sneaky.code));
 const after = await row();
 ck("but the role is untouched by it",
    after.role === "accountant", after.role);
-ck("the email cannot be changed here either",
+ck("an untouched email stays untouched",
    after.email === "f@x.c", after.email);
+// Changing it is possible, but never as a side effect of saving a title —
+// it takes the current password. tenancy_test.mjs holds that line.
+const noPassword = await call({ name: "Faarax C. Xasan", email: "someone@else.com" });
+ck("a new email without a password is refused outright",
+   noPassword.code === 422, String(noPassword.code));
+ck("and nothing else in that request is applied either",
+   (await row()).email === "f@x.c", (await row()).email);
 ck("calling yourself CEO changes the invoice, not your access",
    after.title === "Chief Executive Officer" && after.role === "accountant",
    `${after.title} / ${after.role}`);

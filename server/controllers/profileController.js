@@ -58,12 +58,69 @@ const TITLE_MAX = 120;
 
 const updateProfile = async (req, res, next) => {
   try {
-    const { name, title } = req.body;
+    const { name, title, email, current_password } = req.body;
     if (!name || !name.trim())
       return response.error(res, "Name is required", 422);
 
     const sets = ["name = $1"];
     const vals = [name.trim()];
+
+    // ── Changing the address you sign in with ────────────────────────────
+    //
+    // This is not an edit like the others. The email IS the account: change
+    // it and the old address can no longer sign in, and password recovery
+    // now goes somewhere new. Anyone who walks past an unlocked screen could
+    // otherwise point the account at their own mailbox, reset the password
+    // at leisure, and lock the owner out of their own agency.
+    //
+    // So it costs one password. Not paranoia — the same thing every bank
+    // asks before changing where the statements go.
+    if (email !== undefined) {
+      const wanted = String(email).trim();
+      if (!wanted) return response.error(res, "Email is required", 422);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(wanted))
+        return response.error(res, "Enter a valid email address", 422);
+
+      const me = await query(
+        `SELECT email, password_hash FROM users WHERE id = $1`,
+        [req.user.id],
+      );
+      if (me.rows.length === 0) return response.notFound(res, "User not found");
+
+      // Only when it actually differs. Saving the form with the address
+      // untouched must not demand a password for a change nobody made.
+      if (wanted.toLowerCase() !== String(me.rows[0].email).toLowerCase()) {
+        if (!current_password)
+          return response.error(
+            res,
+            "Enter your current password to change your email address",
+            422,
+          );
+        const ok = await bcrypt.compare(
+          current_password,
+          me.rows[0].password_hash,
+        );
+        if (!ok)
+          return response.error(res, "Current password is incorrect", 401);
+
+        // Case-insensitively, because login matches LOWER(email). Two rows
+        // differing only in case would make "which account is this?" a
+        // question with two answers.
+        const taken = await query(
+          `SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2`,
+          [wanted, req.user.id],
+        );
+        if (taken.rows.length > 0)
+          return response.error(
+            res,
+            "That email address is already in use",
+            409,
+          );
+
+        vals.push(wanted);
+        sets.push(`email = $${vals.length}`);
+      }
+    }
 
     // Asked, not assumed: a database that predates migration_v20 has no
     // title column, and should keep updating names rather than 500.

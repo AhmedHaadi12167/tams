@@ -295,6 +295,9 @@ export const businessAPI = {
   overview: () => api.get("/businesses/overview"),
   // The signed-in user's own agency, for letterheads on printed documents.
   mine: () => api.get("/businesses/mine"),
+  // ...and for an admin editing it. No id: the route can only ever reach
+  // the caller's own agency, whatever is in the body.
+  updateMine: (data) => api.put("/businesses/mine", data),
   list: (params) => api.get("/businesses", { params }),
   get: (id) => api.get(`/businesses/${id}`),
   update: (id, data) => api.put(`/businesses/${id}`, data),
