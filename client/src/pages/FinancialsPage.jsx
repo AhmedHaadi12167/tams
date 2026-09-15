@@ -537,10 +537,16 @@ export default function FinancialsPage() {
                     ))}
                   <Line label="Gross Sales" value={money(pl.revenue.gross_sales)} bold divider />
 
+                  {/* Cargo carriers was missing here while being counted in
+                      the total, so the cost lines visibly failed to add up:
+                      210 + 250 displayed against a total of 480. A statement
+                      whose own arithmetic is wrong on the page is worse than
+                      one that is merely incomplete. */}
                   {[
                     ["Airline tickets", pl.cost_of_sales.airline_tickets],
                     ["Visa fees paid", pl.cost_of_sales.visa_fees],
                     ["Package suppliers", pl.cost_of_sales.package_suppliers],
+                    ["Cargo carriers", pl.cost_of_sales.cargo_carriers],
                   ]
                     .filter(([, v]) => Number(v) !== 0)
                     .map(([label, v]) => (

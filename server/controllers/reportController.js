@@ -5,7 +5,7 @@ const {
   generateExcelReport,
 } = require("../services/reportService");
 const { uuidOrThrow } = require("../utils/sqlSafe");
-const { hasTable } = require("../services/schemaInfo");
+const { hasTable, hasColumn } = require("../services/schemaInfo");
 const {
   cashMovement,
   cashBySource,
@@ -275,6 +275,15 @@ const getDashboard = async (req, res, next) => {
           ? `AND t.created_by = '${uuidOrThrow(req.user.id, "user id")}'`
           : "";
 
+      // profit_total arrives with migration_v23. Before it, every shipment
+      // was treated as pure margin — so that is exactly what the fallback
+      // does, rather than failing the whole dashboard over one column.
+      const cargoProfitExpr = (await hasColumn("cargo_shipments", "profit_total"))
+        ? `COALESCE(SUM(CASE WHEN cs.profit_total IS NOT NULL
+                             THEN GREATEST(cs.profit_total, 0)
+                             ELSE cs.total_price END), 0)`
+        : `COALESCE(SUM(cs.total_price), 0)`;
+
       const [
         ticketSummary,
         cargoSummary,
@@ -306,6 +315,16 @@ const getDashboard = async (req, res, next) => {
         query(
           `SELECT COUNT(*) AS total_shipments,
             COALESCE(SUM(cs.total_price), 0) AS cargo_revenue,
+            -- What the agency actually KEEPS on a shipment, which is not
+            -- what the customer paid. A parcel carried on a flight already
+            -- booked costs nothing, but one handed to a carrier at $2/kg
+            -- costs most of the fare. Where a margin has been recorded that
+            -- margin is the profit; where none has, the old all-profit
+            -- assumption stands. Deliberately the same arithmetic as
+            -- financialsController's carrier_cost, so the Dashboard and the
+            -- income statement cannot disagree — they did, by exactly the
+            -- carrier's share.
+            ${cargoProfitExpr} AS cargo_profit,
             COALESCE(SUM(cs.amount_paid), 0) AS cargo_collected,
             COALESCE(SUM(cs.total_price - cs.amount_paid)
                      FILTER (WHERE cs.payment_status != 'paid'), 0) AS cargo_unpaid,
@@ -505,9 +524,14 @@ const getDashboard = async (req, res, next) => {
             n(vs.visa_sales) +
             n(ps.package_sales)
           ).toFixed(2),
+          // Every term here is a MARGIN. cargo_profit, not cargo_revenue:
+          // using the shipment's full price treated the carrier's share as
+          // the agency's earnings, so a $30 parcel with $20 of carriage
+          // reported $30 of profit and the Dashboard read $90 against the
+          // income statement's $70.
           gross_profit: (
             n(ts.ticket_revenue) +
-            n(cs.cargo_revenue) +
+            n(cs.cargo_profit) +
             n(vs.visa_profit) +
             n(ps.package_profit)
           ).toFixed(2),
@@ -515,7 +539,7 @@ const getDashboard = async (req, res, next) => {
           // reads it shows a wilder number than before.
           total_revenue: (
             n(ts.ticket_revenue) +
-            n(cs.cargo_revenue) +
+            n(cs.cargo_profit) +
             n(vs.visa_profit) +
             n(ps.package_profit)
           ).toFixed(2),

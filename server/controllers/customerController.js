@@ -246,11 +246,43 @@ const fetchStatementData = async (
       : Promise.resolve({ rows: [] }),
   ]);
 
+  // Cargo belongs on the statement too. It was left off while the customers
+  // list also ignored it, so the two were at least consistently wrong. Now
+  // that a shipment counts towards what somebody owes, an invoice that does
+  // not list it is an invoice that cannot be reconciled against the figure
+  // they are being chased for.
+  const cargoResult =
+    (await hasTable("cargo_shipments")) &&
+    (await hasColumn("cargo_shipments", "customer_id"))
+      ? await query(
+          `SELECT cs.id, cs.tracking_number, cs.sender_name, cs.receiver_name,
+                  cs.from_city, cs.to_city, cs.weight_kg, cs.item_description,
+                  cs.total_price, cs.amount_paid,
+                  (cs.total_price - cs.amount_paid) AS balance,
+                  cs.payment_status, cs.created_at AS shipped_date
+             FROM cargo_shipments cs
+            WHERE cs.business_id = $2
+              AND cs.customer_id = $1
+              AND cs.cargo_status <> 'cancelled'
+            ORDER BY cs.created_at DESC`,
+          [customerId, businessId],
+        )
+      : { rows: [] };
+
   // A customer may want an invoice for only some passengers — say three of
   // the seven they booked. Everything below is scoped to that selection.
   const allTickets = ticketsResult.rows;
   const allVisas = visaResult.rows;
   const allPackages = packageResult.rows;
+  // Cargo is not individually selectable the way passengers are — a
+  // shipment has no list to tick — so it is always included in full.
+  const cargo = cargoResult.rows.map((c) => ({
+    ...c,
+    // The totals below read selling_price; cargo calls the same number
+    // total_price. Aliasing here rather than special-casing the sum keeps
+    // one definition of "what this line is worth".
+    selling_price: c.total_price,
+  }));
 
   // A selection of [] means "none of this kind"; null means "all of them"
   const pick = (rows, ids) => {
@@ -290,10 +322,14 @@ const fetchStatementData = async (
   const tTot = sum(tickets);
   const vTot = sum(visas);
   const pTot = sum(packages);
+  const cTot = sum(cargo);
   const totals = {
-    total_amount: tTot.total_amount + vTot.total_amount + pTot.total_amount,
-    total_paid: tTot.total_paid + vTot.total_paid + pTot.total_paid,
-    total_balance: tTot.total_balance + vTot.total_balance + pTot.total_balance,
+    total_amount:
+      tTot.total_amount + vTot.total_amount + pTot.total_amount + cTot.total_amount,
+    total_paid:
+      tTot.total_paid + vTot.total_paid + pTot.total_paid + cTot.total_paid,
+    total_balance:
+      tTot.total_balance + vTot.total_balance + pTot.total_balance + cTot.total_balance,
   };
 
   const money = (v) => Number(v || 0).toFixed(2);
@@ -322,12 +358,14 @@ const fetchStatementData = async (
     tickets,
     visas,
     packages,
+    cargo,
     payments,
     selection: {
       partial,
-      selected_count: tickets.length + visas.length + packages.length,
+      selected_count:
+        tickets.length + visas.length + packages.length + cargo.length,
       available_count:
-        allTickets.length + allVisas.length + allPackages.length,
+        allTickets.length + allVisas.length + allPackages.length + cargo.length,
     },
     breakdown: {
       tickets: {
@@ -348,12 +386,20 @@ const fetchStatementData = async (
         paid: money(pTot.total_paid),
         balance: money(pTot.total_balance),
       },
+      cargo: {
+        count: cargo.length,
+        total: money(cTot.total_amount),
+        paid: money(cTot.total_paid),
+        balance: money(cTot.total_balance),
+      },
     },
     summary: {
       ticket_count: tickets.length,
       visa_count: visas.length,
       package_count: packages.length,
-      item_count: tickets.length + visas.length + packages.length,
+      cargo_count: cargo.length,
+      item_count:
+        tickets.length + visas.length + packages.length + cargo.length,
       total_amount: money(totals.total_amount),
       total_paid: money(totals.total_paid),
       total_balance: money(totals.total_balance),
@@ -805,13 +851,63 @@ const getCustomers = async (req, res, next) => {
     // are flying on, and shows nothing owing — because they owe nothing.
     const debtorMatch = `COALESCE(t.booked_by_customer_id, t.customer_id) = c.id`;
 
-    const balanceExpr = `(
-      SELECT COALESCE(SUM(t.selling_price - t.amount_paid), 0)
-      FROM tickets t
-      WHERE ${debtorMatch}
-        AND t.business_id = c.business_id
-        AND t.status != 'cancelled'
-    )`;
+    // A customer is not only a passenger.
+    //
+    // These columns totalled TICKETS alone, so somebody who had only shipped
+    // a parcel or bought a visa appeared as "0 tickets, $0.00, Settled" while
+    // genuinely owing money — and the agency's receivables were short by
+    // every non-flight sale on the books. Only tickets can be bought for
+    // somebody else, so only tickets need the payer rule; a visa, a package
+    // and a shipment belong to the customer on the record.
+    //
+    // Each service is asked for separately rather than joined, because
+    // joining four one-to-many tables against one customer multiplies the
+    // rows and every sum comes out too big — silently, and in the direction
+    // that flatters the agency.
+    const svc = [
+      { table: "tickets", t: "t", alias: "t", where: debtorMatch, status: "t.status != 'cancelled'", price: "t.selling_price" },
+      { table: "visa_applications", alias: "v", where: "v.customer_id = c.id", status: "v.status <> 'cancelled'", price: "v.selling_price" },
+      { table: "packages", alias: "pk", where: "pk.customer_id = c.id", status: "pk.status <> 'cancelled'", price: "pk.selling_price" },
+      { table: "cargo_shipments", alias: "cs", where: "cs.customer_id = c.id", status: "cs.cargo_status <> 'cancelled'", price: "cs.total_price" },
+    ];
+
+    // Tables and columns that arrive with later migrations. A database
+    // without them keeps working and simply contributes nothing.
+    const live = [];
+    for (const s of svc) {
+      if (!(await hasTable(s.table))) continue;
+      if (s.table === "cargo_shipments" && !(await hasColumn("cargo_shipments", "customer_id")))
+        continue;
+      live.push(s);
+    }
+
+    const sumOver = (expr) =>
+      "(" +
+      live
+        .map(
+          (s) =>
+            `COALESCE((SELECT SUM(${expr(s)}) FROM ${s.table} ${s.alias}
+                        WHERE ${s.where} AND ${s.alias}.business_id = c.business_id
+                          AND ${s.status}), 0)`,
+        )
+        .join(" + ") +
+      ")";
+
+    const balanceExpr = sumOver((s) => `${s.price} - COALESCE(${s.alias}.amount_paid, 0)`);
+    const billedExpr = sumOver((s) => s.price);
+    const paidExpr = sumOver((s) => `COALESCE(${s.alias}.amount_paid, 0)`);
+
+    const countExpr =
+      "(" +
+      live
+        .map(
+          (s) =>
+            `COALESCE((SELECT COUNT(*) FROM ${s.table} ${s.alias}
+                        WHERE ${s.where} AND ${s.alias}.business_id = c.business_id
+                          AND ${s.status}), 0)`,
+        )
+        .join(" + ") +
+      ")";
 
     if (only_due === "true" || only_due === "1") {
       conditions.push(`${balanceExpr} > 0`);
@@ -830,23 +926,19 @@ const getCustomers = async (req, res, next) => {
       query(`SELECT COUNT(*) FROM customers c WHERE ${whereClause}`, params),
       query(
         `SELECT c.*,
-          -- Every ticket they appear on, travelling or paying. This is the
-          -- one figure that is deliberately NOT limited to what they owe:
-          -- a passenger flying on somebody else's booking still has a
-          -- ticket, and showing them "0 tickets" would be a lie.
+          -- Every ticket they appear on, travelling or paying. Deliberately
+          -- NOT limited to what they owe: a passenger flying on somebody
+          -- else's booking still has a ticket, and "0 tickets" would be a lie.
           (SELECT COUNT(*) FROM tickets t
            WHERE (t.customer_id = c.id OR t.booked_by_customer_id = c.id)
              AND t.business_id = c.business_id
              AND t.status != 'cancelled') AS ticket_count,
+          -- Everything they have bought, of any kind. The badge in the list
+          -- reads from this, so a cargo customer stops showing "0".
+          ${countExpr} AS service_count,
           ${balanceExpr} AS balance,
-          (SELECT COALESCE(SUM(t.selling_price), 0) FROM tickets t
-           WHERE ${debtorMatch}
-             AND t.business_id = c.business_id
-             AND t.status != 'cancelled') AS total_billed,
-          (SELECT COALESCE(SUM(t.amount_paid), 0) FROM tickets t
-           WHERE ${debtorMatch}
-             AND t.business_id = c.business_id
-             AND t.status != 'cancelled') AS total_paid,
+          ${billedExpr} AS total_billed,
+          ${paidExpr} AS total_paid,
           -- Tickets they are flying on that somebody else is paying for,
           -- and who that is. Without this the row reads "1 ticket, $0.00"
           -- and looks like a bug rather than an answer.

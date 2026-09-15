@@ -956,6 +956,20 @@ const serviceRows = (data) => {
     });
   });
 
+  (data.cargo || []).forEach((c) => {
+    rows.push({
+      who: c.receiver_name || c.sender_name,
+      service: `Cargo: ${c.from_city} to ${c.to_city}${
+        c.item_description ? ` — ${c.item_description}` : ""
+      }`,
+      reference: c.tracking_number,
+      date: c.shipped_date,
+      total: c.total_price,
+      balance: c.balance,
+      status: c.payment_status,
+    });
+  });
+
   return rows;
 };
 

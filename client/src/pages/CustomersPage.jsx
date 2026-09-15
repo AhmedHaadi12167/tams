@@ -126,6 +126,20 @@ const invoiceLines = (data) => {
       balance: p.balance,
     }),
   );
+  (data.cargo || []).forEach((c) =>
+    out.push({
+      who: c.receiver_name || c.sender_name,
+      service: `Cargo: ${c.from_city} to ${c.to_city}${
+        c.item_description ? ` — ${c.item_description}` : ""
+      }`,
+      // The tracking number, because it is the one reference a cargo
+      // customer already has in their hand.
+      reference: c.tracking_number,
+      date: c.shipped_date,
+      total: c.total_price,
+      balance: c.balance,
+    }),
+  );
   return out;
 };
 
@@ -1392,7 +1406,7 @@ export default function CustomersPage() {
                   {[
                     "Name",
                     "Phone",
-                    "Tickets",
+                    "Services",
                     "Billed",
                     "Paid",
                     "Balance",
@@ -1421,9 +1435,12 @@ export default function CustomersPage() {
                       {c.phone || "—"}
                     </td>
                     <td className="px-4 py-3">
+                      {/* Services, not tickets. A customer who only shipped
+                          a parcel read "0 tickets" beside a real balance,
+                          which looked like the balance was the bug. */}
                       <Badge variant="info">
-                        {c.ticket_count} ticket
-                        {c.ticket_count !== "1" ? "s" : ""}
+                        {Number(c.service_count ?? c.ticket_count)} service
+                        {Number(c.service_count ?? c.ticket_count) === 1 ? "" : "s"}
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
