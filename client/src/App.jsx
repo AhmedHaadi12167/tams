@@ -24,7 +24,6 @@ import UsersPage from "./pages/UsersPage";
 import BusinessesPage from "./pages/BusinessesPage";
 import ProfilePage from "./pages/ProfilePage";
 import TrackPage from "./pages/TrackPage";
-import LandingPage from "./pages/LandingPage";
 
 const ProtectedRoute = ({ children, roles }) => {
   const { user, loading, hasRole } = useAuth();
@@ -57,11 +56,6 @@ function AppRoutes() {
       {/* Public — no login, and deliberately not wrapped in PublicRoute,
           which would bounce a signed-in member of staff to the dashboard
           when they only wanted to check a parcel. */}
-      {/* The public face of the domain. Not wrapped in PublicRoute either:
-          bouncing a signed-in member of staff away from the company's own
-          home page would be absurd, and it is the page Google reads. */}
-      <Route path="/" element={<LandingPage />} />
-
       <Route path="/track" element={<TrackPage />} />
       <Route path="/track/:code" element={<TrackPage />} />
 

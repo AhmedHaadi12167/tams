@@ -53,35 +53,6 @@ const escapeHtml = (s) =>
 // is searching in Somali. English follows so the result still means
 // something to everyone else.
 const PAGES = {
-  "": {
-    dir: "",
-    title: `${BRAND} — Travel Agency Management & Cargo Tracking`,
-    description:
-      `${BRAND} is a travel agency management system used by agencies in ` +
-      `Mogadishu and across Somalia for flight tickets, visas, Hajj and Umrah ` +
-      `packages, and cargo. Customers can track a shipment with the number on ` +
-      `their receipt.`,
-    // The fallback a non-JS crawler reads. Same claims as the React page —
-    // if these two ever disagree, the crawler is being shown something the
-    // visitor is not, which is cloaking and is punished as such.
-    body: `
-      <h1>${escapeHtml(BRAND)}</h1>
-      <p>Raadi alaabtaada — track your shipment with ${escapeHtml(BRAND)}.
-         Enter the tracking number printed on your receipt to see where your
-         shipment is, which office is holding it, and who to call.</p>
-      <h2>What ${escapeHtml(BRAND)} is</h2>
-      <p>${escapeHtml(BRAND)} is a travel agency management system used by
-         agencies in Mogadishu and across Somalia. Agencies use it to book
-         flight tickets, arrange visas, organise Hajj and Umrah packages and
-         send cargo, and to keep the accounts behind all of it straight.</p>
-      <h2>For travel agencies</h2>
-      <p>${escapeHtml(BRAND)} runs more than one agency on one system. Each
-         agency has its own staff, customers and accounts, and no agency can
-         see another's. Tickets can be read automatically from a PDF or a
-         photograph, and invoices carry the agency's own name and logo.</p>
-      <p>Contact: info@${escapeHtml(HOST)} — Mogadishu, Somalia.</p>
-      <p><a href="/track">Track a shipment</a></p>`,
-  },
   track: {
     dir: "track",
     title: `Raadi Alaabtaada — ${BRAND}`,
@@ -96,7 +67,10 @@ const PAGES = {
          raadraaca ee warqaddaada ku qoran.</p>
       <p>You will see where your shipment is today, which office is holding
          it, and the phone number to call about it.</p>
-      <p><a href="/">${escapeHtml(BRAND)}</a></p>`,
+      <p>${escapeHtml(BRAND)} is a travel agency management system used by
+         agencies in Mogadishu and across Somalia for flight tickets, visas,
+         Hajj and Umrah packages, and cargo.
+         Contact: info@${escapeHtml(HOST)}</p>`,
   },
 };
 
@@ -112,14 +86,17 @@ const PAGES = {
  * `name` is exactly the brand, everywhere, because a business referred to
  * three ways is three weak signals instead of one strong one.
  */
-const structuredData = (page) => {
+const structuredData = () => {
   const org = {
     "@context": "https://schema.org",
     "@type": "Organization",
     name: BRAND,
     url: `${SITE}/`,
     logo: `${SITE}/favicon.svg`,
-    description: PAGES[""].description,
+    description:
+      `${BRAND} is a travel agency management system used by agencies in ` +
+      `Mogadishu and across Somalia for flight tickets, visas, Hajj and ` +
+      `Umrah packages, and cargo.`,
     email: `info@${HOST}`,
     address: {
       "@type": "PostalAddress",
@@ -144,13 +121,14 @@ const structuredData = (page) => {
     },
   };
 
-  // The tracking page is a page of the site, not a second organisation.
-  return page === "" ? [org, site] : [site];
+  // The tracking page is the only public one, so it carries both: it is the
+  // single place that identifies the business to a search engine.
+  return [org, site];
 };
 
 const headFor = (key) => {
   const p = PAGES[key];
-  const url = key === "" ? `${SITE}/` : `${SITE}/${key}`;
+  const url = `${SITE}/${key}`;
   return `
     <title>${escapeHtml(p.title)}</title>
     <meta name="description" content="${escapeHtml(p.description)}" />
@@ -192,7 +170,7 @@ const writePage = (key, template) => {
     `<div id="root">${p.body}</div>`,
   );
 
-  const outDir = key === "" ? BUILD : path.join(BUILD, p.dir);
+  const outDir = path.join(BUILD, p.dir);
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, "index.html"), html);
   return path.relative(BUILD, path.join(outDir, "index.html"));
@@ -215,46 +193,30 @@ const main = () => {
     );
   }
 
-  // The tracking page first, so that writing the homepage last cannot
-  // overwrite the template it was derived from.
   const trackOut = writePage("track", template);
-  const homeOut = writePage("", template);
 
   // ── robots.txt ──
   //
-  // Allow the two public pages, keep the private application out. The old
-  // version was a blanket `Disallow: /`, which was correct when the domain
-  // was nothing but a login screen and was the reason Google listed the home
-  // page as "No information is available for this page".
+  // The tracking page is the only public one. The domain root is the staff
+  // login screen, so it stays out: a search result reading "Sign in to your
+  // account" tells a customer nothing and invites crawlers to hammer an
+  // authentication endpoint.
+  //
+  // Consequence, so it is not a surprise later: a brand search for the bare
+  // domain will keep showing "No information is available for this page",
+  // because that is what Google prints for a URL it may not read. Only a
+  // crawlable page at / changes that.
   fs.writeFileSync(
     path.join(BUILD, "robots.txt"),
-    `# The home page and the tracking page are meant to be found. Everything
-# else is the agencies' private system and has no business in an index.
+    `# The tracking page is meant to be found: a customer who has lost their
+# receipt should be able to search for it. Everything else is the agencies'
+# private system and has no business in a search index.
 
 User-agent: *
-Allow: /$
 Allow: /track
 Allow: /favicon.svg
 Allow: /static/
-Disallow: /login
-Disallow: /dashboard
-Disallow: /tickets
-Disallow: /customers
-Disallow: /cargo
-Disallow: /visas
-Disallow: /packages
-Disallow: /accounts
-Disallow: /financials
-Disallow: /reports
-Disallow: /users
-Disallow: /businesses
-Disallow: /agents
-Disallow: /airlines
-Disallow: /expenses
-Disallow: /group-bookings
-Disallow: /profile
-Disallow: /api/
-Disallow: /uploads/
+Disallow: /
 
 Sitemap: ${SITE}/sitemap.xml
 `,
@@ -269,16 +231,10 @@ Sitemap: ${SITE}/sitemap.xml
      here is how a sitemap survives a migration still naming the old one. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>${SITE}/</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <url>
     <loc>${SITE}/track</loc>
     <lastmod>${today}</lastmod>
     <changefreq>daily</changefreq>
-    <priority>0.9</priority>
+    <priority>1.0</priority>
   </url>
 </urlset>
 `,
@@ -286,8 +242,7 @@ Sitemap: ${SITE}/sitemap.xml
 
   console.log(`[seo] brand:     ${BRAND}`);
   console.log(`[seo] site:      ${SITE}`);
-  console.log(`[seo] wrote:     ${homeOut}, ${trackOut}, robots.txt, sitemap.xml`);
-  console.log(`[seo] home:      ${PAGES[""].title}`);
+  console.log(`[seo] wrote:     ${trackOut}, robots.txt, sitemap.xml`);
   console.log(`[seo] track:     ${PAGES.track.title}`);
 };
 
