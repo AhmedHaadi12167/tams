@@ -66,8 +66,14 @@ const fetchPaymentMethods = async (businessId) => {
         : `NULL::TEXT AS ${name}`;
 
     const selects = [
-      await col("account_number", "NULLIF(TRIM(account_number), '') AS account_number"),
-      await col("account_holder", "NULLIF(TRIM(account_holder), '') AS account_holder"),
+      await col(
+        "account_number",
+        "NULLIF(TRIM(account_number), '') AS account_number",
+      ),
+      await col(
+        "account_holder",
+        "NULLIF(TRIM(account_holder), '') AS account_holder",
+      ),
       await col("icon_url", "NULLIF(TRIM(icon_url), '') AS icon_url"),
     ];
 
@@ -192,7 +198,9 @@ const fetchStatementData = async (
   );
 
   const paymentsResult = await query(
-    `SELECT p.amount, p.method, p.note, p.created_at, p.ticket_id,
+    `SELECT * FROM (
+      SELECT p.amount, p.method, p.note, p.created_at, p.ticket_id,
+          NULL::UUID AS opening_item_id,
             u.name AS collected_by_name, t.passenger_name,
             a.name AS account_name
      FROM ticket_payments p
@@ -201,7 +209,19 @@ const fetchStatementData = async (
      LEFT JOIN payment_accounts a ON a.id = p.account_id
      WHERE p.business_id = $2
        AND (t.customer_id = $1 OR t.booked_by_customer_id = $1)
-     ORDER BY p.created_at DESC`,
+    UNION ALL
+    SELECT p.amount, p.method, p.note, p.created_at,
+           NULL::UUID AS ticket_id, p.opening_item_id,
+           u.name AS collected_by_name, c.name AS passenger_name,
+           a.name AS account_name
+      FROM opening_balance_payments p
+      JOIN opening_balance_items oi ON oi.id = p.opening_item_id
+      JOIN customers c ON c.id = oi.customer_id
+      LEFT JOIN users u ON u.id = p.collected_by
+      LEFT JOIN payment_accounts a ON a.id = p.account_id
+    WHERE p.business_id = $2 AND c.id = $1
+      ) statement_payments
+      ORDER BY created_at DESC`,
     [customerId, businessId],
   );
 
@@ -296,11 +316,15 @@ const fetchStatementData = async (
   const packages = pick(allPackages, packageIds);
 
   const partial =
-    Array.isArray(ticketIds) || Array.isArray(visaIds) || Array.isArray(packageIds);
+    Array.isArray(ticketIds) ||
+    Array.isArray(visaIds) ||
+    Array.isArray(packageIds);
 
   const visibleIds = new Set(tickets.map((t) => String(t.id)));
   const payments = Array.isArray(ticketIds)
-    ? paymentsResult.rows.filter((p) => visibleIds.has(String(p.ticket_id)))
+    ? paymentsResult.rows.filter(
+        (p) => p.opening_item_id || visibleIds.has(String(p.ticket_id)),
+      )
     : paymentsResult.rows;
 
   // Only what this customer is actually billed for is added up. Visas and
@@ -325,11 +349,17 @@ const fetchStatementData = async (
   const cTot = sum(cargo);
   const totals = {
     total_amount:
-      tTot.total_amount + vTot.total_amount + pTot.total_amount + cTot.total_amount,
+      tTot.total_amount +
+      vTot.total_amount +
+      pTot.total_amount +
+      cTot.total_amount,
     total_paid:
       tTot.total_paid + vTot.total_paid + pTot.total_paid + cTot.total_paid,
     total_balance:
-      tTot.total_balance + vTot.total_balance + pTot.total_balance + cTot.total_balance,
+      tTot.total_balance +
+      vTot.total_balance +
+      pTot.total_balance +
+      cTot.total_balance,
   };
 
   const money = (v) => Number(v || 0).toFixed(2);
@@ -337,11 +367,41 @@ const fetchStatementData = async (
   // Branding and payment instructions. Fetched together because neither can
   // fail the statement — both resolve to a safe empty value — and running
   // them in parallel keeps the extra work off the response time.
-  const [business, paymentMethods, deposit] = await Promise.all([
-    fetchBusiness(businessId),
-    fetchPaymentMethods(businessId),
-    fetchDeposit(customerId, businessId),
-  ]);
+  const [business, paymentMethods, deposit, openingBalancesResult] =
+    await Promise.all([
+      fetchBusiness(businessId),
+      fetchPaymentMethods(businessId),
+      fetchDeposit(customerId, businessId),
+      query(
+        `SELECT o.id, o.service_type, o.reason, o.amount, o.entry_date,
+                COALESCE(SUM(p.amount), 0) AS paid_amount,
+                o.amount - COALESCE(SUM(p.amount), 0) AS balance
+           FROM opening_balance_items o
+           LEFT JOIN opening_balance_payments p ON p.opening_item_id = o.id
+          WHERE o.business_id = $1 AND o.customer_id = $2
+            AND o.balance_type = 'receivable'
+          GROUP BY o.id
+          ORDER BY o.entry_date DESC, o.created_at DESC`,
+        [businessId, customerId],
+      ),
+    ]);
+  const openingBalances = openingBalancesResult.rows;
+  const openingTotal = openingBalances.reduce(
+    (total, item) => total + Number(item.amount || 0),
+    0,
+  );
+  const openingPaid = openingBalances.reduce(
+    (total, item) => total + Number(item.paid_amount || 0),
+    0,
+  );
+  const openingDue = openingBalances.reduce(
+    (total, item) => total + Number(item.balance || 0),
+    0,
+  );
+
+  totals.total_amount += openingTotal;
+  totals.total_paid += openingPaid;
+  totals.total_balance += openingDue;
 
   // What the agency is holding for this customer, set against what this
   // invoice says they owe. See fetchDeposit for why `held` is not added to
@@ -360,12 +420,21 @@ const fetchStatementData = async (
     packages,
     cargo,
     payments,
+    opening_balances: openingBalances,
     selection: {
       partial,
       selected_count:
-        tickets.length + visas.length + packages.length + cargo.length,
+        tickets.length +
+        visas.length +
+        packages.length +
+        cargo.length +
+        openingBalances.length,
       available_count:
-        allTickets.length + allVisas.length + allPackages.length + cargo.length,
+        allTickets.length +
+        allVisas.length +
+        allPackages.length +
+        cargo.length +
+        openingBalances.length,
     },
     breakdown: {
       tickets: {
@@ -392,14 +461,25 @@ const fetchStatementData = async (
         paid: money(cTot.total_paid),
         balance: money(cTot.total_balance),
       },
+      opening_balances: {
+        count: openingBalances.length,
+        total: money(openingTotal),
+        paid: money(openingPaid),
+        balance: money(openingDue),
+      },
     },
     summary: {
       ticket_count: tickets.length,
       visa_count: visas.length,
       package_count: packages.length,
       cargo_count: cargo.length,
+      opening_balance_count: openingBalances.length,
       item_count:
-        tickets.length + visas.length + packages.length + cargo.length,
+        tickets.length +
+        visas.length +
+        packages.length +
+        cargo.length +
+        openingBalances.length,
       total_amount: money(totals.total_amount),
       total_paid: money(totals.total_paid),
       total_balance: money(totals.total_balance),
@@ -415,8 +495,8 @@ const fetchStatementData = async (
 
 /** Accepts ?ticket_ids=a,b,c or repeated ?ticket_ids=a&ticket_ids=b */
 const parseTicketIds = (raw) => {
-  if (raw === undefined) return null;              // absent -> everything
-  if (raw === "" || raw === null) return [];       // present but empty -> none
+  if (raw === undefined) return null; // absent -> everything
+  if (raw === "" || raw === null) return []; // present but empty -> none
   const list = Array.isArray(raw) ? raw : String(raw).split(",");
   return list.map((s) => String(s).trim()).filter(Boolean);
 };
@@ -486,13 +566,27 @@ const customerValidation = [
   // optional() ran isEmail() against it and failed with a bare "Validation
   // failed" naming nothing. Every optional text field on this form has the
   // same hazard.
-  body("email").optional({ checkFalsy: true }).isEmail().withMessage("Valid email required"),
+  body("email")
+    .optional({ checkFalsy: true })
+    .isEmail()
+    .withMessage("Valid email required"),
   body("phone").optional({ checkFalsy: true }).trim().isLength({ max: 50 }),
-  body("passport_number").optional({ checkFalsy: true }).trim().isLength({ max: 100 }),
-  body("nationality").optional({ checkFalsy: true }).trim().isLength({ max: 100 }),
-  body("customer_type").optional({ checkFalsy: true }).isIn(["individual", "company"])
+  body("passport_number")
+    .optional({ checkFalsy: true })
+    .trim()
+    .isLength({ max: 100 }),
+  body("nationality")
+    .optional({ checkFalsy: true })
+    .trim()
+    .isLength({ max: 100 }),
+  body("customer_type")
+    .optional({ checkFalsy: true })
+    .isIn(["individual", "company"])
     .withMessage("Type must be individual or company"),
-  body("company_name").optional({ checkFalsy: true }).trim().isLength({ max: 255 }),
+  body("company_name")
+    .optional({ checkFalsy: true })
+    .trim()
+    .isLength({ max: 255 }),
 ];
 
 /**
@@ -567,11 +661,26 @@ const createCustomer = async (req, res, next) => {
         );
     }
 
+    const customerTypeInfo = await query(
+      `SELECT data_type, udt_name, udt_schema
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'customers'
+          AND column_name = 'customer_type'`,
+    );
+    const customerTypeColumn = customerTypeInfo.rows[0];
+    const quoteIdentifier = (identifier) =>
+      `"${String(identifier).replace(/"/g, '""')}"`;
+    const customerTypeExpression =
+      customerTypeColumn?.data_type === "USER-DEFINED"
+        ? `COALESCE($7::${quoteIdentifier(customerTypeColumn.udt_schema)}.${quoteIdentifier(customerTypeColumn.udt_name)}, 'individual'::${quoteIdentifier(customerTypeColumn.udt_schema)}.${quoteIdentifier(customerTypeColumn.udt_name)})`
+        : "COALESCE($7, 'individual')";
+
     const result = await query(
       `INSERT INTO customers
          (business_id, name, phone, email, passport_number, nationality,
           customer_type, company_name, date_of_birth)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,'individual'),$8,$9)
+       VALUES ($1,$2,$3,$4,$5,$6,${customerTypeExpression},$8,$9)
        RETURNING *`,
       [
         req.businessId,
@@ -616,8 +725,7 @@ const addDeposit = async (req, res, next) => {
       );
 
     const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
-    if (!amount)
-      return response.error(res, "Enter an amount", 400);
+    if (!amount) return response.error(res, "Enter an amount", 400);
 
     const customer = await query(
       `SELECT id, name FROM customers WHERE id = $1 AND business_id = $2`,
@@ -720,9 +828,11 @@ const getDeposits = async (req, res, next) => {
       : { rows: [] };
 
     const taken =
-      Math.round(rows.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) / 100;
+      Math.round(rows.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) /
+      100;
     const spent =
-      Math.round(applied.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) / 100;
+      Math.round(applied.rows.reduce((a, r) => a + Number(r.amount), 0) * 100) /
+      100;
     const balance = Math.round((taken - spent) * 100) / 100;
 
     return response.success(res, {
@@ -865,10 +975,35 @@ const getCustomers = async (req, res, next) => {
     // rows and every sum comes out too big — silently, and in the direction
     // that flatters the agency.
     const svc = [
-      { table: "tickets", t: "t", alias: "t", where: debtorMatch, status: "t.status != 'cancelled'", price: "t.selling_price" },
-      { table: "visa_applications", alias: "v", where: "v.customer_id = c.id", status: "v.status <> 'cancelled'", price: "v.selling_price" },
-      { table: "packages", alias: "pk", where: "pk.customer_id = c.id", status: "pk.status <> 'cancelled'", price: "pk.selling_price" },
-      { table: "cargo_shipments", alias: "cs", where: "cs.customer_id = c.id", status: "cs.cargo_status <> 'cancelled'", price: "cs.total_price" },
+      {
+        table: "tickets",
+        t: "t",
+        alias: "t",
+        where: debtorMatch,
+        status: "t.status != 'cancelled'",
+        price: "t.selling_price",
+      },
+      {
+        table: "visa_applications",
+        alias: "v",
+        where: "v.customer_id = c.id",
+        status: "v.status <> 'cancelled'",
+        price: "v.selling_price",
+      },
+      {
+        table: "packages",
+        alias: "pk",
+        where: "pk.customer_id = c.id",
+        status: "pk.status <> 'cancelled'",
+        price: "pk.selling_price",
+      },
+      {
+        table: "cargo_shipments",
+        alias: "cs",
+        where: "cs.customer_id = c.id",
+        status: "cs.cargo_status <> 'cancelled'",
+        price: "cs.total_price",
+      },
     ];
 
     // Tables and columns that arrive with later migrations. A database
@@ -876,7 +1011,10 @@ const getCustomers = async (req, res, next) => {
     const live = [];
     for (const s of svc) {
       if (!(await hasTable(s.table))) continue;
-      if (s.table === "cargo_shipments" && !(await hasColumn("cargo_shipments", "customer_id")))
+      if (
+        s.table === "cargo_shipments" &&
+        !(await hasColumn("cargo_shipments", "customer_id"))
+      )
         continue;
       live.push(s);
     }
@@ -893,9 +1031,29 @@ const getCustomers = async (req, res, next) => {
         .join(" + ") +
       ")";
 
-    const balanceExpr = sumOver((s) => `${s.price} - COALESCE(${s.alias}.amount_paid, 0)`);
+    const balanceExpr = sumOver(
+      (s) => `${s.price} - COALESCE(${s.alias}.amount_paid, 0)`,
+    );
+    const openingBalanceExpr = `COALESCE((
+      SELECT SUM(o.amount - COALESCE((
+        SELECT SUM(op.amount) FROM opening_balance_payments op
+         WHERE op.opening_item_id = o.id
+      ), 0)) FROM opening_balance_items o
+       WHERE o.business_id = c.business_id AND o.customer_id = c.id
+         AND o.balance_type = 'receivable'
+    ), 0)`;
+    const customerBalanceExpr = `(${balanceExpr} + ${openingBalanceExpr})`;
     const billedExpr = sumOver((s) => s.price);
-    const paidExpr = sumOver((s) => `COALESCE(${s.alias}.amount_paid, 0)`);
+    const openingBilledExpr = `COALESCE((SELECT SUM(o.amount)
+      FROM opening_balance_items o
+      WHERE o.business_id = c.business_id AND o.customer_id = c.id
+        AND o.balance_type = 'receivable'), 0)`;
+    const openingPaidExpr = `COALESCE((SELECT SUM(op.amount)
+      FROM opening_balance_payments op
+      JOIN opening_balance_items o ON o.id = op.opening_item_id
+      WHERE o.business_id = c.business_id AND o.customer_id = c.id
+        AND o.balance_type = 'receivable'), 0)`;
+    const paidExpr = `(${sumOver((s) => `COALESCE(${s.alias}.amount_paid, 0)`)} + ${openingPaidExpr})`;
 
     const countExpr =
       "(" +
@@ -910,7 +1068,7 @@ const getCustomers = async (req, res, next) => {
       ")";
 
     if (only_due === "true" || only_due === "1") {
-      conditions.push(`${balanceExpr} > 0`);
+      conditions.push(`${customerBalanceExpr} > 0`);
     }
 
     const whereClause = conditions.join(" AND ");
@@ -936,8 +1094,8 @@ const getCustomers = async (req, res, next) => {
           -- Everything they have bought, of any kind. The badge in the list
           -- reads from this, so a cargo customer stops showing "0".
           ${countExpr} AS service_count,
-          ${balanceExpr} AS balance,
-          ${billedExpr} AS total_billed,
+          ${customerBalanceExpr} AS balance,
+          (${billedExpr} + ${openingBilledExpr}) AS total_billed,
           ${paidExpr} AS total_paid,
           -- Tickets they are flying on that somebody else is paying for,
           -- and who that is. Without this the row reads "1 ticket, $0.00"
@@ -970,8 +1128,8 @@ const getCustomers = async (req, res, next) => {
       // Totals across the whole filtered set, not just this page
       query(
         `SELECT
-           COUNT(*) FILTER (WHERE ${balanceExpr} > 0) AS customers_owing,
-           COALESCE(SUM(${balanceExpr}), 0)           AS total_outstanding
+           COUNT(*) FILTER (WHERE ${customerBalanceExpr} > 0) AS customers_owing,
+           COALESCE(SUM(${customerBalanceExpr}), 0)           AS total_outstanding
          FROM customers c WHERE ${whereClause}`,
         params,
       ),
@@ -1017,42 +1175,59 @@ const getCustomer = async (req, res, next) => {
     // spent on a ticket — a customer holding $300 against an Umrah package
     // had no way to use it, and their statement told half the story.
     const p = [req.params.id, req.businessId];
-    const [ticketsResult, visasResult, packagesResult, cargoResult] =
-      await Promise.all([
-        query(
-          `SELECT id, ticket_type, from_city, to_city, flight_date, airline_name,
+    const [
+      ticketsResult,
+      visasResult,
+      packagesResult,
+      cargoResult,
+      openingBalancesResult,
+    ] = await Promise.all([
+      query(
+        `SELECT id, ticket_type, from_city, to_city, flight_date, airline_name,
                   selling_price, amount_paid, revenue, status, created_at
              FROM tickets WHERE customer_id = $1 AND business_id = $2
             ORDER BY created_at DESC`,
-          p,
-        ),
-        optionalRows(
-          "visa_applications",
-          `SELECT id, applicant_name, destination_country, visa_type,
+        p,
+      ),
+      optionalRows(
+        "visa_applications",
+        `SELECT id, applicant_name, destination_country, visa_type,
                   selling_price, amount_paid, revenue, status::TEXT AS status, created_at
              FROM visa_applications WHERE customer_id = $1 AND business_id = $2
             ORDER BY created_at DESC`,
-          p,
-        ),
-        optionalRows(
-          "packages",
-          `SELECT id, label, package_type::TEXT AS package_type, pilgrim_count,
+        p,
+      ),
+      optionalRows(
+        "packages",
+        `SELECT id, label, package_type::TEXT AS package_type, pilgrim_count,
                   selling_price, amount_paid, revenue, status::TEXT AS status, created_at
              FROM packages WHERE customer_id = $1 AND business_id = $2
             ORDER BY created_at DESC`,
-          p,
-        ),
-        (await hasColumn("cargo_shipments", "customer_id"))
-          ? query(
-              `SELECT id, tracking_number, item_description, from_city, to_city,
+        p,
+      ),
+      (await hasColumn("cargo_shipments", "customer_id"))
+        ? query(
+            `SELECT id, tracking_number, item_description, from_city, to_city,
                       total_price AS selling_price, amount_paid,
                       cargo_status::TEXT AS status, created_at
                  FROM cargo_shipments WHERE customer_id = $1 AND business_id = $2
                 ORDER BY created_at DESC`,
-              p,
-            )
-          : { rows: [] },
-      ]);
+            p,
+          )
+        : { rows: [] },
+      query(
+        `SELECT o.id, o.service_type, o.reason, o.amount, o.entry_date,
+                  COALESCE(SUM(p.amount), 0) AS paid_amount,
+                  o.amount - COALESCE(SUM(p.amount), 0) AS balance
+             FROM opening_balance_items o
+             LEFT JOIN opening_balance_payments p ON p.opening_item_id = o.id
+            WHERE o.customer_id = $1 AND o.business_id = $2
+              AND o.balance_type = 'receivable'
+            GROUP BY o.id
+            ORDER BY o.entry_date DESC, o.created_at DESC`,
+        p,
+      ),
+    ]);
 
     return response.success(res, {
       customer: customerResult.rows[0],
@@ -1060,6 +1235,7 @@ const getCustomer = async (req, res, next) => {
       visas: visasResult.rows,
       packages: packagesResult.rows,
       cargo: cargoResult.rows,
+      opening_balances: openingBalancesResult.rows,
     });
   } catch (err) {
     next(err);

@@ -42,7 +42,11 @@ const statusVariant = {
   refunded: "warning",
 };
 const typeVariant = { LOCAL: "info", INTERNATIONAL: "purple" };
-const paymentVariant = { paid: "success", partial: "warning", unpaid: "danger" };
+const paymentVariant = {
+  paid: "success",
+  partial: "warning",
+  unpaid: "danger",
+};
 
 /**
  * What the customer still owes.
@@ -56,7 +60,8 @@ const balanceOf = (t) =>
   Math.round(
     ((parseFloat(t.selling_price) || 0) -
       (parseFloat(t.amount_paid) || 0) -
-      (parseFloat(t.written_off) || 0)) * 100,
+      (parseFloat(t.written_off) || 0)) *
+      100,
   ) / 100;
 
 /** A cancelled ticket is finished with, however it was settled. */
@@ -106,7 +111,9 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
 
   // What the customer still owes on a journey that won't happen.
   const outstanding =
-    Math.round(Math.max((parseFloat(ticket.selling_price) || 0) - paid, 0) * 100) / 100;
+    Math.round(
+      Math.max((parseFloat(ticket.selling_price) || 0) - paid, 0) * 100,
+    ) / 100;
 
   // The government's share of what the customer paid. It is owed whether or
   // not anyone flies, so it is not the agency's to give back.
@@ -199,7 +206,9 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
           value={refund}
           onChange={(e) => setRefund(e.target.value)}
           error={
-            tooMuch ? `More than the $${refundable.toFixed(2)} refundable` : undefined
+            tooMuch
+              ? `More than the $${refundable.toFixed(2)} refundable`
+              : undefined
           }
           hint={
             tax > 0 && !refundTax
@@ -218,8 +227,8 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
       {tax > 0 && (
         <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-3">
           <p className="text-sm text-blue-900 dark:text-blue-100">
-            <strong>${tax.toFixed(2)}</strong> of this ticket is government
-            tax. It is owed whether or not the passenger flies, so it is not
+            <strong>${tax.toFixed(2)}</strong> of this ticket is government tax.
+            It is owed whether or not the passenger flies, so it is not
             refundable and stays in the Tax section.
           </p>
           <label className="flex items-start gap-2.5 cursor-pointer mt-2">
@@ -236,9 +245,9 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
             <span className="text-sm text-blue-900 dark:text-blue-100">
               The airline returned the tax as well
               <span className="block text-xs text-blue-700 dark:text-blue-300 mt-0.5">
-                Usually only when the airline cancelled the flight. Ticking
-                this clears the ${tax.toFixed(2)} from what you owe the
-                government and lets the whole ${paid.toFixed(2)} go back.
+                Usually only when the airline cancelled the flight. Ticking this
+                clears the ${tax.toFixed(2)} from what you owe the government
+                and lets the whole ${paid.toFixed(2)} go back.
               </span>
             </span>
           </label>
@@ -297,9 +306,8 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
               className="mt-0.5 rounded"
             />
             <span className="text-sm text-amber-900 dark:text-amber-100">
-              Write off the{" "}
-              <strong>${outstanding.toFixed(2)}</strong> still owed — the
-              customer pays nothing more.
+              Write off the <strong>${outstanding.toFixed(2)}</strong> still
+              owed — the customer pays nothing more.
               <span className="block text-xs text-amber-700 dark:text-amber-300 mt-0.5">
                 No money moves. The amount is recorded as a loss so it shows in
                 your profit rather than disappearing. Untick to keep chasing it.
@@ -328,6 +336,196 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
   );
 }
 
+function DeleteTicketModal({ ticket, canCancel, onClose, onDone }) {
+  const [reason, setReason] = useState("");
+  const [refundCustomer, setRefundCustomer] = useState(false);
+  const refundable = Math.max(
+    (Number(ticket?.amount_paid) || 0) - (Number(ticket?.tax) || 0),
+    0,
+  );
+  const [refundAmount, setRefundAmount] = useState(refundable.toFixed(2));
+  const [accountId, setAccountId] = useState("");
+  const [saving, setSaving] = useState(false);
+  const paid = Number(ticket?.amount_paid) > 0.001;
+  const airlinePaid = Number(ticket?.airline_paid) > 0.001;
+  const settlementRequired = paid || airlinePaid;
+  const alreadyCancelled = ticket?.status === "cancelled";
+
+  useEffect(() => {
+    if (!ticket) return;
+    const maxRefund = Math.max(
+      (Number(ticket.amount_paid) || 0) - (Number(ticket.tax) || 0),
+      0,
+    );
+    setReason("");
+    setRefundCustomer(false);
+    setRefundAmount(maxRefund.toFixed(2));
+    setAccountId("");
+  }, [ticket]);
+
+  if (!ticket) return null;
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!reason.trim()) return toast.error("Enter a reason before continuing");
+
+    const refund = refundCustomer ? Number(refundAmount) : 0;
+    if (refund < 0 || refund > refundable + 0.001) {
+      return toast.error(`Refund must not exceed $${refundable.toFixed(2)}`);
+    }
+    if (refund > 0.001 && !accountId) {
+      return toast.error("Choose which account the refund comes from");
+    }
+
+    setSaving(true);
+    try {
+      if (settlementRequired) {
+        await ticketsAPI.cancel(ticket.id, {
+          reason: reason.trim(),
+          refund_amount: refund,
+          account_id: refund > 0.001 ? accountId : undefined,
+          write_off: balanceOf(ticket) > 0.001,
+        });
+        toast.success(
+          "Ticket cancelled and settled; payment history was preserved",
+        );
+      } else {
+        await ticketsAPI.delete(ticket.id, { reason: reason.trim() });
+        toast.success("Ticket deleted; reason recorded");
+      }
+      onDone();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Could not complete this action",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={!!ticket}
+      onClose={onClose}
+      title={
+        settlementRequired ? "Settle ticket before removal" : "Delete ticket"
+      }
+    >
+      <form onSubmit={submit} className="space-y-4">
+        <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 p-3">
+          <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+            {ticket.passenger_name} · {ticket.from_city} to {ticket.to_city}
+          </p>
+          <p className="text-sm text-amber-800 dark:text-amber-200 mt-1">
+            {alreadyCancelled
+              ? "This ticket is already cancelled. Its settlement and payment history must remain in the books, so it cannot be permanently deleted."
+              : settlementRequired
+                ? `This ticket has ${paid ? "customer payment" : "no customer payment"}${airlinePaid ? ` and $${Number(ticket.airline_paid).toFixed(2)} paid to the airline` : ""}. It cannot be erased: continue to cancel it and preserve its financial history.`
+                : "This permanently removes the unpaid ticket. No account balance will be changed."}
+          </p>
+        </div>
+
+        {!alreadyCancelled && (!settlementRequired || canCancel) && (
+          <>
+            <Input
+              label="Reason *"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Explain why this ticket is being removed"
+              required
+            />
+
+            {settlementRequired && (
+              <>
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Refund the customer from an account?
+                  </legend>
+                  <label
+                    className={`flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300 ${!paid || refundable <= 0.001 ? "opacity-50" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="delete-refund-choice"
+                      checked={refundCustomer}
+                      onChange={() => setRefundCustomer(true)}
+                      disabled={!paid || refundable <= 0.001}
+                    />
+                    Yes, record a refund and deduct it from an account
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input
+                      type="radio"
+                      name="delete-refund-choice"
+                      checked={!refundCustomer}
+                      onChange={() => setRefundCustomer(false)}
+                    />
+                    No, keep the collected money and record it as retained
+                  </label>
+                </fieldset>
+                {refundCustomer && refundable > 0.001 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <Input
+                      label="Refund amount"
+                      type="number"
+                      min="0"
+                      max={refundable}
+                      step="0.01"
+                      value={refundAmount}
+                      onChange={(event) => setRefundAmount(event.target.value)}
+                    />
+                    <AccountSelect
+                      direction="out"
+                      label="Deduct refund from"
+                      value={accountId}
+                      onChange={(event) => setAccountId(event.target.value)}
+                    />
+                  </div>
+                )}
+                {refundCustomer && refundable <= 0.001 && (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    No customer refund is available because the collected amount
+                    is government tax.
+                  </p>
+                )}
+                {!paid && (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    No customer money was collected, so there is no customer
+                    refund to deduct.
+                  </p>
+                )}
+              </>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={onClose}>
+                Go back
+              </Button>
+              <Button
+                type="submit"
+                loading={saving}
+                variant={settlementRequired ? "danger" : "primary"}
+              >
+                {settlementRequired
+                  ? "Cancel and settle"
+                  : "Delete permanently"}
+              </Button>
+            </div>
+          </>
+        )}
+
+        {(alreadyCancelled || (settlementRequired && !canCancel)) && (
+          <div className="flex justify-end">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
 // ─── Collect Payment Modal ───────────────────────────────────────────────────
 function CollectPaymentForm({ ticket, onDone, onCancel }) {
   const [amount, setAmount] = useState("");
@@ -346,8 +544,15 @@ function CollectPaymentForm({ ticket, onDone, onCancel }) {
       return toast.error(`Amount exceeds balance ($${balance.toFixed(2)})`);
     setSaving(true);
     try {
-      await ticketsAPI.addPayment(ticket.id, { amount: val, method, account_id: accountId || undefined, note });
-      toast.success(`$${val.toFixed(2)} collected from ${ticket.passenger_name}`);
+      await ticketsAPI.addPayment(ticket.id, {
+        amount: val,
+        method,
+        account_id: accountId || undefined,
+        note,
+      });
+      toast.success(
+        `$${val.toFixed(2)} collected from ${ticket.passenger_name}`,
+      );
       onDone();
     } catch (err) {
       toast.error(err.response?.data?.message || "Failed to collect payment");
@@ -495,13 +700,21 @@ function ManifestModal({ open, onClose }) {
     <Modal open={open} onClose={onClose} title="Flight manifest" size="xl">
       <div className="space-y-4">
         <div className="flex flex-wrap gap-3 items-end">
-          <Select value={when} onChange={(e) => setWhen(e.target.value)} className="w-40">
+          <Select
+            value={when}
+            onChange={(e) => setWhen(e.target.value)}
+            className="w-40"
+          >
             <option value="tomorrow">Tomorrow</option>
             <option value="today">Today</option>
             <option value="date">Pick a date</option>
           </Select>
           {when === "date" && (
-            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <Input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+            />
           )}
           <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 pb-2">
             <input
@@ -523,7 +736,9 @@ function ManifestModal({ open, onClose }) {
         </div>
 
         {loading ? (
-          <div className="flex justify-center py-16"><Spinner size="lg" /></div>
+          <div className="flex justify-center py-16">
+            <Spinner size="lg" />
+          </div>
         ) : rows.length === 0 ? (
           <div className="py-14 text-center">
             <Plane className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto mb-3" />
@@ -535,13 +750,30 @@ function ManifestModal({ open, onClose }) {
           <>
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
               {[
-                ["Passengers", summary.passengers, "text-gray-900 dark:text-white"],
+                [
+                  "Passengers",
+                  summary.passengers,
+                  "text-gray-900 dark:text-white",
+                ],
                 ["Airlines", summary.airlines, "text-gray-900 dark:text-white"],
-                ["Not fully paid", summary.unpaid, summary.unpaid > 0 ? "text-red-600" : "text-gray-400"],
-                ["To collect", `$${Number(summary.balance_due || 0).toFixed(2)}`, summary.balance_due > 0 ? "text-red-600" : "text-gray-400"],
+                [
+                  "Not fully paid",
+                  summary.unpaid,
+                  summary.unpaid > 0 ? "text-red-600" : "text-gray-400",
+                ],
+                [
+                  "To collect",
+                  `$${Number(summary.balance_due || 0).toFixed(2)}`,
+                  summary.balance_due > 0 ? "text-red-600" : "text-gray-400",
+                ],
               ].map(([l, v, cls]) => (
-                <div key={l} className="px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-700/40">
-                  <p className="text-xs text-gray-500 uppercase tracking-wide">{l}</p>
+                <div
+                  key={l}
+                  className="px-3 py-2 rounded-xl bg-gray-50 dark:bg-gray-700/40"
+                >
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">
+                    {l}
+                  </p>
                   <p className={`text-lg font-bold ${cls}`}>{v}</p>
                 </div>
               ))}
@@ -549,7 +781,8 @@ function ManifestModal({ open, onClose }) {
 
             {summary.missing_phone > 0 && (
               <p className="text-xs text-amber-600 dark:text-amber-400">
-                {summary.missing_phone} passenger(s) have no phone number on file.
+                {summary.missing_phone} passenger(s) have no phone number on
+                file.
               </p>
             )}
 
@@ -557,8 +790,19 @@ function ManifestModal({ open, onClose }) {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-white dark:bg-gray-800">
                   <tr className="border-b border-gray-200 dark:border-gray-700">
-                    {["Passenger", "Phone", "Route", "Airline", "Ref", "Type", "Balance"].map((h) => (
-                      <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap">
+                    {[
+                      "Passenger",
+                      "Phone",
+                      "Route",
+                      "Airline",
+                      "Ref",
+                      "Type",
+                      "Balance",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap"
+                      >
                         {h}
                       </th>
                     ))}
@@ -566,13 +810,21 @@ function ManifestModal({ open, onClose }) {
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
                   {rows.map((p) => (
-                    <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                    <tr
+                      key={p.id}
+                      className="hover:bg-gray-50 dark:hover:bg-gray-700/30"
+                    >
                       <td className="px-4 py-2.5 font-medium text-gray-900 dark:text-white whitespace-nowrap">
                         {p.passenger_name}
                       </td>
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         {p.phone ? (
-                          <a href={`tel:${p.phone}`} className="text-blue-600 hover:underline">{p.phone}</a>
+                          <a
+                            href={`tel:${p.phone}`}
+                            className="text-blue-600 hover:underline"
+                          >
+                            {p.phone}
+                          </a>
                         ) : (
                           <span className="text-amber-600">missing</span>
                         )}
@@ -580,12 +832,20 @@ function ManifestModal({ open, onClose }) {
                       <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">
                         {p.from_city} → {p.to_city}
                       </td>
-                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">{p.airline_name}</td>
-                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">{p.ticket_reference || "—"}</td>
-                      <td className="px-4 py-2.5">
-                        <Badge variant={typeVariant[p.ticket_type]}>{p.ticket_type}</Badge>
+                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">
+                        {p.airline_name}
                       </td>
-                      <td className={`px-4 py-2.5 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                      <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400">
+                        {p.ticket_reference || "—"}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <Badge variant={typeVariant[p.ticket_type]}>
+                          {p.ticket_type}
+                        </Badge>
+                      </td>
+                      <td
+                        className={`px-4 py-2.5 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
+                      >
                         ${Number(p.balance).toFixed(2)}
                       </td>
                     </tr>
@@ -618,6 +878,7 @@ export default function TicketsPage() {
   const [modal, setModal] = useState({ open: false, mode: null, ticket: null });
   const [payModal, setPayModal] = useState(null); // ticket being paid
   const [cancelModal, setCancelModal] = useState(null); // ticket being cancelled
+  const [deleteModal, setDeleteModal] = useState(null);
   const [payments, setPayments] = useState([]); // history in view modal
   const [manifestOpen, setManifestOpen] = useState(false);
 
@@ -639,17 +900,6 @@ export default function TicketsPage() {
 
   const setFilter = (key) => (e) =>
     setFilters((f) => ({ ...f, [key]: e.target.value, page: 1 }));
-
-  const handleDelete = async (ticket) => {
-    if (!window.confirm(`Delete ticket for ${ticket.passenger_name}?`)) return;
-    try {
-      await ticketsAPI.delete(ticket.id);
-      toast.success("Ticket deleted");
-      load();
-    } catch {
-      toast.error("Failed to delete ticket");
-    }
-  };
 
   const openView = (ticket) => {
     setModal({ open: true, mode: "view", ticket });
@@ -682,7 +932,11 @@ export default function TicketsPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="lg" onClick={() => setManifestOpen(true)}>
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={() => setManifestOpen(true)}
+          >
             <ClipboardList className="w-4 h-4" /> Manifest
           </Button>
           {canWrite() && (
@@ -869,10 +1123,12 @@ export default function TicketsPage() {
                             </span>
                           ))}
                         </span>
-                      ) : balanceOf(ticket) > 0 && (
-                        <p className="text-xs text-red-500 font-semibold mt-0.5">
-                          Bal: ${balanceOf(ticket).toFixed(2)}
-                        </p>
+                      ) : (
+                        balanceOf(ticket) > 0 && (
+                          <p className="text-xs text-red-500 font-semibold mt-0.5">
+                            Bal: ${balanceOf(ticket).toFixed(2)}
+                          </p>
+                        )
                       )}
                     </td>
                     <td className="px-4 py-3">
@@ -883,15 +1139,40 @@ export default function TicketsPage() {
                     <td className="px-4 py-3">
                       <ActionsMenu
                         items={[
-                          { label: "View", icon: Eye, onClick: () => openView(ticket) },
+                          {
+                            label: "View",
+                            icon: Eye,
+                            onClick: () => openView(ticket),
+                          },
                           !isSettled(ticket) && ticket.status === "active"
-                            ? { label: "Collect payment", icon: Banknote, onClick: () => setPayModal(ticket) }
+                            ? {
+                                label: "Collect payment",
+                                icon: Banknote,
+                                onClick: () => setPayModal(ticket),
+                              }
                             : null,
                           ticket.status === "active" && canCancel
-                            ? { label: "Cancel & refund", icon: Ban, onClick: () => setCancelModal(ticket) }
+                            ? {
+                                label: "Cancel & refund",
+                                icon: Ban,
+                                onClick: () => setCancelModal(ticket),
+                              }
                             : null,
-                          canWrite() ? { label: "Edit", icon: Pencil, onClick: () => openEdit(ticket) } : null,
-                          canWrite() ? { label: "Delete", icon: Trash2, danger: true, onClick: () => handleDelete(ticket) } : null,
+                          canWrite()
+                            ? {
+                                label: "Edit",
+                                icon: Pencil,
+                                onClick: () => openEdit(ticket),
+                              }
+                            : null,
+                          canWrite()
+                            ? {
+                                label: "Delete",
+                                icon: Trash2,
+                                danger: true,
+                                onClick: () => setDeleteModal(ticket),
+                              }
+                            : null,
                         ]}
                       />
                     </td>
@@ -929,7 +1210,9 @@ export default function TicketsPage() {
       <Modal
         open={!!cancelModal}
         onClose={() => setCancelModal(null)}
-        title={cancelModal ? `Cancel ticket — ${cancelModal.passenger_name}` : ""}
+        title={
+          cancelModal ? `Cancel ticket — ${cancelModal.passenger_name}` : ""
+        }
         size="lg"
       >
         {cancelModal && (
@@ -1108,25 +1391,36 @@ export default function TicketsPage() {
               </div>
             )}
 
-            {!isSettled(modal.ticket) &&
-              modal.ticket.status === "active" && (
-                <Button
-                  onClick={() => {
-                    const t = modal.ticket;
-                    closeModal();
-                    setPayModal(t);
-                  }}
-                  className="w-full"
-                >
-                  <Banknote className="w-4 h-4" /> Collect Payment ($
-                  {balanceOf(modal.ticket).toFixed(2)} due)
-                </Button>
-              )}
+            {!isSettled(modal.ticket) && modal.ticket.status === "active" && (
+              <Button
+                onClick={() => {
+                  const t = modal.ticket;
+                  closeModal();
+                  setPayModal(t);
+                }}
+                className="w-full"
+              >
+                <Banknote className="w-4 h-4" /> Collect Payment ($
+                {balanceOf(modal.ticket).toFixed(2)} due)
+              </Button>
+            )}
           </div>
         )}
       </Modal>
 
-      <ManifestModal open={manifestOpen} onClose={() => setManifestOpen(false)} />
+      <ManifestModal
+        open={manifestOpen}
+        onClose={() => setManifestOpen(false)}
+      />
+      <DeleteTicketModal
+        ticket={deleteModal}
+        canCancel={canCancel}
+        onClose={() => setDeleteModal(null)}
+        onDone={() => {
+          setDeleteModal(null);
+          load();
+        }}
+      />
     </div>
   );
 }

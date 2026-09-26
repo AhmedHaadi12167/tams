@@ -29,6 +29,20 @@ const KINDS = ["cash", "bank", "mobile", "merchant", "other"];
 
 const round2 = (v) => Math.round(Number(v || 0) * 100) / 100;
 
+const accountLedgerSql = `(
+  SELECT l.* FROM v_cash_ledger l
+  UNION ALL
+  SELECT a.business_id, a.id AS account_id, a.id AS movement_id,
+         'in'::TEXT AS direction, a.opening_balance AS amount,
+         COALESCE(a.opening_date::TIMESTAMPTZ, a.created_at) AS occurred_at,
+         'opening_balance'::TEXT AS source, a.id AS source_id,
+         'Opening balance'::TEXT AS party, NULL::TEXT AS reference,
+         'Balance before TAMS tracking began'::TEXT AS note,
+         NULL::UUID AS user_id, NULL::TEXT AS legacy_method
+    FROM payment_accounts a
+   WHERE a.opening_balance > 0
+)`;
+
 /**
  * The columns that exist only to print an account on an invoice, in the
  * order they were added: number and holder with migration_v19, icon with
@@ -76,9 +90,13 @@ const accountValidation = [
 ];
 
 const transferValidation = [
-  body("from_account_id").isUUID().withMessage("Choose the account to send from"),
+  body("from_account_id")
+    .isUUID()
+    .withMessage("Choose the account to send from"),
   body("to_account_id").isUUID().withMessage("Choose the account to send to"),
-  body("amount").isFloat({ gt: 0 }).withMessage("Amount must be greater than zero"),
+  body("amount")
+    .isFloat({ gt: 0 })
+    .withMessage("Amount must be greater than zero"),
   body("fee")
     .optional({ nullable: true, checkFalsy: true })
     .isFloat({ min: 0 })
@@ -98,9 +116,9 @@ const getAccounts = async (req, res, next) => {
 
     const [accountsRes, unassignedRes, tradeRes] = await Promise.all([
       query(
-        `SELECT b.*, a.notes, a.opening_date${
-          invoiceCols.map((c) => `, a.${c}`).join("")
-        }
+        `SELECT b.*, a.notes, a.opening_date${invoiceCols
+          .map((c) => `, a.${c}`)
+          .join("")}
            FROM v_account_balance b
            JOIN payment_accounts a ON a.id = b.account_id
           WHERE b.business_id = $1
@@ -161,7 +179,12 @@ const getAccounts = async (req, res, next) => {
     // What the accounts say they hold, versus what the trade actually
     // produced. These differ by exactly the money that has no account yet,
     // so saying so turns a confusing discrepancy into a to-do item.
-    const netTrade = round2(Number(trade.collected) - Number(trade.paid_out));
+    const openingBalances = round2(
+      accounts.reduce((total, account) => total + account.opening_balance, 0),
+    );
+    const netTrade = round2(
+      Number(trade.collected) - Number(trade.paid_out) + openingBalances,
+    );
 
     return response.success(res, {
       accounts,
@@ -171,6 +194,7 @@ const getAccounts = async (req, res, next) => {
         // money between your own accounts is neither income nor expense.
         collected: round2(trade.collected),
         paid_out: round2(trade.paid_out),
+        opening_balances: openingBalances,
         transferred: round2(trade.transferred),
         transfer_count: trade.transfer_count,
         net_trade: netTrade,
@@ -246,7 +270,9 @@ const getLedger = async (req, res, next) => {
       pi++;
     }
     if (search) {
-      where.push(`(l.party ILIKE $${pi} OR l.reference ILIKE $${pi} OR l.note ILIKE $${pi})`);
+      where.push(
+        `(l.party ILIKE $${pi} OR l.reference ILIKE $${pi} OR l.note ILIKE $${pi})`,
+      );
       params.push(`%${search}%`);
       pi++;
     }
@@ -258,13 +284,13 @@ const getLedger = async (req, res, next) => {
         `SELECT COUNT(*)::INT AS count,
                 COALESCE(SUM(l.amount) FILTER (WHERE l.direction='in'),0)  AS total_in,
                 COALESCE(SUM(l.amount) FILTER (WHERE l.direction='out'),0) AS total_out
-           FROM v_cash_ledger l
+           FROM ${accountLedgerSql} l
           WHERE ${clause}`,
         params,
       ),
       query(
         `SELECT l.*, a.name AS account_name, a.kind AS account_kind, u.name AS user_name
-           FROM v_cash_ledger l
+           FROM ${accountLedgerSql} l
            LEFT JOIN payment_accounts a ON a.id = l.account_id
            LEFT JOIN users u            ON u.id = l.user_id
           WHERE ${clause}
@@ -278,7 +304,10 @@ const getLedger = async (req, res, next) => {
     return response.success(
       res,
       {
-        movements: rowsRes.rows.map((r) => ({ ...r, amount: round2(r.amount) })),
+        movements: rowsRes.rows.map((r) => ({
+          ...r,
+          amount: round2(r.amount),
+        })),
         totals: {
           total_in: round2(t.total_in),
           total_out: round2(t.total_out),
@@ -336,7 +365,12 @@ const createAccount = async (req, res, next) => {
     const { name, kind, opening_balance, opening_date, notes } = req.body;
 
     const cols = [
-      "business_id", "name", "kind", "opening_balance", "opening_date", "notes",
+      "business_id",
+      "name",
+      "kind",
+      "opening_balance",
+      "opening_date",
+      "notes",
     ];
     const vals = [
       req.businessId,
@@ -405,7 +439,8 @@ const updateAccount = async (req, res, next) => {
         RETURNING *`,
       vals,
     );
-    if (result.rows.length === 0) return response.notFound(res, "Account not found");
+    if (result.rows.length === 0)
+      return response.notFound(res, "Account not found");
     return response.success(res, result.rows[0], "Account updated");
   } catch (err) {
     next(err);
@@ -431,10 +466,14 @@ const deleteAccount = async (req, res, next) => {
         WHERE business_id = $1 AND account_id = $2`,
       [req.businessId, id],
     );
-    if (used.rows[0].n > 0) {
+    const opening = await query(
+      `SELECT opening_balance FROM payment_accounts WHERE id = $1 AND business_id = $2`,
+      [id, req.businessId],
+    );
+    if (used.rows[0].n > 0 || Number(opening.rows[0]?.opening_balance) > 0) {
       return response.error(
         res,
-        `This account has ${used.rows[0].n} transaction${used.rows[0].n === 1 ? "" : "s"} and cannot be deleted. Mark it inactive instead — its history stays intact and it stops appearing in dropdowns.`,
+        `This account has an opening balance or transaction history and cannot be deleted. Mark it inactive instead — its history stays intact and it stops appearing in dropdowns.`,
         409,
       );
     }
@@ -443,7 +482,8 @@ const deleteAccount = async (req, res, next) => {
       `DELETE FROM payment_accounts WHERE id=$1 AND business_id=$2 RETURNING id`,
       [id, req.businessId],
     );
-    if (del.rows.length === 0) return response.notFound(res, "Account not found");
+    if (del.rows.length === 0)
+      return response.notFound(res, "Account not found");
     return response.success(res, null, "Account deleted");
   } catch (err) {
     next(err);
@@ -466,8 +506,15 @@ const createTransfer = async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
-    const { from_account_id, to_account_id, amount, fee, transferred_at, reference, note } =
-      req.body;
+    const {
+      from_account_id,
+      to_account_id,
+      amount,
+      fee,
+      transferred_at,
+      reference,
+      note,
+    } = req.body;
 
     if (from_account_id === to_account_id)
       return response.error(res, "Choose two different accounts", 400);
@@ -536,7 +583,11 @@ const assignAccount = async (req, res, next) => {
 
     const table = SOURCE_TABLES[source];
     if (!table)
-      return response.error(res, "That kind of movement cannot be reassigned", 400);
+      return response.error(
+        res,
+        "That kind of movement cannot be reassigned",
+        400,
+      );
     if (!isUuid(movement_id) || !isUuid(account_id))
       return response.error(res, "Invalid movement or account", 400);
 

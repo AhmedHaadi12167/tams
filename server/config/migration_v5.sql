@@ -1,5 +1,5 @@
 -- ============================================================
--- TAMS v5 Migration — Airline master list & duplicate merge
+-- TAMS v5 Migration - Airline master list & duplicate merge
 -- Safe to run multiple times (idempotent).
 -- Run with:  psql -U postgres -d tams_db -f config/migration_v5.sql
 -- ============================================================
@@ -25,9 +25,9 @@ BEGIN
     IF raw IS NULL THEN RETURN NULL; END IF;
 
     k := UPPER(TRIM(raw));
-    -- fold accented letters so 'Ünïted' and 'United' agree
+    -- fold accented letters so accented and plain names agree
     k := TRANSLATE(k,
-        'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ',
+        U&'\00C0\00C1\00C2\00C3\00C4\00C5\00C7\00C8\00C9\00CA\00CB\00CC\00CD\00CE\00CF\00D1\00D2\00D3\00D4\00D5\00D6\00D9\00DA\00DB\00DC\00DD',
         'AAAAAACEEEEIIIINOOOOOUUUUY');
     -- punctuation becomes a space, never nothing, or 'Star-Airlines'
     -- glues into 'STARAIRLINES' and the suffix rule can't see the last word
@@ -47,8 +47,8 @@ BEGIN
     IF k = '' THEN
         -- name was nothing but a generic word; fall back to the raw text
         k := REGEXP_REPLACE(
-               TRANSLATE(UPPER(TRIM(raw)),
-                 'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ',
+                             TRANSLATE(UPPER(TRIM(raw)),
+                                 U&'\00C0\00C1\00C2\00C3\00C4\00C5\00C7\00C8\00C9\00CA\00CB\00CC\00CD\00CE\00CF\00D1\00D2\00D3\00D4\00D5\00D6\00D9\00DA\00DB\00DC\00DD',
                  'AAAAAACEEEEIIIINOOOOOUUUUY'),
                '[^A-Z0-9]', '', 'g');
     END IF;
@@ -58,7 +58,7 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
 -- ============================================================
--- airlines — one row per carrier per agency
+-- airlines - one row per carrier per agency
 -- ============================================================
 CREATE TABLE IF NOT EXISTS airlines (
     id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -102,15 +102,15 @@ BEGIN
     --    the variant used on the most tickets (ties -> longest name,
     --    which is usually the fuller 'Airlines' form).
     FOR rec IN
-        SELECT DISTINCT ON (t.business_id, airline_match_key(t.airline_name))
+         SELECT DISTINCT ON (t.business_id, airline_match_key(t.airline_name::TEXT))
                t.business_id,
-               airline_match_key(t.airline_name) AS key,
+             airline_match_key(t.airline_name::TEXT) AS key,
                t.airline_name                    AS winner
         FROM tickets t
         WHERE t.airline_name IS NOT NULL AND TRIM(t.airline_name) <> ''
-        GROUP BY t.business_id, airline_match_key(t.airline_name), t.airline_name
+        GROUP BY t.business_id, airline_match_key(t.airline_name::TEXT), t.airline_name
         ORDER BY t.business_id,
-                 airline_match_key(t.airline_name),
+                 airline_match_key(t.airline_name::TEXT),
                  COUNT(*) DESC,
                  LENGTH(t.airline_name) DESC,
                  t.airline_name ASC
@@ -125,13 +125,13 @@ BEGIN
     RAISE NOTICE '--- Airline duplicates being merged -------------------';
     FOR rec IN
         SELECT t.business_id,
-               airline_match_key(t.airline_name) AS key,
+               airline_match_key(t.airline_name::TEXT) AS key,
                STRING_AGG(DISTINCT t.airline_name, '  |  ') AS variants,
                COUNT(DISTINCT t.airline_name) AS variant_count,
                COUNT(*) AS ticket_count
         FROM tickets t
         WHERE t.airline_name IS NOT NULL AND TRIM(t.airline_name) <> ''
-        GROUP BY t.business_id, airline_match_key(t.airline_name)
+        GROUP BY t.business_id, airline_match_key(t.airline_name::TEXT)
         HAVING COUNT(DISTINCT t.airline_name) > 1
         ORDER BY COUNT(*) DESC
     LOOP
@@ -140,7 +140,7 @@ BEGIN
         merged := merged + rec.variant_count - 1;
     END LOOP;
     IF merged = 0 THEN
-        RAISE NOTICE '  (none found — your airline names were already consistent)';
+        RAISE NOTICE '  (none found - your airline names were already consistent)';
     END IF;
     RAISE NOTICE '-------------------------------------------------------';
 
@@ -150,11 +150,11 @@ BEGIN
         airline_name = a.name
     FROM airlines a
     WHERE a.business_id = t.business_id
-      AND a.match_key   = airline_match_key(t.airline_name)
+    AND a.match_key   = airline_match_key(t.airline_name::TEXT)
       AND (t.airline_id IS DISTINCT FROM a.id OR t.airline_name <> a.name);
     GET DIAGNOSTICS relinked = ROW_COUNT;
 
-    RAISE NOTICE 'Airlines created: %   ·   duplicate spellings merged: %   ·   tickets updated: %',
+    RAISE NOTICE 'Airlines created: %   |   duplicate spellings merged: %   |   tickets updated: %',
         created, merged, relinked;
 END $$;
 
@@ -166,5 +166,5 @@ SET airline_name = a.name
 FROM airlines a
 WHERE a.business_id = bg.business_id
   AND bg.airline_name IS NOT NULL
-  AND a.match_key = airline_match_key(bg.airline_name)
+    AND a.match_key = airline_match_key(bg.airline_name::TEXT)
   AND bg.airline_name <> a.name;

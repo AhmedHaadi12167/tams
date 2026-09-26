@@ -11,6 +11,8 @@ server is needed and nothing touches your data.
     node equiv.mjs            # fresh install == upgraded install
     node reconcile_test.mjs   # controllers -> ledger -> accounts all agree
     node rules_test.mjs       # the four cancellation rules, end to end
+    node ticket_deletion_customer_type_test.mjs # enum customer types + deletion safeguards
+    node migration_v5_encoding_test.mjs # Windows-safe airline migration/backfill
 
 `reconcile_test.mjs` is the important one. It books a ticket, takes a cargo
 payment, records a visa, pays an airline, files an expense, moves money

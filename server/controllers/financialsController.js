@@ -15,7 +15,7 @@
  * Cargo has no purchase cost in this system, so its full price is margin.
  */
 
-const { query } = require("../config/db");
+const { query, withTransaction } = require("../config/db");
 const response = require("../utils/response");
 const {
   cashMovement,
@@ -96,8 +96,8 @@ const getProfitLoss = async (req, res, next) => {
       visaRes,
       packageRes,
     ] = await Promise.all([
-        query(
-          `SELECT
+      query(
+        `SELECT
              COUNT(*) FILTER (WHERE t.status <> 'cancelled')                     AS ticket_count,
              COALESCE(SUM(t.selling_price)    FILTER (WHERE t.status <> 'cancelled'), 0) AS gross_sales,
              COALESCE(SUM(t.cost_price)       FILTER (WHERE t.status <> 'cancelled'), 0) AS cost_of_sales,
@@ -137,10 +137,10 @@ const getProfitLoss = async (req, res, next) => {
              ), 0)                                                               AS tax_collected
            FROM tickets t
            WHERE t.business_id = $1${tRange.clause}`,
-          [businessId, ...tRange.params],
-        ),
-        query(
-          `SELECT
+        [businessId, ...tRange.params],
+      ),
+      query(
+        `SELECT
              COUNT(*)                                 AS shipment_count,
              COALESCE(SUM(cs.total_price), 0)         AS gross_sales,
              COALESCE(SUM(cs.amount_paid), 0)         AS collected,
@@ -152,21 +152,21 @@ const getProfitLoss = async (req, res, next) => {
                       FILTER (WHERE cs.profit_total IS NOT NULL), 0) AS carrier_cost
            FROM cargo_shipments cs
            WHERE cs.business_id = $1 AND cs.cargo_status <> 'cancelled'${cRange.clause}`,
-          [businessId, ...cRange.params],
-        ),
-        query(
-          `SELECT COALESCE(SUM(e.amount), 0) AS total_expenses, COUNT(*) AS expense_count
+        [businessId, ...cRange.params],
+      ),
+      query(
+        `SELECT COALESCE(SUM(e.amount), 0) AS total_expenses, COUNT(*) AS expense_count
            FROM expenses e WHERE e.business_id = $1${eRange.clause}`,
-          [businessId, ...eRange.params],
-        ),
-        query(
-          `SELECT e.category, COALESCE(SUM(e.amount), 0) AS amount, COUNT(*) AS entries
+        [businessId, ...eRange.params],
+      ),
+      query(
+        `SELECT e.category, COALESCE(SUM(e.amount), 0) AS amount, COUNT(*) AS entries
            FROM expenses e WHERE e.business_id = $1${eRange.clause}
            GROUP BY e.category ORDER BY amount DESC`,
-          [businessId, ...eRange.params],
-        ),
-        query(
-          `SELECT
+        [businessId, ...eRange.params],
+      ),
+      query(
+        `SELECT
              m.month,
              COALESCE(m.gross_sales, 0)   AS gross_sales,
              COALESCE(m.gross_profit, 0)  AS gross_profit,
@@ -214,7 +214,10 @@ const getProfitLoss = async (req, res, next) => {
     const pk = packageRes.rows[0];
 
     const grossSales = round2(
-      n(t.gross_sales) + n(c.gross_sales) + n(v.gross_sales) + n(pk.gross_sales),
+      n(t.gross_sales) +
+        n(c.gross_sales) +
+        n(v.gross_sales) +
+        n(pk.gross_sales),
     );
     const costOfSales = round2(
       n(t.cost_of_sales) +
@@ -248,9 +251,7 @@ const getProfitLoss = async (req, res, next) => {
     // subtracted; see the query above.
     const cancellationNet = round2(cancellationFees - unrecoveredCost);
 
-    const netProfit = round2(
-      grossProfit + cancellationNet - operatingCosts,
-    );
+    const netProfit = round2(grossProfit + cancellationNet - operatingCosts);
 
     return response.success(res, {
       period: { from: from_date || null, to: to_date || null },
@@ -273,7 +274,8 @@ const getProfitLoss = async (req, res, next) => {
         total: costOfSales,
       },
       gross_profit: grossProfit,
-      gross_margin_pct: grossSales > 0 ? round2((grossProfit / grossSales) * 100) : 0,
+      gross_margin_pct:
+        grossSales > 0 ? round2((grossProfit / grossSales) * 100) : 0,
       cancellations: {
         cancelled_count: parseInt(t.cancelled_count),
         fees_kept: cancellationFees,
@@ -294,14 +296,18 @@ const getProfitLoss = async (req, res, next) => {
         total: operatingCosts,
       },
       net_profit: netProfit,
-      net_margin_pct: grossSales > 0 ? round2((netProfit / grossSales) * 100) : 0,
+      net_margin_pct:
+        grossSales > 0 ? round2((netProfit / grossSales) * 100) : 0,
       cash: {
         collected: round2(
           n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected),
         ),
         outstanding: round2(
           grossSales -
-            (n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected)),
+            (n(t.collected) +
+              n(c.collected) +
+              n(v.collected) +
+              n(pk.collected)),
         ),
       },
       trend: trendRes.rows.map((r) => ({
@@ -341,6 +347,7 @@ const getBalanceSheet = async (req, res, next) => {
       supplierPaidRes,
       depositRes,
       depositUsedRes,
+      openingItemsRes,
     ] = await Promise.all([
       query(
         `SELECT name, opening_cash, fixed_assets, liabilities, owner_capital, financials_start
@@ -431,6 +438,20 @@ const getBalanceSheet = async (req, res, next) => {
         p,
         { total: 0 },
       ),
+      query(
+        `SELECT
+           COALESCE(SUM(amount - COALESCE(paid, 0)) FILTER (WHERE balance_type = 'receivable'), 0) AS receivables,
+           COALESCE(SUM(amount) FILTER (WHERE balance_type = 'payable'), 0) AS payables
+         FROM (
+           SELECT o.*, COALESCE(SUM(p.amount), 0) AS paid
+             FROM opening_balance_items o
+             LEFT JOIN opening_balance_payments p ON p.opening_item_id = o.id${as_of ? " AND p.created_at::DATE <= $2::DATE" : ""}
+            WHERE o.business_id = $1${as_of ? " AND o.entry_date <= $2::DATE" : ""}
+            GROUP BY o.id
+         ) opening
+         `,
+        p,
+      ),
     ]);
 
     const biz = bizRes.rows[0] || {};
@@ -452,7 +473,10 @@ const getBalanceSheet = async (req, res, next) => {
     // stayed at $300, so the sheet came out $250 short. A deposit the agency
     // has already delivered against is not money it still owes.
     const customerDeposits = round2(
-      Math.max(n(depositRes.rows[0].total) - n(depositUsedRes.rows[0].total), 0),
+      Math.max(
+        n(depositRes.rows[0].total) - n(depositUsedRes.rows[0].total),
+        0,
+      ),
     );
 
     // What the agency's accounts actually hold. This is the same figure the
@@ -479,9 +503,14 @@ const getBalanceSheet = async (req, res, next) => {
     const openingCash = round2(biz.opening_cash);
     const fixedAssets = round2(biz.fixed_assets);
     const manualLiabilities = round2(biz.liabilities);
+    const openingReceivables = round2(openingItemsRes.rows[0].receivables);
+    const openingPayables = round2(openingItemsRes.rows[0].payables);
 
     const grossSales = round2(
-      n(t.gross_sales) + n(c.gross_sales) + n(v.gross_sales) + n(pk.gross_sales),
+      n(t.gross_sales) +
+        n(c.gross_sales) +
+        n(v.gross_sales) +
+        n(pk.gross_sales),
     );
     const collected = round2(
       n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected),
@@ -505,7 +534,7 @@ const getBalanceSheet = async (req, res, next) => {
     //
     // Cash is not a derivation. It is a fact, and the ledger holds it.
     const cash = round2(n(held.rows[0].total) + n(loose.rows[0].net));
-    const receivables = round2(grossSales - collected);
+    const receivables = round2(grossSales - collected + openingReceivables);
     const totalAssets = round2(cash + receivables + fixedAssets);
 
     // ── Liabilities ─────────────────────────────────────────
@@ -521,6 +550,7 @@ const getBalanceSheet = async (req, res, next) => {
       airlinePayable +
         commissionPayable +
         supplierPayable +
+        openingPayables +
         customerDeposits +
         manualLiabilities,
     );
@@ -533,7 +563,13 @@ const getBalanceSheet = async (req, res, next) => {
     // opening balances so the sheet balances (Assets = Liabilities + Equity).
     const ownerCapital = n(biz.owner_capital)
       ? round2(biz.owner_capital)
-      : round2(openingCash + fixedAssets - manualLiabilities);
+      : round2(
+          openingCash +
+            fixedAssets +
+            openingReceivables -
+            manualLiabilities -
+            openingPayables,
+        );
     const totalEquity = round2(ownerCapital + retainedEarnings);
 
     const difference = round2(totalAssets - (totalLiabilities + totalEquity));
@@ -544,6 +580,7 @@ const getBalanceSheet = async (req, res, next) => {
       assets: {
         cash_and_bank: cash,
         accounts_receivable: receivables,
+        opening_receivables: openingReceivables,
         fixed_assets: fixedAssets,
         total: totalAssets,
       },
@@ -553,6 +590,7 @@ const getBalanceSheet = async (req, res, next) => {
         customer_deposits: customerDeposits,
         agent_commission_payable: commissionPayable,
         other_liabilities: manualLiabilities,
+        opening_payables: openingPayables,
         total: totalLiabilities,
       },
       settled: {
@@ -618,25 +656,25 @@ const getCashFlow = async (req, res, next) => {
       airlineOutRes,
       agentOutRes,
     ] = await Promise.all([
-        query(
-          `SELECT COALESCE(SUM(p.amount), 0) AS total, COUNT(*) AS entries
+      query(
+        `SELECT COALESCE(SUM(p.amount), 0) AS total, COUNT(*) AS entries
            FROM ticket_payments p
            WHERE p.business_id = $1${pRange.clause}`,
-          [businessId, ...pRange.params],
-        ),
-        query(
-          `SELECT COALESCE(SUM(cs.amount_paid), 0) AS total
+        [businessId, ...pRange.params],
+      ),
+      query(
+        `SELECT COALESCE(SUM(cs.amount_paid), 0) AS total
            FROM cargo_shipments cs
            WHERE cs.business_id = $1 AND cs.cargo_status <> 'cancelled'${cRange.clause}`,
-          [businessId, ...cRange.params],
-        ),
-        query(
-          `SELECT COALESCE(SUM(e.amount), 0) AS total, COUNT(*) AS entries
+        [businessId, ...cRange.params],
+      ),
+      query(
+        `SELECT COALESCE(SUM(e.amount), 0) AS total, COUNT(*) AS entries
            FROM expenses e WHERE e.business_id = $1${eRange.clause}`,
-          [businessId, ...eRange.params],
-        ),
-        query(
-          `SELECT day, COALESCE(SUM(inflow), 0) AS inflow, COALESCE(SUM(outflow), 0) AS outflow
+        [businessId, ...eRange.params],
+      ),
+      query(
+        `SELECT day, COALESCE(SUM(inflow), 0) AS inflow, COALESCE(SUM(outflow), 0) AS outflow
            FROM (
              SELECT p.created_at::DATE AS day, p.amount AS inflow, 0 AS outflow
              FROM ticket_payments p WHERE p.business_id = $1${pRange.clause}
@@ -645,8 +683,8 @@ const getCashFlow = async (req, res, next) => {
              FROM expenses e WHERE e.business_id = $1${eRangeShifted.clause}
            ) x
            GROUP BY day ORDER BY day`,
-          [businessId, ...pRange.params, ...eRangeShifted.params],
-        ),
+        [businessId, ...pRange.params, ...eRangeShifted.params],
+      ),
       query(
         `SELECT p.method, COALESCE(SUM(p.amount), 0) AS total
          FROM ticket_payments p
@@ -749,6 +787,35 @@ const getCashFlow = async (req, res, next) => {
 
 // ── GET /api/financials/receivables ──────────────────────────────────────────
 
+const receivableRowsSql = `(
+        SELECT r.business_id, r.source, r.source_id, r.party_name,
+          r.party_contact, r.issued_at, r.total_amount, r.paid_amount,
+          r.balance, r.payment_status::TEXT AS payment_status,
+          NULL::TEXT AS reason, NULL::UUID AS customer_id
+    FROM v_receivables r
+  UNION ALL
+  SELECT o.business_id,
+         ('opening_' || o.service_type)::TEXT AS source,
+         o.id AS source_id,
+         c.name AS party_name,
+         c.phone AS party_contact,
+         o.entry_date::TIMESTAMPTZ AS issued_at,
+         o.amount AS total_amount,
+         COALESCE(p.paid, 0) AS paid_amount,
+         o.amount - COALESCE(p.paid, 0) AS balance,
+         'unpaid'::TEXT AS payment_status,
+         o.reason,
+         o.customer_id
+    FROM opening_balance_items o
+    JOIN customers c ON c.id = o.customer_id
+    LEFT JOIN (
+      SELECT opening_item_id, SUM(amount) AS paid
+        FROM opening_balance_payments GROUP BY opening_item_id
+    ) p ON p.opening_item_id = o.id
+   WHERE o.balance_type = 'receivable'
+     AND o.amount > COALESCE(p.paid, 0)
+)`;
+
 const getReceivables = async (req, res, next) => {
   try {
     if (!requireBusiness(req, res)) return;
@@ -775,15 +842,20 @@ const getReceivables = async (req, res, next) => {
            COALESCE(SUM(r.balance), 0)                                        AS total,
            COUNT(*)                                                           AS open_items
          FROM (
-           SELECT *, (CURRENT_DATE - issued_at::DATE) AS age
-           FROM v_receivables WHERE business_id = $1
+           SELECT source_rows.*,
+                  (CURRENT_DATE - source_rows.issued_at::DATE) AS age
+             FROM ${receivableRowsSql} source_rows
+            WHERE source_rows.business_id = $1
          ) r`,
         [businessId],
       ),
-      query(`SELECT COUNT(*) FROM v_receivables r WHERE ${where}`, params),
+      query(
+        `SELECT COUNT(*) FROM ${receivableRowsSql} r WHERE ${where}`,
+        params,
+      ),
       query(
         `SELECT r.*, (CURRENT_DATE - r.issued_at::DATE) AS age_days
-         FROM v_receivables r
+        FROM ${receivableRowsSql} r
          WHERE ${where}
          ORDER BY r.issued_at ASC
          LIMIT $${pi} OFFSET $${pi + 1}`,
@@ -812,9 +884,332 @@ const getReceivables = async (req, res, next) => {
         page: parseInt(page),
         limit: parseInt(limit),
         total: parseInt(countRes.rows[0].count),
-        totalPages: Math.ceil(parseInt(countRes.rows[0].count) / parseInt(limit)),
+        totalPages: Math.ceil(
+          parseInt(countRes.rows[0].count) / parseInt(limit),
+        ),
       },
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getOpeningItems = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const result = await query(
+      `SELECT o.*, c.name AS customer_name, c.phone AS customer_phone,
+              COALESCE(p.paid, 0) AS paid_amount,
+              o.amount - COALESCE(p.paid, 0) AS balance,
+              u.name AS created_by_name
+         FROM opening_balance_items o
+         LEFT JOIN customers c ON c.id = o.customer_id
+         LEFT JOIN users u ON u.id = o.created_by
+         LEFT JOIN (
+           SELECT opening_item_id, SUM(amount) AS paid
+             FROM opening_balance_payments GROUP BY opening_item_id
+         ) p ON p.opening_item_id = o.id
+        WHERE o.business_id = $1
+        ORDER BY o.entry_date DESC, o.created_at DESC`,
+      [req.businessId],
+    );
+    return response.success(res, result.rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const collectOpeningReceivable = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const amount = round2(req.body.amount);
+    const accountId = req.body.account_id;
+    if (!Number.isFinite(amount) || amount <= 0)
+      return response.error(res, "Amount must be greater than zero", 400);
+    if (!accountId)
+      return response.error(
+        res,
+        "Choose the account receiving this payment",
+        400,
+      );
+
+    const payment = await withTransaction(async (client) => {
+      const item = await client.query(
+        `SELECT id, amount FROM opening_balance_items
+          WHERE id = $1 AND business_id = $2 AND balance_type = 'receivable'
+          FOR UPDATE`,
+        [req.params.id, req.businessId],
+      );
+      if (!item.rows.length) {
+        const err = new Error("Opening receivable not found");
+        err.statusCode = 404;
+        throw err;
+      }
+      const account = await client.query(
+        `SELECT id FROM payment_accounts
+          WHERE id = $1 AND business_id = $2 AND is_active = TRUE`,
+        [accountId, req.businessId],
+      );
+      if (!account.rows.length) {
+        const err = new Error(
+          "Choose an active account belonging to this business",
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+      const paid = await client.query(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM opening_balance_payments WHERE opening_item_id = $1`,
+        [req.params.id],
+      );
+      const remaining = round2(
+        Number(item.rows[0].amount) - Number(paid.rows[0].total),
+      );
+      if (amount > remaining + 0.001) {
+        const err = new Error(
+          `Amount exceeds the remaining balance ($${remaining.toFixed(2)})`,
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+      const result = await client.query(
+        `INSERT INTO opening_balance_payments
+           (business_id, opening_item_id, account_id, collected_by, amount, method, note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
+          req.businessId,
+          req.params.id,
+          accountId,
+          req.user.id,
+          amount,
+          req.body.method || "cash",
+          req.body.note || null,
+        ],
+      );
+      return result.rows[0];
+    });
+    return response.created(
+      res,
+      payment,
+      "Opening receivable payment recorded",
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+const createOpeningItem = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const {
+      balance_type,
+      customer_id,
+      service_type,
+      reason,
+      amount,
+      entry_date,
+    } = req.body;
+    const value = Number(amount);
+    const description = String(reason || "").trim();
+
+    if (!["receivable", "payable"].includes(balance_type))
+      return response.error(res, "Choose receivable or payable", 400);
+    if (!Number.isFinite(value) || value <= 0)
+      return response.error(res, "Amount must be greater than zero", 400);
+    if (!description) return response.error(res, "A reason is required", 400);
+    if (balance_type === "receivable") {
+      if (!customer_id)
+        return response.error(
+          res,
+          "Choose the customer who owes this balance",
+          400,
+        );
+      if (
+        !["ticket", "visa", "cargo", "package", "other"].includes(service_type)
+      )
+        return response.error(
+          res,
+          "Choose the service type for this receivable",
+          400,
+        );
+      const customer = await query(
+        `SELECT id FROM customers WHERE id = $1 AND business_id = $2`,
+        [customer_id, req.businessId],
+      );
+      if (customer.rows.length === 0)
+        return response.error(res, "Customer not found in this business", 404);
+    }
+
+    const result = await query(
+      `INSERT INTO opening_balance_items
+         (business_id, balance_type, customer_id, service_type, reason,
+          amount, entry_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::DATE, CURRENT_DATE), $8)
+       RETURNING *`,
+      [
+        req.businessId,
+        balance_type,
+        balance_type === "receivable" ? customer_id : null,
+        balance_type === "receivable" ? service_type : null,
+        description,
+        round2(value),
+        entry_date || null,
+        req.user.id,
+      ],
+    );
+    return response.created(res, result.rows[0], "Opening balance recorded");
+  } catch (err) {
+    next(err);
+  }
+};
+
+const updateOpeningItem = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const { customer_id, service_type, reason, amount, entry_date } = req.body;
+    const value = Number(amount);
+    const description = String(reason || "").trim();
+
+    if (!Number.isFinite(value) || value <= 0)
+      return response.error(res, "Amount must be greater than zero", 400);
+    if (!description) return response.error(res, "A reason is required", 400);
+
+    const result = await withTransaction(async (client) => {
+      const itemResult = await client.query(
+        `SELECT * FROM opening_balance_items
+          WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+        [req.params.id, req.businessId],
+      );
+      const item = itemResult.rows[0];
+      if (!item) return null;
+
+      let paid = 0;
+      if (item.balance_type === "receivable") {
+        const payments = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS paid
+             FROM opening_balance_payments WHERE opening_item_id = $1`,
+          [item.id],
+        );
+        paid = round2(payments.rows[0].paid);
+
+        if (!customer_id)
+          return {
+            error: "Choose the customer who owes this balance",
+            status: 400,
+          };
+        if (
+          !["ticket", "visa", "cargo", "package", "other"].includes(
+            service_type,
+          )
+        )
+          return { error: "Choose a valid service type", status: 400 };
+        if (value + 0.001 < paid)
+          return {
+            error: `Amount cannot be less than the $${paid.toFixed(2)} already collected`,
+            status: 400,
+          };
+        if (paid > 0.001 && customer_id !== item.customer_id)
+          return {
+            error:
+              "The customer cannot be changed after a payment has been collected",
+            status: 409,
+          };
+        const customer = await client.query(
+          `SELECT id FROM customers WHERE id = $1 AND business_id = $2`,
+          [customer_id, req.businessId],
+        );
+        if (!customer.rows.length)
+          return { error: "Customer not found in this business", status: 404 };
+      }
+
+      const updated = await client.query(
+        `UPDATE opening_balance_items
+            SET customer_id = $1,
+                service_type = $2,
+                reason = $3,
+                amount = $4,
+                entry_date = COALESCE($5::DATE, entry_date)
+          WHERE id = $6 AND business_id = $7
+          RETURNING *`,
+        [
+          item.balance_type === "receivable" ? customer_id : null,
+          item.balance_type === "receivable" ? service_type : null,
+          description,
+          round2(value),
+          entry_date || null,
+          item.id,
+          req.businessId,
+        ],
+      );
+      return updated.rows[0];
+    });
+
+    if (!result) return response.notFound(res, "Opening balance not found");
+    if (result.error) return response.error(res, result.error, result.status);
+    return response.success(res, result, "Opening balance updated");
+  } catch (err) {
+    next(err);
+  }
+};
+
+const deleteOpeningItem = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason)
+      return response.error(res, "A deletion reason is required", 400);
+
+    const result = await withTransaction(async (client) => {
+      const itemResult = await client.query(
+        `SELECT * FROM opening_balance_items
+          WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+        [req.params.id, req.businessId],
+      );
+      const item = itemResult.rows[0];
+      if (!item) return null;
+
+      let paid = 0;
+      if (item.balance_type === "receivable") {
+        const payments = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS paid
+             FROM opening_balance_payments WHERE opening_item_id = $1`,
+          [item.id],
+        );
+        paid = round2(payments.rows[0].paid);
+        if (paid > 0.001)
+          return {
+            error: `This receivable has $${paid.toFixed(2)} in collected payments and cannot be deleted`,
+            status: 409,
+          };
+      }
+
+      await client.query(
+        `INSERT INTO opening_balance_deletion_audit
+           (business_id, opening_item_id, balance_type, customer_id,
+            reason, amount, entry_date, deletion_reason, deleted_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          req.businessId,
+          item.id,
+          item.balance_type,
+          item.customer_id,
+          item.reason,
+          item.amount,
+          item.entry_date,
+          reason,
+          req.user.id,
+        ],
+      );
+      await client.query(
+        `DELETE FROM opening_balance_items WHERE id = $1 AND business_id = $2`,
+        [item.id, req.businessId],
+      );
+      return item.id;
+    });
+
+    if (!result) return response.notFound(res, "Opening balance not found");
+    if (result.error) return response.error(res, result.error, result.status);
+    return response.success(res, null, "Opening balance deleted and audited");
   } catch (err) {
     next(err);
   }
@@ -865,5 +1260,10 @@ module.exports = {
   getBalanceSheet,
   getCashFlow,
   getReceivables,
+  getOpeningItems,
+  createOpeningItem,
+  updateOpeningItem,
+  deleteOpeningItem,
+  collectOpeningReceivable,
   updateOpeningBalances,
 };

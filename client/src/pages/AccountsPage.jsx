@@ -59,6 +59,8 @@ const SOURCES = [
   { value: "expense", label: "Expenses" },
   { value: "transfer_in", label: "Transfers in" },
   { value: "transfer_out", label: "Transfers out" },
+  { value: "opening_receivable", label: "Opening receivable collection" },
+  { value: "opening_balance", label: "Opening balance" },
 ];
 const sourceLabel = (s) =>
   SOURCES.find((x) => x.value === s)?.label || s || "—";
@@ -118,7 +120,9 @@ function IconPicker({ value, onChange }) {
     if (!ICON_TYPES.includes(file.type))
       return toast.error("The icon must be a PNG or JPEG file.");
     if (file.size > ICON_MAX_BYTES)
-      return toast.error("That icon is over 512 KB. Please use a smaller file.");
+      return toast.error(
+        "That icon is over 512 KB. Please use a smaller file.",
+      );
 
     setBusy(true);
     try {
@@ -239,7 +243,9 @@ const AccountCard = ({ account, selected, onSelect, onEdit }) => {
             e.stopPropagation();
             onEdit(account);
           }}
-          onKeyDown={(e) => e.key === "Enter" && (e.stopPropagation(), onEdit(account))}
+          onKeyDown={(e) =>
+            e.key === "Enter" && (e.stopPropagation(), onEdit(account))
+          }
           className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400"
         >
           <Pencil className="w-3.5 h-3.5" />
@@ -369,10 +375,9 @@ function AccountModal({ open, onClose, onSaved, initial }) {
         </div>
 
         <p className="text-xs text-gray-500 dark:text-gray-400 -mt-1">
-          The opening balance is what this account held before TAMS started
-          tracking it. Leave it at zero and the balance here counts only what
-          the system records from now on — which will sit below your real bank
-          statement by whatever was already there.
+          The opening balance appears as a dated ledger movement and is included
+          once in the account balance. Later withdrawals cannot take the account
+          below zero.
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
@@ -575,8 +580,8 @@ function TransferModal({ open, onClose, accounts, onDone }) {
             {fee > 0 && (
               <p className="text-xs text-gray-500 mt-2">
                 The {money(fee)} fee stays with the sender and is the only real
-                cost — moving your own money doesn't change what the business
-                is worth.
+                cost — moving your own money doesn't change what the business is
+                worth.
               </p>
             )}
           </div>
@@ -586,8 +591,9 @@ function TransferModal({ open, onClose, accounts, onDone }) {
           <div className="flex gap-2 items-start rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
             <p className="text-xs text-amber-800 dark:text-amber-200">
-              That's more than {from.name} currently holds ({money(from.balance)}).
-              Recording it anyway will leave that account negative.
+              That's more than {from.name} currently holds (
+              {money(from.balance)}). Recording it anyway will leave that
+              account negative.
             </p>
           </div>
         )}
@@ -792,11 +798,23 @@ export default function AccountsPage() {
               </p>
             </div>
             <div>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Paid out</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Paid out
+              </p>
               <p className="font-semibold text-red-600 dark:text-red-400">
                 {money(summary.paid_out)}
               </p>
             </div>
+            {summary.opening_balances > 0 && (
+              <div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Opening balances
+                </p>
+                <p className="font-semibold text-gray-700 dark:text-gray-300">
+                  {money(summary.opening_balances)}
+                </p>
+              </div>
+            )}
             {summary.transfer_count > 0 && (
               <div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -822,8 +840,9 @@ export default function AccountsPage() {
           <div className="flex gap-2 items-start mt-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
             <p className="text-xs text-amber-800 dark:text-amber-200">
-              Trade so far is {money(summary.collected)} in less{" "}
-              {money(summary.paid_out)} out ={" "}
+              Account movements plus opening balances are{" "}
+              {money(summary.collected)} in less {money(summary.paid_out)} out,
+              plus {money(summary.opening_balances)} opening ={" "}
               <strong>{money(summary.net_trade)}</strong>, but the accounts add
               up to {money(summary.total_balance)}. The{" "}
               {money(Math.abs(summary.unassigned_gap))} difference is money with
@@ -884,20 +903,20 @@ export default function AccountsPage() {
           }
         />
       ) : (
-      <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-        {accounts.map((a) => (
-          <AccountCard
-            key={a.account_id}
-            account={a}
-            selected={selected?.account_id === a.account_id}
-            onSelect={pick}
-            onEdit={(acct) => {
-              setEditing(acct);
-              setAccountOpen(true);
-            }}
-          />
-        ))}
-      </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+          {accounts.map((a) => (
+            <AccountCard
+              key={a.account_id}
+              account={a}
+              selected={selected?.account_id === a.account_id}
+              onSelect={pick}
+              onEdit={(acct) => {
+                setEditing(acct);
+                setAccountOpen(true);
+              }}
+            />
+          ))}
+        </div>
       )}
 
       {/* ── The ledger ── */}
@@ -1050,9 +1069,7 @@ export default function AccountsPage() {
                         ) : ASSIGNABLE.includes(m.source) && canManage ? (
                           <select
                             value=""
-                            onChange={(e) =>
-                              assign(m, e.target.value)
-                            }
+                            onChange={(e) => assign(m, e.target.value)}
                             className="text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-amber-400"
                           >
                             <option value="">Assign account…</option>

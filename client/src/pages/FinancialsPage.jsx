@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { financialsAPI, expensesAPI, taxAPI } from "../services/api";
+import {
+  financialsAPI,
+  expensesAPI,
+  taxAPI,
+  customersAPI,
+} from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
   Button,
@@ -51,8 +56,14 @@ import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 
 const COLORS = [
-  "#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
-  "#ef4444", "#06b6d4", "#ec4899", "#84cc16",
+  "#3b82f6",
+  "#8b5cf6",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#06b6d4",
+  "#ec4899",
+  "#84cc16",
 ];
 
 const money = (v) =>
@@ -111,7 +122,9 @@ const Line = ({ label: text, value, bold, indent, tone = "gray", divider }) => {
     >
       <span
         className={`text-sm ${indent ? "pl-5" : ""} ${
-          bold ? "font-semibold text-gray-900 dark:text-white" : "text-gray-600 dark:text-gray-400"
+          bold
+            ? "font-semibold text-gray-900 dark:text-white"
+            : "text-gray-600 dark:text-gray-400"
         }`}
       >
         {text}
@@ -142,10 +155,14 @@ const Tile = ({ label: text, value, sub, tone = "gray", icon: Icon }) => {
           </p>
           <p className={`text-2xl font-bold mt-1.5 ${tones[tone]}`}>{value}</p>
           {sub && (
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{sub}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {sub}
+            </p>
           )}
         </div>
-        {Icon && <Icon className="w-5 h-5 text-gray-300 dark:text-gray-600 shrink-0" />}
+        {Icon && (
+          <Icon className="w-5 h-5 text-gray-300 dark:text-gray-600 shrink-0" />
+        )}
       </div>
     </Card>
   );
@@ -197,7 +214,8 @@ function ExpenseModal({ open, onClose, onSaved, categories, initial }) {
   const submit = async (e) => {
     e.preventDefault();
     if (!form.description.trim()) return toast.error("Description is required");
-    if (!(Number(form.amount) > 0)) return toast.error("Amount must be greater than 0");
+    if (!(Number(form.amount) > 0))
+      return toast.error("Amount must be greater than 0");
 
     setSaving(true);
     try {
@@ -225,7 +243,11 @@ function ExpenseModal({ open, onClose, onSaved, categories, initial }) {
     >
       <form onSubmit={submit} className="space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Select label="Category" value={form.category} onChange={set("category")}>
+          <Select
+            label="Category"
+            value={form.category}
+            onChange={set("category")}
+          >
             {categories.map((c) => (
               <option key={c.value} value={c.value}>
                 {c.label}
@@ -251,7 +273,12 @@ function ExpenseModal({ open, onClose, onSaved, categories, initial }) {
         />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input label="Date" type="date" value={form.expense_date} onChange={set("expense_date")} />
+          <Input
+            label="Date"
+            type="date"
+            value={form.expense_date}
+            onChange={set("expense_date")}
+          />
           <AccountSelect
             direction="out"
             value={form.account_id}
@@ -334,15 +361,363 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
           current value.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input label="Opening cash" type="number" step="0.01" value={form.opening_cash} onChange={set("opening_cash")} placeholder="0.00" />
-          <Input label="Fixed assets" type="number" step="0.01" value={form.fixed_assets} onChange={set("fixed_assets")} placeholder="Furniture, computers…" />
-          <Input label="Existing liabilities" type="number" step="0.01" value={form.liabilities} onChange={set("liabilities")} placeholder="Loans, unpaid bills" />
-          <Input label="Owner's capital" type="number" step="0.01" value={form.owner_capital} onChange={set("owner_capital")} placeholder="Auto-derived if blank" />
+          <Input
+            label="Opening cash"
+            type="number"
+            step="0.01"
+            value={form.opening_cash}
+            onChange={set("opening_cash")}
+            placeholder="0.00"
+          />
+          <Input
+            label="Fixed assets"
+            type="number"
+            step="0.01"
+            value={form.fixed_assets}
+            onChange={set("fixed_assets")}
+            placeholder="Furniture, computers…"
+          />
+          <Input
+            label="Existing liabilities"
+            type="number"
+            step="0.01"
+            value={form.liabilities}
+            onChange={set("liabilities")}
+            placeholder="Loans, unpaid bills"
+          />
+          <Input
+            label="Owner's capital"
+            type="number"
+            step="0.01"
+            value={form.owner_capital}
+            onChange={set("owner_capital")}
+            placeholder="Auto-derived if blank"
+          />
         </div>
-        <Input label="Financials start date" type="date" value={form.financials_start} onChange={set("financials_start")} />
+        <Input
+          label="Financials start date"
+          type="date"
+          value={form.financials_start}
+          onChange={set("financials_start")}
+        />
         <div className="flex justify-end gap-2 pt-2">
-          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={saving}>Save</Button>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            Save
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function OpeningItemModal({ open, balanceType, initial, onClose, onSaved }) {
+  const [customers, setCustomers] = useState([]);
+  const [form, setForm] = useState({
+    customer_id: "",
+    service_type: "ticket",
+    reason: "",
+    amount: "",
+    entry_date: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const editing = Boolean(initial);
+  const isReceivable = (initial?.balance_type || balanceType) === "receivable";
+  const hasPayments = Number(initial?.paid_amount || 0) > 0.001;
+  const set = (key) => (event) =>
+    setForm((current) => ({ ...current, [key]: event.target.value }));
+
+  useEffect(() => {
+    if (open && isReceivable) {
+      customersAPI
+        .list({ limit: 500 })
+        .then((result) => {
+          const rows = result.data.data || [];
+          if (
+            initial?.customer_id &&
+            !rows.some((customer) => customer.id === initial.customer_id)
+          ) {
+            rows.unshift({
+              id: initial.customer_id,
+              name: initial.customer_name || "Current customer",
+            });
+          }
+          setCustomers(rows);
+        })
+        .catch((error) =>
+          toast.error(
+            error.response?.data?.message || "Could not load customers",
+          ),
+        );
+    }
+    if (open) {
+      setForm({
+        customer_id: initial?.customer_id || "",
+        service_type: initial?.service_type || "ticket",
+        reason: initial?.reason || "",
+        amount: initial?.amount ?? "",
+        entry_date: initial?.entry_date?.slice(0, 10) || "",
+      });
+    }
+  }, [open, isReceivable, initial]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      const payload = {
+        ...form,
+        balance_type: initial?.balance_type || balanceType,
+        amount: Number(form.amount),
+      };
+      if (editing) {
+        await financialsAPI.updateOpeningItem(initial.id, payload);
+      } else {
+        await financialsAPI.createOpeningItem(payload);
+      }
+      toast.success(
+        editing ? "Opening balance updated" : "Opening balance recorded",
+      );
+      onSaved();
+      onClose();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Could not record opening balance",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={
+        editing
+          ? `Edit opening ${isReceivable ? "receivable" : "payable"}`
+          : `Add opening ${isReceivable ? "receivable" : "payable"}`
+      }
+    >
+      <form onSubmit={submit} className="space-y-4">
+        {isReceivable && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Select
+              label="Customer *"
+              value={form.customer_id}
+              onChange={set("customer_id")}
+              disabled={hasPayments}
+            >
+              <option value="">Choose customer</option>
+              {customers.map((customer) => (
+                <option key={customer.id} value={customer.id}>
+                  {customer.name}
+                </option>
+              ))}
+            </Select>
+            <Select
+              label="Related to *"
+              value={form.service_type}
+              onChange={set("service_type")}
+              disabled={hasPayments}
+            >
+              {[
+                ["ticket", "Ticket"],
+                ["visa", "Visa"],
+                ["cargo", "Cargo"],
+                ["package", "Package"],
+                ["other", "Other"],
+              ].map(([value, text]) => (
+                <option key={value} value={value}>
+                  {text}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+        <Input
+          label={isReceivable ? "Reason / reference *" : "Reason for payable *"}
+          value={form.reason}
+          onChange={set("reason")}
+          placeholder={
+            isReceivable
+              ? "Unpaid ticket from before TAMS"
+              : "Unpaid supplier invoice"
+          }
+          required
+        />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Input
+            label="Amount *"
+            type="number"
+            min={hasPayments ? Number(initial.paid_amount).toFixed(2) : "0.01"}
+            step="0.01"
+            value={form.amount}
+            onChange={set("amount")}
+            required
+          />
+          <Input
+            label="Balance date"
+            type="date"
+            value={form.entry_date}
+            onChange={set("entry_date")}
+          />
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            {editing ? "Save changes" : "Record balance"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function DeleteOpeningItemModal({ item, onClose, onDeleted }) {
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const paid = Number(item?.paid_amount || 0);
+  const isReceivable = item?.balance_type === "receivable";
+
+  useEffect(() => {
+    if (item) setReason("");
+  }, [item]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!reason.trim()) return toast.error("Enter a deletion reason");
+    setSaving(true);
+    try {
+      await financialsAPI.deleteOpeningItem(item.id, { reason: reason.trim() });
+      toast.success("Opening balance deleted and audited");
+      onDeleted();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Could not delete opening balance",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={!!item} onClose={onClose} title="Delete opening balance">
+      {item && (
+        <form onSubmit={submit} className="space-y-4">
+          <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 p-3">
+            <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+              {isReceivable ? item.customer_name : "Opening payable"} ·{" "}
+              {money(item.amount)}
+            </p>
+            <p className="text-sm text-amber-800 dark:text-amber-200 mt-1">
+              {isReceivable
+                ? paid > 0.001
+                  ? `${money(paid)} has already been collected. This receivable cannot be deleted; edit it only without reducing it below the collected amount.`
+                  : "Deleting this removes the opening amount from accounts receivable. No cash will move."
+                : "Deleting this removes the opening amount from liabilities. No cash will move."}
+            </p>
+          </div>
+          {(!isReceivable || paid <= 0.001) && (
+            <>
+              <Input
+                label="Reason for deletion *"
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+                placeholder="Explain why this opening balance is incorrect"
+                required
+              />
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="danger" loading={saving}>
+                  <Trash2 className="w-4 h-4" /> Delete balance
+                </Button>
+              </div>
+            </>
+          )}
+          {isReceivable && paid > 0.001 && (
+            <div className="flex justify-end">
+              <Button type="button" variant="outline" onClick={onClose}>
+                Close
+              </Button>
+            </div>
+          )}
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+function CollectOpeningReceivableModal({ item, onClose, onSaved }) {
+  const [amount, setAmount] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [saving, setSaving] = useState(false);
+  const balance = Number(item?.balance || 0);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0 || value > balance + 0.001) {
+      toast.error(`Enter an amount up to ${money(balance)}`);
+      return;
+    }
+    if (!accountId) {
+      toast.error("Choose the account receiving this payment");
+      return;
+    }
+    setSaving(true);
+    try {
+      await financialsAPI.collectOpeningReceivable(item.source_id, {
+        amount: value,
+        account_id: accountId,
+      });
+      toast.success("Receivable payment recorded");
+      onSaved();
+      onClose();
+    } catch (error) {
+      toast.error(error.response?.data?.message || "Could not record payment");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={!!item} onClose={onClose} title="Collect opening receivable">
+      <form onSubmit={submit} className="space-y-4">
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          {item?.party_name} · {item?.reason}
+        </p>
+        <p className="text-sm font-semibold text-red-600">
+          Remaining: {money(balance)}
+        </p>
+        <Input
+          label="Amount to collect *"
+          type="number"
+          min="0.01"
+          max={balance}
+          step="0.01"
+          value={amount}
+          onChange={(event) => setAmount(event.target.value)}
+          required
+        />
+        <AccountSelect
+          direction="in"
+          value={accountId}
+          onChange={(event) => setAccountId(event.target.value)}
+        />
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" loading={saving}>
+            Record payment
+          </Button>
         </div>
       </form>
     </Modal>
@@ -364,18 +739,38 @@ export default function FinancialsPage() {
   const [balance, setBalance] = useState(null);
   const [cash, setCash] = useState(null);
   const [receivables, setReceivables] = useState(null);
+  const [openingItems, setOpeningItems] = useState([]);
 
   const [categories, setCategories] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [expenseMeta, setExpenseMeta] = useState({ total: 0, totalPages: 1, message: "" });
-  const [expenseFilters, setExpenseFilters] = useState({ category: "", search: "", page: 1 });
+  const [expenseMeta, setExpenseMeta] = useState({
+    total: 0,
+    totalPages: 1,
+    message: "",
+  });
+  const [expenseFilters, setExpenseFilters] = useState({
+    category: "",
+    search: "",
+    page: 1,
+  });
 
-  const [expenseModal, setExpenseModal] = useState({ open: false, initial: null });
+  const [expenseModal, setExpenseModal] = useState({
+    open: false,
+    initial: null,
+  });
   const [openingModal, setOpeningModal] = useState(false);
+  const [openingItemModal, setOpeningItemModal] = useState({
+    open: false,
+    type: "receivable",
+    initial: null,
+  });
+  const [deleteOpeningItem, setDeleteOpeningItem] = useState(null);
+  const [collectOpeningItem, setCollectOpeningItem] = useState(null);
   // Receivables shows totals by default — the per-ticket list gets long fast
   const [showReceivableDetail, setShowReceivableDetail] = useState(false);
 
-  const setRangeField = (k) => (e) => setRange((r) => ({ ...r, [k]: e.target.value }));
+  const setRangeField = (k) => (e) =>
+    setRange((r) => ({ ...r, [k]: e.target.value }));
 
   // ── Load statements ───────────────────────────────────
   const loadStatements = useCallback(() => {
@@ -385,12 +780,14 @@ export default function FinancialsPage() {
       financialsAPI.balanceSheet(range.to_date ? { as_of: range.to_date } : {}),
       financialsAPI.cashFlow(range),
       financialsAPI.receivables({ limit: 50 }),
+      financialsAPI.openingItems(),
     ])
-      .then(([p, b, c, r]) => {
+      .then(([p, b, c, r, opening]) => {
         setPl(p.data.data);
         setBalance(b.data.data);
         setCash(c.data.data);
         setReceivables(r.data.data);
+        setOpeningItems(opening.data.data || []);
       })
       .catch((err) =>
         toast.error(err.response?.data?.message || "Failed to load financials"),
@@ -414,7 +811,11 @@ export default function FinancialsPage() {
       .list({ ...expenseFilters, ...range, limit: 20 })
       .then((res) => {
         setExpenses(res.data.data);
-        setExpenseMeta(res.data.meta ? { ...res.data.meta, message: res.data.message } : { total: 0, totalPages: 1 });
+        setExpenseMeta(
+          res.data.meta
+            ? { ...res.data.meta, message: res.data.message }
+            : { total: 0, totalPages: 1 },
+        );
       })
       .catch(() => {});
   }, [expenseFilters, range]);
@@ -454,14 +855,29 @@ export default function FinancialsPage() {
         </div>
         <div className="flex gap-2 flex-wrap items-end">
           <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-gray-500 uppercase">From</label>
-            <Input type="date" value={range.from_date} onChange={setRangeField("from_date")} />
+            <label className="text-xs font-medium text-gray-500 uppercase">
+              From
+            </label>
+            <Input
+              type="date"
+              value={range.from_date}
+              onChange={setRangeField("from_date")}
+            />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-gray-500 uppercase">To</label>
-            <Input type="date" value={range.to_date} onChange={setRangeField("to_date")} />
+            <label className="text-xs font-medium text-gray-500 uppercase">
+              To
+            </label>
+            <Input
+              type="date"
+              value={range.to_date}
+              onChange={setRangeField("to_date")}
+            />
           </div>
-          <Button variant="outline" onClick={() => setRange({ from_date: "", to_date: "" })}>
+          <Button
+            variant="outline"
+            onClick={() => setRange({ from_date: "", to_date: "" })}
+          >
             All time
           </Button>
           {canEditOpening && (
@@ -504,9 +920,24 @@ export default function FinancialsPage() {
           {tab === "pl" && pl && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                <Tile label="Gross Sales" value={money(pl.revenue.gross_sales)} sub={`${pl.revenue.ticket_count} tickets · ${pl.revenue.shipment_count} shipments`} tone="blue" />
-                <Tile label="Gross Profit" value={money(pl.gross_profit)} sub={`Margin ${pct(pl.gross_margin_pct)}`} tone="green" />
-                <Tile label="Operating Costs" value={money(pl.operating_costs.total)} sub={`Commission ${money(pl.operating_costs.agent_commission)}`} tone="orange" />
+                <Tile
+                  label="Gross Sales"
+                  value={money(pl.revenue.gross_sales)}
+                  sub={`${pl.revenue.ticket_count} tickets · ${pl.revenue.shipment_count} shipments`}
+                  tone="blue"
+                />
+                <Tile
+                  label="Gross Profit"
+                  value={money(pl.gross_profit)}
+                  sub={`Margin ${pct(pl.gross_margin_pct)}`}
+                  tone="green"
+                />
+                <Tile
+                  label="Operating Costs"
+                  value={money(pl.operating_costs.total)}
+                  sub={`Commission ${money(pl.operating_costs.agent_commission)}`}
+                  tone="orange"
+                />
                 <Tile
                   label="Net Profit"
                   value={money(pl.net_profit)}
@@ -535,7 +966,12 @@ export default function FinancialsPage() {
                     .map(([label, v]) => (
                       <Line key={label} label={label} value={money(v)} indent />
                     ))}
-                  <Line label="Gross Sales" value={money(pl.revenue.gross_sales)} bold divider />
+                  <Line
+                    label="Gross Sales"
+                    value={money(pl.revenue.gross_sales)}
+                    bold
+                    divider
+                  />
 
                   {/* Cargo carriers was missing here while being counted in
                       the total, so the cost lines visibly failed to add up:
@@ -563,13 +999,19 @@ export default function FinancialsPage() {
                     value={`(${money(pl.cost_of_sales.total)})`}
                     tone="red"
                   />
-                  <Line label="Gross Profit" value={money(pl.gross_profit)} bold tone="green" divider />
+                  <Line
+                    label="Gross Profit"
+                    value={money(pl.gross_profit)}
+                    bold
+                    tone="green"
+                    divider
+                  />
 
                   {pl.tax?.collected > 0 && (
                     <p className="text-xs text-gray-500 dark:text-gray-400 py-2">
                       {money(pl.tax.collected)} of tax is inside these figures
-                      and belongs to the government, not the agency. See the
-                      Tax tab for what's still owed.
+                      and belongs to the government, not the agency. See the Tax
+                      tab for what's still owed.
                     </p>
                   )}
 
@@ -614,7 +1056,12 @@ export default function FinancialsPage() {
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
                     Operating expenses
                   </p>
-                  <Line label="Agent commission" value={`(${money(pl.operating_costs.agent_commission)})`} indent tone="red" />
+                  <Line
+                    label="Agent commission"
+                    value={`(${money(pl.operating_costs.agent_commission)})`}
+                    indent
+                    tone="red"
+                  />
                   {pl.operating_costs.by_category.map((c) => (
                     <Line
                       key={c.category}
@@ -625,9 +1072,20 @@ export default function FinancialsPage() {
                     />
                   ))}
                   {pl.operating_costs.by_category.length === 0 && (
-                    <Line label="No expenses recorded" value="—" indent tone="muted" />
+                    <Line
+                      label="No expenses recorded"
+                      value="—"
+                      indent
+                      tone="muted"
+                    />
                   )}
-                  <Line label="Total Operating Costs" value={`(${money(pl.operating_costs.total)})`} bold tone="red" divider />
+                  <Line
+                    label="Total Operating Costs"
+                    value={`(${money(pl.operating_costs.total)})`}
+                    bold
+                    tone="red"
+                    divider
+                  />
 
                   <div className="mt-3 -mx-6 -mb-6 px-6 py-4 bg-gray-50 dark:bg-gray-700/40 rounded-b-xl">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -667,8 +1125,14 @@ export default function FinancialsPage() {
                             <Cell key={i} fill={COLORS[i % COLORS.length]} />
                           ))}
                         </Pie>
-                        <Tooltip contentStyle={tooltipStyle} formatter={(v) => money(v)} />
-                        <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+                        <Tooltip
+                          contentStyle={tooltipStyle}
+                          formatter={(v) => money(v)}
+                        />
+                        <Legend
+                          iconType="circle"
+                          wrapperStyle={{ fontSize: 11 }}
+                        />
                       </PieChart>
                     </ResponsiveContainer>
                   ) : (
@@ -687,15 +1151,54 @@ export default function FinancialsPage() {
                     Profit trend — last 12 months
                   </h2>
                   <ResponsiveContainer width="100%" height={280}>
-                    <BarChart data={pl.trend.map((t) => ({ ...t, month: fmtMonth(t.month) }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" vertical={false} />
-                      <XAxis dataKey="month" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                      <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={tooltipStyle} formatter={(v) => money(v)} />
-                      <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
-                      <Bar dataKey="gross_profit" name="Gross profit" fill="#3b82f6" radius={[5, 5, 0, 0]} />
-                      <Bar dataKey="expenses" name="Expenses" fill="#f59e0b" radius={[5, 5, 0, 0]} />
-                      <Bar dataKey="net_profit" name="Net profit" fill="#10b981" radius={[5, 5, 0, 0]} />
+                    <BarChart
+                      data={pl.trend.map((t) => ({
+                        ...t,
+                        month: fmtMonth(t.month),
+                      }))}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(128,128,128,0.15)"
+                        vertical={false}
+                      />
+                      <XAxis
+                        dataKey="month"
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={tooltipStyle}
+                        formatter={(v) => money(v)}
+                      />
+                      <Legend
+                        iconType="circle"
+                        wrapperStyle={{ fontSize: 12 }}
+                      />
+                      <Bar
+                        dataKey="gross_profit"
+                        name="Gross profit"
+                        fill="#3b82f6"
+                        radius={[5, 5, 0, 0]}
+                      />
+                      <Bar
+                        dataKey="expenses"
+                        name="Expenses"
+                        fill="#f59e0b"
+                        radius={[5, 5, 0, 0]}
+                      />
+                      <Bar
+                        dataKey="net_profit"
+                        name="Net profit"
+                        fill="#10b981"
+                        radius={[5, 5, 0, 0]}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </Card>
@@ -737,10 +1240,28 @@ export default function FinancialsPage() {
                   <h2 className="font-semibold text-gray-900 dark:text-white text-sm mb-4">
                     Assets
                   </h2>
-                  <Line label="Cash & bank" value={money(balance.assets.cash_and_bank)} indent />
-                  <Line label="Accounts receivable" value={money(balance.assets.accounts_receivable)} indent />
-                  <Line label="Fixed assets" value={money(balance.assets.fixed_assets)} indent />
-                  <Line label="Total Assets" value={money(balance.assets.total)} bold divider tone="blue" />
+                  <Line
+                    label="Cash & bank"
+                    value={money(balance.assets.cash_and_bank)}
+                    indent
+                  />
+                  <Line
+                    label="Accounts receivable"
+                    value={money(balance.assets.accounts_receivable)}
+                    indent
+                  />
+                  <Line
+                    label="Fixed assets"
+                    value={money(balance.assets.fixed_assets)}
+                    indent
+                  />
+                  <Line
+                    label="Total Assets"
+                    value={money(balance.assets.total)}
+                    bold
+                    divider
+                    tone="blue"
+                  />
                 </Card>
 
                 <Card className="p-6">
@@ -750,17 +1271,55 @@ export default function FinancialsPage() {
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">
                     Liabilities
                   </p>
-                  <Line label="Payable to airlines" value={money(balance.liabilities.payable_to_airlines)} indent />
-                  <Line label="Agent commission payable" value={money(balance.liabilities.agent_commission_payable)} indent />
-                  <Line label="Other liabilities" value={money(balance.liabilities.other_liabilities)} indent />
-                  <Line label="Total Liabilities" value={money(balance.liabilities.total)} bold divider />
+                  <Line
+                    label="Payable to airlines"
+                    value={money(balance.liabilities.payable_to_airlines)}
+                    indent
+                  />
+                  <Line
+                    label="Agent commission payable"
+                    value={money(balance.liabilities.agent_commission_payable)}
+                    indent
+                  />
+                  <Line
+                    label="Opening payables"
+                    value={money(balance.liabilities.opening_payables)}
+                    indent
+                  />
+                  <Line
+                    label="Other liabilities"
+                    value={money(balance.liabilities.other_liabilities)}
+                    indent
+                  />
+                  <Line
+                    label="Total Liabilities"
+                    value={money(balance.liabilities.total)}
+                    bold
+                    divider
+                  />
 
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
                     Equity
                   </p>
-                  <Line label="Owner's capital" value={money(balance.equity.owner_capital)} indent />
-                  <Line label="Retained earnings" value={money(balance.equity.retained_earnings)} indent tone={balance.equity.retained_earnings >= 0 ? "green" : "red"} />
-                  <Line label="Total Equity" value={money(balance.equity.total)} bold divider />
+                  <Line
+                    label="Owner's capital"
+                    value={money(balance.equity.owner_capital)}
+                    indent
+                  />
+                  <Line
+                    label="Retained earnings"
+                    value={money(balance.equity.retained_earnings)}
+                    indent
+                    tone={
+                      balance.equity.retained_earnings >= 0 ? "green" : "red"
+                    }
+                  />
+                  <Line
+                    label="Total Equity"
+                    value={money(balance.equity.total)}
+                    bold
+                    divider
+                  />
 
                   <Line
                     label="Total Liabilities & Equity"
@@ -773,13 +1332,95 @@ export default function FinancialsPage() {
               </div>
 
               <Card className="p-5">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
+                    Opening payable details
+                  </h2>
+                  {canEditOpening && (
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        setOpeningItemModal({
+                          open: true,
+                          type: "payable",
+                          initial: null,
+                        })
+                      }
+                    >
+                      <Plus className="w-4 h-4" /> Add payable
+                    </Button>
+                  )}
+                </div>
+                {openingItems.filter((item) => item.balance_type === "payable")
+                  .length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    No opening payables recorded.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {openingItems
+                      .filter((item) => item.balance_type === "payable")
+                      .map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex flex-wrap items-center justify-between gap-3 py-2 text-sm"
+                        >
+                          <span className="text-gray-600 dark:text-gray-300 flex-1 min-w-48">
+                            {item.reason}{" "}
+                            <span className="text-gray-400">
+                              · {fmtDate(item.entry_date)}
+                            </span>
+                          </span>
+                          <span className="font-semibold text-red-600 whitespace-nowrap">
+                            {money(item.amount)}
+                          </span>
+                          {canEditOpening && (
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                title="Edit opening payable"
+                                aria-label="Edit opening payable"
+                                onClick={() =>
+                                  setOpeningItemModal({
+                                    open: true,
+                                    type: "payable",
+                                    initial: item,
+                                  })
+                                }
+                                className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                title="Delete opening payable"
+                                aria-label="Delete opening payable"
+                                onClick={() => setDeleteOpeningItem(item)}
+                                className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-gray-700"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </Card>
+
+              <Card className="p-5">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
                   How these numbers are built
                 </p>
                 <ul className="space-y-1.5">
                   {(balance.notes || []).map((nt, i) => (
-                    <li key={i} className="text-sm text-gray-600 dark:text-gray-400 flex gap-2">
-                      <span className="text-gray-300 dark:text-gray-600">•</span>
+                    <li
+                      key={i}
+                      className="text-sm text-gray-600 dark:text-gray-400 flex gap-2"
+                    >
+                      <span className="text-gray-300 dark:text-gray-600">
+                        •
+                      </span>
                       {nt}
                     </li>
                   ))}
@@ -792,12 +1433,28 @@ export default function FinancialsPage() {
           {tab === "cash" && cash && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <Tile label="Cash In" value={money(cash.inflow.total)} sub={`${cash.inflow.entries} payments received`} tone="green" icon={ArrowDownRight} />
-                <Tile label="Cash Out" value={money(cash.outflow.total)} sub={`${cash.outflow.entries} expenses paid`} tone="red" icon={ArrowUpRight} />
+                <Tile
+                  label="Cash In"
+                  value={money(cash.inflow.total)}
+                  sub={`${cash.inflow.entries} payments received`}
+                  tone="green"
+                  icon={ArrowDownRight}
+                />
+                <Tile
+                  label="Cash Out"
+                  value={money(cash.outflow.total)}
+                  sub={`${cash.outflow.entries} expenses paid`}
+                  tone="red"
+                  icon={ArrowUpRight}
+                />
                 <Tile
                   label="Net Cash Flow"
                   value={money(cash.net_cash_flow)}
-                  sub={cash.net_cash_flow >= 0 ? "Positive for the period" : "Negative for the period"}
+                  sub={
+                    cash.net_cash_flow >= 0
+                      ? "Positive for the period"
+                      : "Negative for the period"
+                  }
                   tone={cash.net_cash_flow >= 0 ? "green" : "red"}
                 />
               </div>
@@ -810,24 +1467,90 @@ export default function FinancialsPage() {
                     </h2>
                     {cash.daily?.length > 0 ? (
                       <ResponsiveContainer width="100%" height={280}>
-                        <AreaChart data={cash.daily.map((d) => ({ ...d, day: fmtDate(d.day) }))}>
+                        <AreaChart
+                          data={cash.daily.map((d) => ({
+                            ...d,
+                            day: fmtDate(d.day),
+                          }))}
+                        >
                           <defs>
-                            <linearGradient id="inGrad" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                            <linearGradient
+                              id="inGrad"
+                              x1="0"
+                              y1="0"
+                              x2="0"
+                              y2="1"
+                            >
+                              <stop
+                                offset="5%"
+                                stopColor="#10b981"
+                                stopOpacity={0.3}
+                              />
+                              <stop
+                                offset="95%"
+                                stopColor="#10b981"
+                                stopOpacity={0}
+                              />
                             </linearGradient>
-                            <linearGradient id="outGrad" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#ef4444" stopOpacity={0.25} />
-                              <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                            <linearGradient
+                              id="outGrad"
+                              x1="0"
+                              y1="0"
+                              x2="0"
+                              y2="1"
+                            >
+                              <stop
+                                offset="5%"
+                                stopColor="#ef4444"
+                                stopOpacity={0.25}
+                              />
+                              <stop
+                                offset="95%"
+                                stopColor="#ef4444"
+                                stopOpacity={0}
+                              />
                             </linearGradient>
                           </defs>
-                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" vertical={false} />
-                          <XAxis dataKey="day" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
-                          <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                          <Tooltip contentStyle={tooltipStyle} formatter={(v) => money(v)} />
-                          <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
-                          <Area type="monotone" dataKey="inflow" name="Cash in" stroke="#10b981" fill="url(#inGrad)" strokeWidth={2.5} />
-                          <Area type="monotone" dataKey="outflow" name="Cash out" stroke="#ef4444" fill="url(#outGrad)" strokeWidth={2} />
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="rgba(128,128,128,0.15)"
+                            vertical={false}
+                          />
+                          <XAxis
+                            dataKey="day"
+                            tick={{ fontSize: 10 }}
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <YAxis
+                            tick={{ fontSize: 11 }}
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <Tooltip
+                            contentStyle={tooltipStyle}
+                            formatter={(v) => money(v)}
+                          />
+                          <Legend
+                            iconType="circle"
+                            wrapperStyle={{ fontSize: 12 }}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="inflow"
+                            name="Cash in"
+                            stroke="#10b981"
+                            fill="url(#inGrad)"
+                            strokeWidth={2.5}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="outflow"
+                            name="Cash out"
+                            stroke="#ef4444"
+                            fill="url(#outGrad)"
+                            strokeWidth={2}
+                          />
                         </AreaChart>
                       </ResponsiveContainer>
                     ) : (
@@ -845,15 +1568,42 @@ export default function FinancialsPage() {
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">
                     Money in
                   </p>
-                  <Line label="Ticket payments" value={money(cash.inflow.ticket_payments)} indent tone="green" />
-                  <Line label="Cargo payments" value={money(cash.inflow.cargo_payments)} indent tone="green" />
-                  <Line label="Total in" value={money(cash.inflow.total)} bold divider tone="green" />
+                  <Line
+                    label="Ticket payments"
+                    value={money(cash.inflow.ticket_payments)}
+                    indent
+                    tone="green"
+                  />
+                  <Line
+                    label="Cargo payments"
+                    value={money(cash.inflow.cargo_payments)}
+                    indent
+                    tone="green"
+                  />
+                  <Line
+                    label="Total in"
+                    value={money(cash.inflow.total)}
+                    bold
+                    divider
+                    tone="green"
+                  />
 
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
                     Money out
                   </p>
-                  <Line label="Operating expenses" value={money(cash.outflow.expenses)} indent tone="red" />
-                  <Line label="Total out" value={money(cash.outflow.total)} bold divider tone="red" />
+                  <Line
+                    label="Operating expenses"
+                    value={money(cash.outflow.expenses)}
+                    indent
+                    tone="red"
+                  />
+                  <Line
+                    label="Total out"
+                    value={money(cash.outflow.total)}
+                    bold
+                    divider
+                    tone="red"
+                  />
 
                   {cash.inflow.by_method?.length > 0 && (
                     <>
@@ -861,7 +1611,12 @@ export default function FinancialsPage() {
                         Collected by method
                       </p>
                       {cash.inflow.by_method.map((m) => (
-                        <Line key={m.method} label={label(m.method)} value={money(m.total)} indent />
+                        <Line
+                          key={m.method}
+                          label={label(m.method)}
+                          value={money(m.total)}
+                          indent
+                        />
                       ))}
                     </>
                   )}
@@ -873,12 +1628,47 @@ export default function FinancialsPage() {
           {/* ── RECEIVABLES ──────────────────────────── */}
           {tab === "receivables" && receivables && (
             <div className="space-y-6">
+              <div className="flex justify-end">
+                {canEditOpening && (
+                  <Button
+                    onClick={() =>
+                      setOpeningItemModal({
+                        open: true,
+                        type: "receivable",
+                        initial: null,
+                      })
+                    }
+                  >
+                    <Plus className="w-4 h-4" /> Add opening receivable
+                  </Button>
+                )}
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                <Tile label="0–30 days" value={money(receivables.aging.current_0_30)} tone="green" />
-                <Tile label="31–60 days" value={money(receivables.aging.days_31_60)} tone="blue" />
-                <Tile label="61–90 days" value={money(receivables.aging.days_61_90)} tone="orange" />
-                <Tile label="Over 90 days" value={money(receivables.aging.over_90)} tone="red" />
-                <Tile label="Total Due" value={money(receivables.aging.total)} sub={`${receivables.aging.open_items} open items`} />
+                <Tile
+                  label="0–30 days"
+                  value={money(receivables.aging.current_0_30)}
+                  tone="green"
+                />
+                <Tile
+                  label="31–60 days"
+                  value={money(receivables.aging.days_31_60)}
+                  tone="blue"
+                />
+                <Tile
+                  label="61–90 days"
+                  value={money(receivables.aging.days_61_90)}
+                  tone="orange"
+                />
+                <Tile
+                  label="Over 90 days"
+                  value={money(receivables.aging.over_90)}
+                  tone="red"
+                />
+                <Tile
+                  label="Total Due"
+                  value={money(receivables.aging.total)}
+                  sub={`${receivables.aging.open_items} open items`}
+                />
               </div>
 
               <Card className="p-6">
@@ -894,14 +1684,37 @@ export default function FinancialsPage() {
                       { name: "90+", amount: receivables.aging.over_90 },
                     ]}
                   >
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" vertical={false} />
-                    <XAxis dataKey="name" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={tooltipStyle} formatter={(v) => money(v)} />
-                    <Bar dataKey="amount" name="Outstanding" radius={[6, 6, 0, 0]} barSize={56}>
-                      {["#10b981", "#3b82f6", "#f59e0b", "#ef4444"].map((c, i) => (
-                        <Cell key={i} fill={c} />
-                      ))}
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(128,128,128,0.15)"
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fontSize: 11 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 11 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={tooltipStyle}
+                      formatter={(v) => money(v)}
+                    />
+                    <Bar
+                      dataKey="amount"
+                      name="Outstanding"
+                      radius={[6, 6, 0, 0]}
+                      barSize={56}
+                    >
+                      {["#10b981", "#3b82f6", "#f59e0b", "#ef4444"].map(
+                        (c, i) => (
+                          <Cell key={i} fill={c} />
+                        ),
+                      )}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -928,7 +1741,8 @@ export default function FinancialsPage() {
                         {receivables.aging.over_90 > 0 && (
                           <span className="text-red-600 dark:text-red-400">
                             {" "}
-                            {money(receivables.aging.over_90)} of it is over 90 days old.
+                            {money(receivables.aging.over_90)} of it is over 90
+                            days old.
                           </span>
                         )}
                       </p>
@@ -954,8 +1768,22 @@ export default function FinancialsPage() {
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-y border-gray-200 dark:border-gray-700">
-                            {["Type", "Name", "Contact", "Issued", "Age", "Total", "Paid", "Balance"].map((h) => (
-                              <th key={h} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap">
+                            {[
+                              "Type",
+                              "Name",
+                              "Contact",
+                              "Reason",
+                              "Issued",
+                              "Age",
+                              "Total",
+                              "Paid",
+                              "Balance",
+                              "",
+                            ].map((h) => (
+                              <th
+                                key={h}
+                                className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap"
+                              >
                                 {h}
                               </th>
                             ))}
@@ -963,21 +1791,64 @@ export default function FinancialsPage() {
                         </thead>
                         <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
                           {receivables.items.map((r) => (
-                            <tr key={`${r.source}-${r.source_id}`} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                            <tr
+                              key={`${r.source}-${r.source_id}`}
+                              className="hover:bg-gray-50 dark:hover:bg-gray-700/30"
+                            >
                               <td className="px-4 py-3">
-                                <Badge variant={r.source === "ticket" ? "info" : "purple"}>{r.source}</Badge>
+                                <Badge
+                                  variant={
+                                    r.source === "ticket" ? "info" : "purple"
+                                  }
+                                >
+                                  {r.source}
+                                </Badge>
                               </td>
-                              <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">{r.party_name}</td>
-                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{r.party_contact || "—"}</td>
-                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{fmtDate(r.issued_at)}</td>
+                              <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                                {r.party_name}
+                              </td>
+                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                                {r.party_contact || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                                {r.reason || "—"}
+                              </td>
+                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                                {fmtDate(r.issued_at)}
+                              </td>
                               <td className="px-4 py-3">
-                                <Badge variant={r.age_days > 90 ? "danger" : r.age_days > 60 ? "warning" : "default"}>
+                                <Badge
+                                  variant={
+                                    r.age_days > 90
+                                      ? "danger"
+                                      : r.age_days > 60
+                                        ? "warning"
+                                        : "default"
+                                  }
+                                >
                                   {r.age_days}d
                                 </Badge>
                               </td>
-                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{money(r.total_amount)}</td>
-                              <td className="px-4 py-3 text-green-600 dark:text-green-400">{money(r.paid_amount)}</td>
-                              <td className="px-4 py-3 font-semibold text-red-600">{money(r.balance)}</td>
+                              <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                                {money(r.total_amount)}
+                              </td>
+                              <td className="px-4 py-3 text-green-600 dark:text-green-400">
+                                {money(r.paid_amount)}
+                              </td>
+                              <td className="px-4 py-3 font-semibold text-red-600">
+                                {money(r.balance)}
+                              </td>
+                              <td className="px-4 py-3">
+                                {r.source.startsWith("opening_") && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setCollectOpeningItem(r)}
+                                  >
+                                    <Banknote className="w-4 h-4" /> Collect
+                                  </Button>
+                                )}
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -985,14 +1856,128 @@ export default function FinancialsPage() {
                       {receivables.meta?.total > receivables.items.length && (
                         <p className="px-4 py-3 text-xs text-gray-400 border-t border-gray-100 dark:border-gray-700">
                           Showing the {receivables.items.length} oldest of{" "}
-                          {receivables.meta.total}. Use the Tickets page filtered by
-                          payment status to work through the rest.
+                          {receivables.meta.total}. Use the Tickets page
+                          filtered by payment status to work through the rest.
                         </p>
                       )}
                     </div>
                   )}
                 </Card>
               )}
+
+              <Card className="p-5">
+                <div className="mb-3">
+                  <h2 className="font-semibold text-gray-900 dark:text-white text-sm">
+                    Opening receivable register
+                  </h2>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Includes settled items. Collected payments cannot be deleted
+                    or reassigned.
+                  </p>
+                </div>
+                {openingItems.filter(
+                  (item) => item.balance_type === "receivable",
+                ).length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    No opening receivables recorded.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200 dark:border-gray-700">
+                          {[
+                            "Customer",
+                            "Service",
+                            "Reason",
+                            "Date",
+                            "Amount",
+                            "Paid",
+                            "Balance",
+                            "",
+                          ].map((heading) => (
+                            <th
+                              key={heading}
+                              className="text-left text-xs font-semibold text-gray-500 uppercase px-3 py-2 whitespace-nowrap"
+                            >
+                              {heading}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+                        {openingItems
+                          .filter((item) => item.balance_type === "receivable")
+                          .map((item) => {
+                            const paid = Number(item.paid_amount || 0);
+                            return (
+                              <tr key={item.id}>
+                                <td className="px-3 py-2 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                                  {item.customer_name}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
+                                  {label(item.service_type)}
+                                </td>
+                                <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
+                                  {item.reason}
+                                </td>
+                                <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                                  {fmtDate(item.entry_date)}
+                                </td>
+                                <td className="px-3 py-2 whitespace-nowrap">
+                                  {money(item.amount)}
+                                </td>
+                                <td className="px-3 py-2 text-green-600 whitespace-nowrap">
+                                  {money(paid)}
+                                </td>
+                                <td className="px-3 py-2 font-semibold text-red-600 whitespace-nowrap">
+                                  {money(item.balance)}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {canEditOpening && (
+                                    <div className="flex gap-1">
+                                      <button
+                                        type="button"
+                                        title="Edit opening receivable"
+                                        aria-label="Edit opening receivable"
+                                        onClick={() =>
+                                          setOpeningItemModal({
+                                            open: true,
+                                            type: "receivable",
+                                            initial: item,
+                                          })
+                                        }
+                                        className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700"
+                                      >
+                                        <Pencil className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title={
+                                          paid > 0.001
+                                            ? "Cannot delete after payment has been collected"
+                                            : "Delete opening receivable"
+                                        }
+                                        aria-label="Delete opening receivable"
+                                        disabled={paid > 0.001}
+                                        onClick={() =>
+                                          setDeleteOpeningItem(item)
+                                        }
+                                        className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
             </div>
           )}
 
@@ -1006,14 +1991,22 @@ export default function FinancialsPage() {
                       placeholder="Search description, vendor, reference…"
                       value={expenseFilters.search}
                       onChange={(e) =>
-                        setExpenseFilters((f) => ({ ...f, search: e.target.value, page: 1 }))
+                        setExpenseFilters((f) => ({
+                          ...f,
+                          search: e.target.value,
+                          page: 1,
+                        }))
                       }
                       className="w-64"
                     />
                     <Select
                       value={expenseFilters.category}
                       onChange={(e) =>
-                        setExpenseFilters((f) => ({ ...f, category: e.target.value, page: 1 }))
+                        setExpenseFilters((f) => ({
+                          ...f,
+                          category: e.target.value,
+                          page: 1,
+                        }))
                       }
                       className="w-48"
                     >
@@ -1026,7 +2019,11 @@ export default function FinancialsPage() {
                     </Select>
                   </div>
                   {canEditExpenses && (
-                    <Button onClick={() => setExpenseModal({ open: true, initial: null })}>
+                    <Button
+                      onClick={() =>
+                        setExpenseModal({ open: true, initial: null })
+                      }
+                    >
                       <Plus className="w-4 h-4" /> Record expense
                     </Button>
                   )}
@@ -1046,7 +2043,11 @@ export default function FinancialsPage() {
                     description="Record rent, salaries, utilities and other running costs so your net profit is real."
                     action={
                       canEditExpenses && (
-                        <Button onClick={() => setExpenseModal({ open: true, initial: null })}>
+                        <Button
+                          onClick={() =>
+                            setExpenseModal({ open: true, initial: null })
+                          }
+                        >
                           <Plus className="w-4 h-4" /> Record expense
                         </Button>
                       )
@@ -1057,8 +2058,21 @@ export default function FinancialsPage() {
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="border-b border-gray-200 dark:border-gray-700">
-                          {["Date", "Category", "Description", "Vendor", "Account", "Reference", "Amount", "Recorded by", ""].map((h, i) => (
-                            <th key={i} className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap">
+                          {[
+                            "Date",
+                            "Category",
+                            "Description",
+                            "Vendor",
+                            "Account",
+                            "Reference",
+                            "Amount",
+                            "Recorded by",
+                            "",
+                          ].map((h, i) => (
+                            <th
+                              key={i}
+                              className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-4 py-3 whitespace-nowrap"
+                            >
                               {h}
                             </th>
                           ))}
@@ -1066,22 +2080,44 @@ export default function FinancialsPage() {
                       </thead>
                       <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
                         {expenses.map((e) => (
-                          <tr key={e.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{fmtDate(e.expense_date)}</td>
+                          <tr
+                            key={e.id}
+                            className="hover:bg-gray-50 dark:hover:bg-gray-700/30"
+                          >
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                              {fmtDate(e.expense_date)}
+                            </td>
                             <td className="px-4 py-3">
                               <Badge>{label(e.category)}</Badge>
                             </td>
-                            <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{e.description}</td>
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.vendor || "—"}</td>
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.account_name || label(e.payment_method)}</td>
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{e.reference || "—"}</td>
-                            <td className="px-4 py-3 font-semibold text-red-600 whitespace-nowrap">{money(e.amount)}</td>
-                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">{e.created_by_name || "—"}</td>
+                            <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">
+                              {e.description}
+                            </td>
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                              {e.vendor || "—"}
+                            </td>
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                              {e.account_name || label(e.payment_method)}
+                            </td>
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                              {e.reference || "—"}
+                            </td>
+                            <td className="px-4 py-3 font-semibold text-red-600 whitespace-nowrap">
+                              {money(e.amount)}
+                            </td>
+                            <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                              {e.created_by_name || "—"}
+                            </td>
                             <td className="px-4 py-3">
                               {canEditExpenses && (
                                 <div className="flex gap-1">
                                   <button
-                                    onClick={() => setExpenseModal({ open: true, initial: e })}
+                                    onClick={() =>
+                                      setExpenseModal({
+                                        open: true,
+                                        initial: e,
+                                      })
+                                    }
                                     className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700"
                                   >
                                     <Pencil className="w-4 h-4" />
@@ -1105,7 +2141,9 @@ export default function FinancialsPage() {
                   <Pagination
                     page={expenseFilters.page}
                     totalPages={expenseMeta.totalPages || 1}
-                    onChange={(p) => setExpenseFilters((f) => ({ ...f, page: p }))}
+                    onChange={(p) =>
+                      setExpenseFilters((f) => ({ ...f, page: p }))
+                    }
                   />
                 </div>
               </Card>
@@ -1128,10 +2166,35 @@ export default function FinancialsPage() {
         onClose={() => setOpeningModal(false)}
         onSaved={refreshAll}
       />
+      <OpeningItemModal
+        open={openingItemModal.open}
+        balanceType={openingItemModal.type}
+        initial={openingItemModal.initial}
+        onClose={() =>
+          setOpeningItemModal((current) => ({
+            ...current,
+            open: false,
+            initial: null,
+          }))
+        }
+        onSaved={refreshAll}
+      />
+      <DeleteOpeningItemModal
+        item={deleteOpeningItem}
+        onClose={() => setDeleteOpeningItem(null)}
+        onDeleted={() => {
+          setDeleteOpeningItem(null);
+          refreshAll();
+        }}
+      />
+      <CollectOpeningReceivableModal
+        item={collectOpeningItem}
+        onClose={() => setCollectOpeningItem(null)}
+        onSaved={refreshAll}
+      />
     </div>
   );
 }
-
 
 // ── Tax owed to the authority ────────────────────────────────────────────────
 //
@@ -1190,14 +2253,20 @@ function TaxPanel() {
         <Tile
           label="Already paid"
           value={money(summary.tax_paid)}
-          sub={summary.last_payment_at ? `Last ${fmtDate(summary.last_payment_at)}` : "Nothing paid yet"}
+          sub={
+            summary.last_payment_at
+              ? `Last ${fmtDate(summary.last_payment_at)}`
+              : "Nothing paid yet"
+          }
           tone="green"
           icon={CheckCircle2}
         />
         <Tile
           label="Still owed"
           value={money(summary.tax_owed)}
-          sub={summary.tax_owed > 0 ? "Due to the tax authority" : "Fully settled"}
+          sub={
+            summary.tax_owed > 0 ? "Due to the tax authority" : "Fully settled"
+          }
           tone={summary.tax_owed > 0 ? "red" : "green"}
           icon={AlertTriangle}
         />
@@ -1235,7 +2304,9 @@ function TaxPanel() {
               <thead className="bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400">
                 <tr>
                   <th className="text-left font-medium px-4 py-2.5">Month</th>
-                  <th className="text-right font-medium px-4 py-2.5">Tickets</th>
+                  <th className="text-right font-medium px-4 py-2.5">
+                    Tickets
+                  </th>
                   <th className="text-right font-medium px-4 py-2.5">Tax</th>
                 </tr>
               </thead>
@@ -1279,7 +2350,9 @@ function TaxPanel() {
                   <th className="text-left font-medium px-4 py-2.5">Date</th>
                   <th className="text-left font-medium px-4 py-2.5">Period</th>
                   <th className="text-left font-medium px-4 py-2.5">From</th>
-                  <th className="text-left font-medium px-4 py-2.5">Reference</th>
+                  <th className="text-left font-medium px-4 py-2.5">
+                    Reference
+                  </th>
                   <th className="text-right font-medium px-4 py-2.5">Amount</th>
                 </tr>
               </thead>
@@ -1297,7 +2370,9 @@ function TaxPanel() {
                     <td className="px-4 py-2.5 text-gray-600 dark:text-gray-300">
                       {p.account_name || "—"}
                     </td>
-                    <td className="px-4 py-2.5 text-gray-500">{p.reference || "—"}</td>
+                    <td className="px-4 py-2.5 text-gray-500">
+                      {p.reference || "—"}
+                    </td>
                     <td className="px-4 py-2.5 text-right font-semibold text-red-600 dark:text-red-400">
                       {money(p.amount)}
                     </td>

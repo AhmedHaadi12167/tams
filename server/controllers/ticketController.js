@@ -8,10 +8,13 @@ const {
   findAirlineMatch,
   knownAirlineNames,
 } = require("../services/airlineService");
-const { hasColumn } = require("../services/schemaInfo");
+const { hasColumn, hasTable } = require("../services/schemaInfo");
 const { resolveAgent } = require("../services/agentService");
 const { phoneMatches } = require("../services/phoneMatch");
-const { resolveAccount, requireAccount } = require("../services/accountResolver");
+const {
+  resolveAccount,
+  requireAccount,
+} = require("../services/accountResolver");
 const { uuidOrThrow } = require("../utils/sqlSafe");
 const {
   createGroupedTickets,
@@ -58,9 +61,7 @@ const ticketValidation = [
     .optional()
     .isArray()
     .withMessage("passengers must be a list"),
-  body("passengers.*.passenger_name")
-    .optional()
-    .trim(),
+  body("passengers.*.passenger_name").optional().trim(),
   body("from_city").trim().notEmpty().withMessage("Departure city is required"),
   body("to_city").trim().notEmpty().withMessage("Destination city is required"),
   body("flight_date")
@@ -113,7 +114,10 @@ const extractFromFile = async (req, res, next) => {
 
     // Snap the result to the registry now, not silently at save time, so the
     // agent can see whether this is a known carrier before creating anything.
-    const match = await findAirlineMatch(extracted.airline_name, req.businessId);
+    const match = await findAirlineMatch(
+      extracted.airline_name,
+      req.businessId,
+    );
     if (match.matched) extracted.airline_name = match.name;
 
     return response.success(
@@ -200,9 +204,9 @@ const createTicket = async (req, res, next) => {
     // ticket printed "MR ABDIFATAH MOHAMED MOHAMUD" is the same man as the
     // customer already on file as "ABDIFATAH MOHAMED MOHAMUD"; stored with
     // the title he becomes a second customer, and his balance splits in two.
-    const passenger_name = (
-      cleanName(req.body.passenger_name) || ""
-    ).toUpperCase().trim();
+    const passenger_name = (cleanName(req.body.passenger_name) || "")
+      .toUpperCase()
+      .trim();
 
     // Resolve the typed airline to the agency's master row, so
     // "Star Airline" and "Star Airlines" don't become two carriers.
@@ -266,7 +270,11 @@ const createTicket = async (req, res, next) => {
       const count = result.tickets.length;
       return response.created(
         res,
-        { group: result.group, tickets: result.tickets, ticket: result.tickets[0] },
+        {
+          group: result.group,
+          tickets: result.tickets,
+          ticket: result.tickets[0],
+        },
         count === 1
           ? "Ticket created successfully"
           : `${count} tickets created for this booking`,
@@ -517,7 +525,9 @@ const getTickets = async (req, res, next) => {
     const agentCols = withAgents
       ? ", ag.name AS agent_name_commission, ag.phone AS agent_phone"
       : "";
-    const agentJoin = withAgents ? " LEFT JOIN agents ag ON ag.id = t.agent_id" : "";
+    const agentJoin = withAgents
+      ? " LEFT JOIN agents ag ON ag.id = t.agent_id"
+      : "";
 
     const countResult = await query(
       `SELECT COUNT(*) FROM tickets t WHERE ${where}`,
@@ -626,8 +636,7 @@ const getManifest = async (req, res, next) => {
     const s = summaryRes.rows[0];
     return response.success(res, {
       when,
-      flight_date:
-        when === "date" ? date : null,
+      flight_date: when === "date" ? date : null,
       passengers: rowsRes.rows,
       summary: {
         passengers: parseInt(s.passengers),
@@ -650,7 +659,9 @@ const getTicket = async (req, res, next) => {
     const withAgents = await hasColumn("tickets", "agent_id");
     const result = await query(
       `SELECT t.*, u.name AS agent_name${
-        withAgents ? ", ag.name AS agent_name_commission, ag.phone AS agent_phone" : ""
+        withAgents
+          ? ", ag.name AS agent_name_commission, ag.phone AS agent_phone"
+          : ""
       }
        FROM tickets t
        LEFT JOIN users u ON u.id = t.created_by${
@@ -773,8 +784,7 @@ const updateTicket = async (req, res, next) => {
     // Record the change in what has been paid as its own movement, so the
     // payment history still adds up to the ticket's amount_paid. A negative
     // delta is a correction or refund; both are real and both belong here.
-    const paidDelta =
-      Math.round((paid - (Number(priorPaid) || 0)) * 100) / 100;
+    const paidDelta = Math.round((paid - (Number(priorPaid) || 0)) * 100) / 100;
     if (Math.abs(paidDelta) > 0.001) {
       await query(
         `INSERT INTO ticket_payments
@@ -786,7 +796,9 @@ const updateTicket = async (req, res, next) => {
           req.user.id,
           paidDelta,
           (req.body.payment_method || "cash").trim() || "cash",
-          paidDelta > 0 ? "Further payment (edit)" : "Correction or refund (edit)",
+          paidDelta > 0
+            ? "Further payment (edit)"
+            : "Correction or refund (edit)",
           await requireAccount(req.body, req.businessId, null, "adjustment"),
         ],
       );
@@ -823,13 +835,81 @@ const updateTicket = async (req, res, next) => {
  */
 const deleteTicket = async (req, res, next) => {
   try {
-    const result = await query(
-      `DELETE FROM tickets WHERE id = $1 AND business_id = $2 RETURNING id`,
-      [req.params.id, req.businessId],
-    );
-    if (result.rows.length === 0)
-      return response.notFound(res, "Ticket not found");
-    return response.success(res, null, "Ticket deleted successfully");
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason)
+      return response.error(
+        res,
+        "A reason is required to delete a ticket",
+        400,
+      );
+    const hasAirlinePayments = await hasTable("airline_payments");
+
+    const deleted = await withTransaction(async (client) => {
+      const ticketResult = await client.query(
+        `SELECT id, business_id, passenger_name, ticket_reference,
+                amount_paid, status
+           FROM tickets
+          WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
+      );
+      const ticket = ticketResult.rows[0];
+      if (!ticket) return null;
+
+      const payments = await client.query(
+        `SELECT COUNT(*)::INT AS count,
+                COALESCE(SUM(ABS(amount)), 0) AS total
+           FROM ticket_payments
+          WHERE ticket_id = $1 AND business_id = $2`,
+        [ticket.id, req.businessId],
+      );
+      let airlinePayments = { rows: [{ count: 0 }] };
+      if (hasAirlinePayments) {
+        airlinePayments = await client.query(
+          `SELECT COUNT(*)::INT AS count
+             FROM airline_payments
+            WHERE ticket_id = $1 AND business_id = $2`,
+          [ticket.id, req.businessId],
+        );
+      }
+
+      if (
+        Number(ticket.amount_paid) > 0.001 ||
+        payments.rows[0].count > 0 ||
+        airlinePayments.rows[0].count > 0 ||
+        ticket.status === "cancelled"
+      ) {
+        const error = new Error(
+          "This ticket has payment or settlement history and cannot be permanently deleted. Use Cancel & refund to record any account deduction safely.",
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await client.query(
+        `INSERT INTO ticket_deletion_audit
+           (business_id, ticket_id, passenger_name, ticket_reference,
+            reason, deleted_by)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [
+          req.businessId,
+          ticket.id,
+          ticket.passenger_name,
+          ticket.ticket_reference,
+          reason,
+          req.user.id,
+        ],
+      );
+
+      const result = await client.query(
+        `DELETE FROM tickets WHERE id = $1 AND business_id = $2 RETURNING id`,
+        [ticket.id, req.businessId],
+      );
+      return result.rows[0] || null;
+    });
+
+    if (!deleted) return response.notFound(res, "Ticket not found");
+    return response.success(res, null, "Ticket deleted and reason recorded");
   } catch (err) {
     next(err);
   }
@@ -882,11 +962,7 @@ const addPayment = async (req, res, next) => {
       const result = await client.query(
         `UPDATE tickets SET amount_paid = $1, payment_status = $2
          WHERE id = $3 RETURNING *`,
-        [
-          newPaid,
-          calcPaymentStatus(newPaid, ticket.selling_price),
-          ticket.id,
-        ],
+        [newPaid, calcPaymentStatus(newPaid, ticket.selling_price), ticket.id],
       );
       return result.rows[0];
     });
@@ -1120,7 +1196,9 @@ const cancelTicket = async (req, res, next) => {
           : `$${tax.toFixed(2)} tax still owed to the government — not counted as a fee`,
       );
     if (writeOff > 0)
-      parts.push(`$${writeOff.toFixed(2)} written off — the customer owes nothing`);
+      parts.push(
+        `$${writeOff.toFixed(2)} written off — the customer owes nothing`,
+      );
 
     return response.success(
       res,

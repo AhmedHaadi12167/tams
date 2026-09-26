@@ -84,7 +84,7 @@ export const ticketsAPI = {
   get: (id) => api.get(`/tickets/${id}`),
   create: (data) => api.post("/tickets", data),
   update: (id, data) => api.put(`/tickets/${id}`, data),
-  delete: (id) => api.delete(`/tickets/${id}`),
+  delete: (id, data) => api.delete(`/tickets/${id}`, { data }),
   cancel: (id, data) => api.post(`/tickets/${id}/cancel`, data),
   addPayment: (id, data) => api.post(`/tickets/${id}/payments`, data),
   payments: (id) => api.get(`/tickets/${id}/payments`),
@@ -210,8 +210,7 @@ export const airlinesAPI = {
   pay: (id, data) => api.post(`/airlines/${id}/payments`, data),
   payTickets: (data) => api.post("/airlines/tickets/pay", data),
   payments: (id) => api.get(`/airlines/${id}/payments`),
-  deletePayment: (paymentId) =>
-    api.delete(`/airlines/payments/${paymentId}`),
+  deletePayment: (paymentId) => api.delete(`/airlines/payments/${paymentId}`),
 };
 
 export const agentsAPI = {
@@ -257,6 +256,14 @@ export const financialsAPI = {
   balanceSheet: (params) => api.get("/financials/balance-sheet", { params }),
   cashFlow: (params) => api.get("/financials/cash-flow", { params }),
   receivables: (params) => api.get("/financials/receivables", { params }),
+  openingItems: () => api.get("/financials/opening-items"),
+  createOpeningItem: (data) => api.post("/financials/opening-items", data),
+  updateOpeningItem: (id, data) =>
+    api.put(`/financials/opening-items/${id}`, data),
+  deleteOpeningItem: (id, data) =>
+    api.delete(`/financials/opening-items/${id}`, { data }),
+  collectOpeningReceivable: (id, data) =>
+    api.post(`/financials/opening-items/${id}/payments`, data),
   updateOpeningBalances: (data) =>
     api.put("/financials/opening-balances", data),
 };

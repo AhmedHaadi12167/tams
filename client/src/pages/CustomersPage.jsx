@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { customersAPI, ticketsAPI, downloadBlob, visasAPI, packagesAPI, fileUrl } from "../services/api";
+import {
+  customersAPI,
+  ticketsAPI,
+  downloadBlob,
+  visasAPI,
+  packagesAPI,
+  fileUrl,
+} from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
   Button,
@@ -64,7 +71,11 @@ const brandInitials = (name) => {
     .split(/\s+/)
     .filter(Boolean);
   return parts.length
-    ? parts.slice(0, 2).map((w) => w[0]).join("").toUpperCase()
+    ? parts
+        .slice(0, 2)
+        .map((w) => w[0])
+        .join("")
+        .toUpperCase()
     : "TA";
 };
 
@@ -75,7 +86,10 @@ const invoiceNumber = (customer) => {
     d.getDate(),
   ).padStart(2, "0")}`;
   const tail =
-    String(customer?.id || "").replace(/-/g, "").slice(-5).toUpperCase() || "00000";
+    String(customer?.id || "")
+      .replace(/-/g, "")
+      .slice(-5)
+      .toUpperCase() || "00000";
   return `INV-${ymd}-${tail}`;
 };
 
@@ -138,6 +152,16 @@ const invoiceLines = (data) => {
       date: c.shipped_date,
       total: c.total_price,
       balance: c.balance,
+    }),
+  );
+  (data.opening_balances || []).forEach((item) =>
+    out.push({
+      who: data.customer.name,
+      service: `Opening ${String(item.service_type || "other").replace(/_/g, " ")}: ${item.reason}`,
+      reference: "Opening balance",
+      date: item.entry_date,
+      total: item.amount,
+      balance: item.balance,
     }),
   );
   return out;
@@ -233,7 +257,11 @@ const printStatement = (data, preparedBy, paper = "A4") => {
   const contacts = [
     ["phone", "Call", business.phone],
     ["pin", "Visit", business.address],
-    ["mail", "Online", [business.email, business.website].filter(Boolean).join("  ·  ")],
+    [
+      "mail",
+      "Online",
+      [business.email, business.website].filter(Boolean).join("  ·  "),
+    ],
   ].filter(([, , v]) => v);
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8" />
@@ -423,7 +451,10 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
   const tickets = (data.tickets || []).filter((t) => kT.has(t.id));
   const visas = (data.visas || []).filter((v) => kV.has(v.id));
   const packages = (data.packages || []).filter((p) => kP.has(p.id));
-  const payments = (data.payments || []).filter((p) => kT.has(p.ticket_id));
+  const openingBalances = data.opening_balances || [];
+  const payments = (data.payments || []).filter(
+    (p) => p.opening_item_id || kT.has(p.ticket_id),
+  );
 
   const sum = (rows) =>
     rows.reduce(
@@ -434,13 +465,27 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
       }),
       { amount: 0, paid: 0, balance: 0 },
     );
-  const t = sum(tickets), v = sum(visas), p = sum(packages);
+  const t = sum(tickets),
+    v = sum(visas),
+    p = sum(packages);
 
   // The deposit is a fact about the customer, not about the rows that were
   // ticked, so it survives the filter untouched — but the net due has to be
   // recomputed, or a three-passenger invoice would carry the net figure for
   // all seven.
-  const balance = t.balance + v.balance + p.balance;
+  const openingTotal = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.amount) || 0),
+    0,
+  );
+  const openingPaid = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.paid_amount) || 0),
+    0,
+  );
+  const openingDue = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.balance) || 0),
+    0,
+  );
+  const balance = t.balance + v.balance + p.balance + openingDue;
   const held = Number(data.summary?.deposit_held ?? data.deposit?.held) || 0;
 
   return {
@@ -448,15 +493,20 @@ const filterStatement = (data, ticketIds, visaIds, packageIds) => {
     tickets,
     visas,
     packages,
+    opening_balances: openingBalances,
     payments,
     summary: {
       ...data.summary,
       ticket_count: tickets.length,
       visa_count: visas.length,
       package_count: packages.length,
-      item_count: tickets.length + visas.length + packages.length,
-      total_amount: (t.amount + v.amount + p.amount).toFixed(2),
-      total_paid: (t.paid + v.paid + p.paid).toFixed(2),
+      item_count:
+        tickets.length +
+        visas.length +
+        packages.length +
+        openingBalances.length,
+      total_amount: (t.amount + v.amount + p.amount + openingTotal).toFixed(2),
+      total_paid: (t.paid + v.paid + p.paid + openingPaid).toFixed(2),
       total_balance: balance.toFixed(2),
       net_due: (balance - held).toFixed(2),
     },
@@ -558,17 +608,34 @@ function CollectForm({ target, onDone, onCancel }) {
 
 // ─── Statement Modal ─────────────────────────────────────────────────────────
 function StatementModal({
-  data, downloading, paper, setPaper, onPrint, onDownload, onCollect,
-  selectedIds, selectedVisaIds, selectedPackageIds,
-  onToggle, onToggleVisa, onTogglePackage, onSelectAll, onClearAll,
+  data,
+  downloading,
+  paper,
+  setPaper,
+  onPrint,
+  onDownload,
+  onCollect,
+  selectedIds,
+  selectedVisaIds,
+  selectedPackageIds,
+  onToggle,
+  onToggleVisa,
+  onTogglePackage,
+  onSelectAll,
+  onClearAll,
 }) {
   const { customer, tickets, payments, summary } = data;
   const visas = data.visas || [];
   const packages = data.packages || [];
+  const openingBalances = data.opening_balances || [];
 
-  const totalItems = tickets.length + visas.length + packages.length;
+  const totalItems =
+    tickets.length + visas.length + packages.length + openingBalances.length;
   const totalSelected =
-    selectedIds.length + selectedVisaIds.length + selectedPackageIds.length;
+    selectedIds.length +
+    selectedVisaIds.length +
+    selectedPackageIds.length +
+    openingBalances.length;
   const allSelected = totalItems > 0 && totalSelected === totalItems;
   const partial = totalSelected > 0 && !allSelected;
 
@@ -587,10 +654,22 @@ function StatementModal({
   const st = addUp(tickets, selectedIds);
   const sv = addUp(visas, selectedVisaIds);
   const sp = addUp(packages, selectedPackageIds);
+  const openingTotal = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.amount) || 0),
+    0,
+  );
+  const openingPaid = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.paid_amount) || 0),
+    0,
+  );
+  const openingDue = openingBalances.reduce(
+    (total, item) => total + (parseFloat(item.balance) || 0),
+    0,
+  );
   const sel = {
-    total: st.total + sv.total + sp.total,
-    paid: st.paid + sv.paid + sp.paid,
-    balance: st.balance + sv.balance + sp.balance,
+    total: st.total + sv.total + sp.total + openingTotal,
+    paid: st.paid + sv.paid + sp.paid + openingPaid,
+    balance: st.balance + sv.balance + sp.balance + openingDue,
   };
 
   // What the agency is holding for this customer. Shown here so the tiles
@@ -640,10 +719,19 @@ function StatementModal({
             <option value="A5">A5</option>
           </select>
         </label>
-        <Button variant="outline" size="sm" onClick={onPrint} disabled={totalSelected === 0}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onPrint}
+          disabled={totalSelected === 0}
+        >
           <Printer className="w-4 h-4" /> Print
         </Button>
-        <Button size="sm" onClick={onDownload} disabled={downloading || totalSelected === 0}>
+        <Button
+          size="sm"
+          onClick={onDownload}
+          disabled={downloading || totalSelected === 0}
+        >
           <Download className="w-4 h-4" />
           {downloading ? "Preparing..." : "Download PDF"}
         </Button>
@@ -685,8 +773,12 @@ function StatementModal({
                   <input
                     type="checkbox"
                     checked={allSelected}
-                    ref={(el) => { if (el) el.indeterminate = partial; }}
-                    onChange={(e) => (e.target.checked ? onSelectAll() : onClearAll())}
+                    ref={(el) => {
+                      if (el) el.indeterminate = partial;
+                    }}
+                    onChange={(e) =>
+                      e.target.checked ? onSelectAll() : onClearAll()
+                    }
                     className="rounded cursor-pointer"
                     title="Select everything"
                   />
@@ -728,7 +820,13 @@ function StatementModal({
                   <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
                     {t.passenger_name}
                     {!t.is_self && (
-                      <span className="text-blue-500" title="Booked for someone else"> *</span>
+                      <span
+                        className="text-blue-500"
+                        title="Booked for someone else"
+                      >
+                        {" "}
+                        *
+                      </span>
                     )}
                   </td>
                   <td className="px-3 py-2 text-gray-500">
@@ -794,8 +892,21 @@ function StatementModal({
               <thead>
                 <tr className="bg-gray-50 dark:bg-gray-800">
                   <th className="px-3 py-2 w-8"></th>
-                  {["Applicant", "Country", "Type", "Applied", "Status", "Total", "Paid", "Balance", ""].map((h, hi) => (
-                    <th key={h || hi} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                  {[
+                    "Applicant",
+                    "Country",
+                    "Type",
+                    "Applied",
+                    "Status",
+                    "Total",
+                    "Paid",
+                    "Balance",
+                    "",
+                  ].map((h, hi) => (
+                    <th
+                      key={h || hi}
+                      className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide"
+                    >
                       {h}
                     </th>
                   ))}
@@ -803,7 +914,12 @@ function StatementModal({
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
                 {visas.map((v) => (
-                  <tr key={v.id} className={selectedVisaIds.includes(v.id) ? "" : "opacity-45"}>
+                  <tr
+                    key={v.id}
+                    className={
+                      selectedVisaIds.includes(v.id) ? "" : "opacity-45"
+                    }
+                  >
                     <td className="px-3 py-2">
                       <input
                         type="checkbox"
@@ -812,18 +928,38 @@ function StatementModal({
                         className="rounded cursor-pointer"
                       />
                     </td>
-                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">{v.applicant_name}</td>
-                    <td className="px-3 py-2 text-gray-500">{v.destination_country}</td>
-                    <td className="px-3 py-2 text-gray-500">{v.visa_type || "—"}</td>
-                    <td className="px-3 py-2 text-gray-500">{fmtDate(v.applied_date, "dd MMM yy")}</td>
+                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
+                      {v.applicant_name}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">
+                      {v.destination_country}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">
+                      {v.visa_type || "—"}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">
+                      {fmtDate(v.applied_date, "dd MMM yy")}
+                    </td>
                     <td className="px-3 py-2">
-                      <Badge variant={v.status === "collected" ? "purple" : v.status === "approved" ? "success" : "info"}>
+                      <Badge
+                        variant={
+                          v.status === "collected"
+                            ? "purple"
+                            : v.status === "approved"
+                              ? "success"
+                              : "info"
+                        }
+                      >
                         {v.status}
                       </Badge>
                     </td>
                     <td className="px-3 py-2">{money(v.selling_price)}</td>
-                    <td className="px-3 py-2 text-green-600">{money(v.amount_paid)}</td>
-                    <td className={`px-3 py-2 font-semibold ${Number(v.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                    <td className="px-3 py-2 text-green-600">
+                      {money(v.amount_paid)}
+                    </td>
+                    <td
+                      className={`px-3 py-2 font-semibold ${Number(v.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
+                    >
                       {money(v.balance)}
                     </td>
                     <td className="px-3 py-2 text-right">
@@ -851,15 +987,29 @@ function StatementModal({
       {packages.length > 0 && (
         <div>
           <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-            <Luggage className="w-4 h-4" /> Hajj &amp; Umrah packages ({packages.length})
+            <Luggage className="w-4 h-4" /> Hajj &amp; Umrah packages (
+            {packages.length})
           </h4>
           <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-gray-50 dark:bg-gray-800">
                   <th className="px-3 py-2 w-8"></th>
-                  {["Package", "Type", "Pax", "Departs", "Status", "Total", "Paid", "Balance", ""].map((h, hi) => (
-                    <th key={h || hi} className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide">
+                  {[
+                    "Package",
+                    "Type",
+                    "Pax",
+                    "Departs",
+                    "Status",
+                    "Total",
+                    "Paid",
+                    "Balance",
+                    "",
+                  ].map((h, hi) => (
+                    <th
+                      key={h || hi}
+                      className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide"
+                    >
                       {h}
                     </th>
                   ))}
@@ -867,7 +1017,12 @@ function StatementModal({
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
                 {packages.map((p) => (
-                  <tr key={p.id} className={selectedPackageIds.includes(p.id) ? "" : "opacity-45"}>
+                  <tr
+                    key={p.id}
+                    className={
+                      selectedPackageIds.includes(p.id) ? "" : "opacity-45"
+                    }
+                  >
                     <td className="px-3 py-2">
                       <input
                         type="checkbox"
@@ -876,18 +1031,32 @@ function StatementModal({
                         className="rounded cursor-pointer"
                       />
                     </td>
-                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">{p.label}</td>
+                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
+                      {p.label}
+                    </td>
                     <td className="px-3 py-2">
-                      <Badge variant={p.package_type === "hajj" ? "purple" : "success"}>
+                      <Badge
+                        variant={
+                          p.package_type === "hajj" ? "purple" : "success"
+                        }
+                      >
                         {p.package_type}
                       </Badge>
                     </td>
-                    <td className="px-3 py-2 text-gray-500">{p.pilgrim_count}</td>
-                    <td className="px-3 py-2 text-gray-500">{fmtDate(p.departure_date, "dd MMM yy")}</td>
+                    <td className="px-3 py-2 text-gray-500">
+                      {p.pilgrim_count}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">
+                      {fmtDate(p.departure_date, "dd MMM yy")}
+                    </td>
                     <td className="px-3 py-2 text-gray-500">{p.status}</td>
                     <td className="px-3 py-2">{money(p.selling_price)}</td>
-                    <td className="px-3 py-2 text-green-600">{money(p.amount_paid)}</td>
-                    <td className={`px-3 py-2 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}>
+                    <td className="px-3 py-2 text-green-600">
+                      {money(p.amount_paid)}
+                    </td>
+                    <td
+                      className={`px-3 py-2 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
+                    >
                       {money(p.balance)}
                     </td>
                     <td className="px-3 py-2 text-right">
@@ -1004,7 +1173,12 @@ function AddCustomerModal({ open, onClose, onSaved }) {
           />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input label="Email" type="email" value={form.email} onChange={set("email")} />
+          <Input
+            label="Email"
+            type="email"
+            value={form.email}
+            onChange={set("email")}
+          />
           <Input
             label="Passport number"
             value={form.passport_number}
@@ -1012,14 +1186,26 @@ function AddCustomerModal({ open, onClose, onSaved }) {
           />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input label="Nationality" value={form.nationality} onChange={set("nationality")} />
-          <Select label="Type" value={form.customer_type} onChange={set("customer_type")}>
+          <Input
+            label="Nationality"
+            value={form.nationality}
+            onChange={set("nationality")}
+          />
+          <Select
+            label="Type"
+            value={form.customer_type}
+            onChange={set("customer_type")}
+          >
             <option value="individual">Individual</option>
             <option value="company">Company</option>
           </Select>
         </div>
         {form.customer_type === "company" && (
-          <Input label="Company name" value={form.company_name} onChange={set("company_name")} />
+          <Input
+            label="Company name"
+            value={form.company_name}
+            onChange={set("company_name")}
+          />
         )}
         <div className="flex gap-3 justify-end pt-1">
           <Button type="button" variant="outline" onClick={onClose}>
@@ -1090,9 +1276,9 @@ function DepositModal({ customer, onClose, onDone }) {
       <form onSubmit={submit} className="space-y-4">
         <div className="rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 p-3">
           <p className="text-sm text-blue-900 dark:text-blue-100">
-            Money taken before anything is booked. It goes into the account
-            you choose, and shows on the balance sheet as money owed back
-            until it is used or returned — it is not counted as income.
+            Money taken before anything is booked. It goes into the account you
+            choose, and shows on the balance sheet as money owed back until it
+            is used or returned — it is not counted as income.
           </p>
           {held && (
             <p className="text-xs text-blue-800 dark:text-blue-200 mt-1.5">
@@ -1115,7 +1301,9 @@ function DepositModal({ customer, onClose, onDone }) {
           />
           <AccountSelect
             direction={parseFloat(amount) < 0 ? "out" : "in"}
-            label={parseFloat(amount) < 0 ? "Returned from *" : "Received into *"}
+            label={
+              parseFloat(amount) < 0 ? "Returned from *" : "Received into *"
+            }
             value={accountId}
             onChange={(e) => setAccountId(e.target.value)}
           />
@@ -1440,7 +1628,9 @@ export default function CustomersPage() {
                           which looked like the balance was the bug. */}
                       <Badge variant="info">
                         {Number(c.service_count ?? c.ticket_count)} service
-                        {Number(c.service_count ?? c.ticket_count) === 1 ? "" : "s"}
+                        {Number(c.service_count ?? c.ticket_count) === 1
+                          ? ""
+                          : "s"}
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
@@ -1487,14 +1677,31 @@ export default function CustomersPage() {
                     <td className="px-4 py-3">
                       <ActionsMenu
                         items={[
-                          { label: "View", icon: Eye, onClick: () => openView(c) },
+                          {
+                            label: "View",
+                            icon: Eye,
+                            onClick: () => openView(c),
+                          },
                           // Available whatever the balance says. Taking a
                           // deposit from someone who owes nothing is the
                           // normal case, not the exception.
-                          { label: "Hold money (deposit)", icon: PiggyBank, onClick: () => setDepositFor(c) },
-                          { label: "Statement", icon: FileText, onClick: () => openStatement(c) },
+                          {
+                            label: "Hold money (deposit)",
+                            icon: PiggyBank,
+                            onClick: () => setDepositFor(c),
+                          },
+                          {
+                            label: "Statement",
+                            icon: FileText,
+                            onClick: () => openStatement(c),
+                          },
                           isAdmin()
-                            ? { label: "Delete", icon: Trash2, danger: true, onClick: () => handleDelete(c) }
+                            ? {
+                                label: "Delete",
+                                icon: Trash2,
+                                danger: true,
+                                onClick: () => handleDelete(c),
+                              }
                             : null,
                         ]}
                       />
@@ -1591,19 +1798,73 @@ export default function CustomersPage() {
                 </div>
               )}
 
+              {viewData.opening_balances?.length > 0 && (
+                <div>
+                  <h4 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                    <Banknote className="w-4 h-4" /> Opening receivables (
+                    {viewData.opening_balances.length})
+                  </h4>
+                  <div className="space-y-2">
+                    {viewData.opening_balances.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex flex-wrap items-center justify-between gap-3 py-2 px-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+                      >
+                        <div>
+                          <p className="text-sm font-medium text-gray-900 dark:text-white">
+                            {item.reason}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {item.service_type} ·{" "}
+                            {fmtDate(item.entry_date, "dd MMM yyyy")}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold text-red-600">
+                          {money(item.balance)} due · {money(item.paid_amount)}{" "}
+                          paid
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {[
-                { key: "tickets", kind: "ticket", icon: Ticket, title: "Flights",
+                {
+                  key: "tickets",
+                  kind: "ticket",
+                  icon: Ticket,
+                  title: "Flights",
                   describe: (r) => `${r.from_city} → ${r.to_city}`,
-                  detail: (r) => `${r.airline_name || "—"} · ${r.flight_date ? fmtDate(r.flight_date, "dd MMM yyyy") : "—"}` },
-                { key: "visas", kind: "visa", icon: Stamp, title: "Visas",
+                  detail: (r) =>
+                    `${r.airline_name || "—"} · ${r.flight_date ? fmtDate(r.flight_date, "dd MMM yyyy") : "—"}`,
+                },
+                {
+                  key: "visas",
+                  kind: "visa",
+                  icon: Stamp,
+                  title: "Visas",
                   describe: (r) => r.destination_country,
-                  detail: (r) => r.visa_type || "—" },
-                { key: "packages", kind: "package", icon: Luggage, title: "Packages",
+                  detail: (r) => r.visa_type || "—",
+                },
+                {
+                  key: "packages",
+                  kind: "package",
+                  icon: Luggage,
+                  title: "Packages",
                   describe: (r) => r.label,
-                  detail: (r) => `${r.package_type || ""} · ${r.pilgrim_count || 1} pilgrim(s)` },
-                { key: "cargo", kind: "cargo", icon: Luggage, title: "Cargo",
-                  describe: (r) => r.tracking_number || r.item_description || "Shipment",
-                  detail: (r) => `${r.from_city} → ${r.to_city}` },
+                  detail: (r) =>
+                    `${r.package_type || ""} · ${r.pilgrim_count || 1} pilgrim(s)`,
+                },
+                {
+                  key: "cargo",
+                  kind: "cargo",
+                  icon: Luggage,
+                  title: "Cargo",
+                  describe: (r) =>
+                    r.tracking_number || r.item_description || "Shipment",
+                  detail: (r) => `${r.from_city} → ${r.to_city}`,
+                },
               ].map((svc) => {
                 const rows = viewData[svc.key] || [];
                 if (rows.length === 0) return null;
@@ -1618,7 +1879,8 @@ export default function CustomersPage() {
                         const owing =
                           Math.round(
                             ((Number(r.selling_price) || 0) -
-                              (Number(r.amount_paid) || 0)) * 100,
+                              (Number(r.amount_paid) || 0)) *
+                              100,
                           ) / 100;
                         return (
                           <div
@@ -1629,7 +1891,9 @@ export default function CustomersPage() {
                               <p className="text-sm font-medium text-gray-900 dark:text-white">
                                 {svc.describe(r)}
                               </p>
-                              <p className="text-xs text-gray-500">{svc.detail(r)}</p>
+                              <p className="text-xs text-gray-500">
+                                {svc.detail(r)}
+                              </p>
                             </div>
                             <div className="flex items-center gap-3">
                               {/* Offered on whatever is unpaid, whichever
@@ -1646,7 +1910,8 @@ export default function CustomersPage() {
                                     loading={applying === r.id}
                                     onClick={() => useDepositOn(svc.kind, r.id)}
                                   >
-                                    <PiggyBank className="w-3.5 h-3.5" /> Use deposit
+                                    <PiggyBank className="w-3.5 h-3.5" /> Use
+                                    deposit
                                   </Button>
                                 )}
                               <div className="text-right">
@@ -1655,7 +1920,9 @@ export default function CustomersPage() {
                                 </p>
                                 <p
                                   className={`text-xs ${
-                                    owing > 0 ? "text-red-500 font-medium" : "text-gray-400"
+                                    owing > 0
+                                      ? "text-red-500 font-medium"
+                                      : "text-gray-400"
                                   }`}
                                 >
                                   {owing > 0 ? `${money(owing)} due` : "paid"}
@@ -1699,17 +1966,23 @@ export default function CustomersPage() {
             selectedPackageIds={selectedPackageIds}
             onToggle={(id) =>
               setSelectedTicketIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+                prev.includes(id)
+                  ? prev.filter((x) => x !== id)
+                  : [...prev, id],
               )
             }
             onToggleVisa={(id) =>
               setSelectedVisaIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+                prev.includes(id)
+                  ? prev.filter((x) => x !== id)
+                  : [...prev, id],
               )
             }
             onTogglePackage={(id) =>
               setSelectedPackageIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+                prev.includes(id)
+                  ? prev.filter((x) => x !== id)
+                  : [...prev, id],
               )
             }
             onSelectAll={() => {
@@ -1724,17 +1997,26 @@ export default function CustomersPage() {
             }}
             onPrint={() =>
               printStatement(
-                filterStatement(stmtData, selectedTicketIds, selectedVisaIds, selectedPackageIds),
+                filterStatement(
+                  stmtData,
+                  selectedTicketIds,
+                  selectedVisaIds,
+                  selectedPackageIds,
+                ),
                 // The job title if they have one — a customer reading
                 // "Operations Director" learns who signed their invoice;
                 // "admin" tells them only what the software lets that person
                 // click.
-                user ? { name: user.name, role: user.title || user.role } : null,
+                user
+                  ? { name: user.name, role: user.title || user.role }
+                  : null,
                 paper,
               )
             }
             onDownload={() => downloadStatementPDF(stmtModal)}
-            onCollect={(record, kind = "ticket") => setCollectTarget({ kind, record })}
+            onCollect={(record, kind = "ticket") =>
+              setCollectTarget({ kind, record })
+            }
           />
         )}
       </Modal>
@@ -1768,7 +2050,6 @@ export default function CustomersPage() {
         onClose={() => setDepositFor(null)}
         onDone={load}
       />
-
     </div>
   );
 }

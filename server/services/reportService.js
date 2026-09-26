@@ -970,6 +970,18 @@ const serviceRows = (data) => {
     });
   });
 
+  (data.opening_balances || []).forEach((item) => {
+    rows.push({
+      who: data.customer.name,
+      service: `Opening ${String(item.service_type || "other").replace(/_/g, " ")}: ${item.reason}`,
+      reference: "Opening balance",
+      date: item.entry_date,
+      total: item.amount,
+      balance: item.balance,
+      status: "unpaid",
+    });
+  });
+
   return rows;
 };
 

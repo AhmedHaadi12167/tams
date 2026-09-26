@@ -679,6 +679,31 @@ router.get(
   authorize("super_admin", "admin", "accountant"),
   financialsController.getReceivables,
 );
+router.get(
+  "/financials/opening-items",
+  authorize("super_admin", "admin", "accountant"),
+  financialsController.getOpeningItems,
+);
+router.post(
+  "/financials/opening-items",
+  authorize("super_admin", "admin"),
+  financialsController.createOpeningItem,
+);
+router.put(
+  "/financials/opening-items/:id",
+  authorize("super_admin", "admin"),
+  financialsController.updateOpeningItem,
+);
+router.delete(
+  "/financials/opening-items/:id",
+  authorize("super_admin", "admin"),
+  financialsController.deleteOpeningItem,
+);
+router.post(
+  "/financials/opening-items/:id/payments",
+  authorize("super_admin", "admin", "accountant"),
+  financialsController.collectOpeningReceivable,
+);
 router.put(
   "/financials/opening-balances",
   authorize("super_admin", "admin"),
