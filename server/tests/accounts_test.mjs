@@ -7,9 +7,11 @@
 // with it. This proves the line is drawn in the right place.
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass = [], fail = [];
 const ck = (n, ok, d = "") => (ok ? pass : fail).push(n + (d ? ` — ${d}` : ""));
 const m2 = (v) => Number(v).toFixed(2);

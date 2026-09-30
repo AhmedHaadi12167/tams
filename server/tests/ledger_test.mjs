@@ -77,7 +77,13 @@ await seedAccounts(db, biz);
 // a business created afterwards needs the accounts too. This is the bug this
 // test is here to catch.
 const seeded = (
-  await db.query(`SELECT COUNT(*) n FROM payment_accounts WHERE business_id=$1`, [biz])
+  // The automatic Cash in Hand account (migration_v28) is not one of the
+  // eleven seeded here, so it is left out of the count.
+  await db.query(
+    `SELECT COUNT(*) n FROM payment_accounts
+      WHERE business_id=$1 AND NOT COALESCE(is_cash_in_hand, FALSE)`,
+    [biz],
+  )
 ).rows[0].n;
 check(
   "accounts exist for a business created AFTER the migration",
@@ -186,7 +192,13 @@ await db.query(
   [biz, cargo, user, acc["EDahab"]],
 );
 
-// Money out: pay the airline 400 from Premier Bank
+// Money out: pay the airline 400 from Premier Bank. An account can't go
+// below zero (the overdraft guard), so Premier Bank starts with 500.
+const PREMIER_OPENING = 500;
+await db.query(`UPDATE payment_accounts SET opening_balance=$2 WHERE id=$1`, [
+  acc["Premier Bank"],
+  PREMIER_OPENING,
+]);
 await db.query(
   `INSERT INTO airline_payments (business_id,airline_id,ticket_id,amount,method,account_id,paid_by)
    VALUES ($1,$2,$3,400,'bank',$4,$5)`,
@@ -220,7 +232,7 @@ const expected = {
   EVC: 300 - 100 - 2,             // ticket payment in, transfer + fee out
   "Salaam Bank": 150,             // visa fee
   EDahab: 80,                     // cargo
-  "Premier Bank": 100 - 400 - 60, // transfer in, airline + rent out
+  "Premier Bank": PREMIER_OPENING + 100 - 400 - 60, // opening + transfer in, airline + rent out
   MyBank: 0,
 };
 
@@ -252,8 +264,8 @@ const totals = (
 const sumBalances = Object.values(balances).reduce((a, b) => a + b, 0);
 const netFlow = Number(totals.tin) - Number(totals.tout);
 check(
-  "sum of balances equals total in minus total out",
-  money(sumBalances) === money(netFlow),
+  "sum of balances equals opening balances plus total in minus total out",
+  money(sumBalances) === money(PREMIER_OPENING + netFlow),
   `balances ${money(sumBalances)} vs flow ${money(netFlow)}`,
 );
 
@@ -261,7 +273,7 @@ check(
 // to the fee, so the net effect across all accounts is exactly −2.
 check(
   "a transfer changes the total only by its fee",
-  money(sumBalances) === money(200 + 300 + 150 + 80 - 400 - 25 - 60 - 2),
+  money(sumBalances) === money(PREMIER_OPENING + 200 + 300 + 150 + 80 - 400 - 25 - 60 - 2),
   `total held ${money(sumBalances)}`,
 );
 
@@ -274,6 +286,8 @@ const led = (
   )
 ).rows;
 
+// This test re-applies migration_v11, whose ledger folds the transfer fee
+// into the outgoing leg (v28 later gives the fee its own row).
 check("ledger has a row per movement", led.length === 9, `${led.length} rows (7 real + 2 transfer legs)`);
 check("every row names a counterparty", led.every((r) => r.party && r.party.length > 0));
 check("every row has a timestamp", led.every((r) => r.occurred_at));

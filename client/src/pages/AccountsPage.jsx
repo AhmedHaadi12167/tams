@@ -270,6 +270,11 @@ const AccountCard = ({ account, selected, onSelect, onEdit }) => {
           ↑ {money(account.total_out)}
         </span>
       </div>
+      {account.is_cash_in_hand && (
+        <Badge variant="success" className="mt-2">
+          Cash in Hand
+        </Badge>
+      )}
       {!account.is_active && (
         <Badge variant="default" className="mt-2">
           Inactive
@@ -351,13 +356,23 @@ function AccountModal({ open, onClose, onSaved, initial }) {
             onChange={set("name")}
             placeholder="Premier Bank"
           />
-          <Select label="Type" value={form.kind} onChange={set("kind")}>
-            {KINDS.map((k) => (
-              <option key={k.value} value={k.value}>
-                {k.label}
-              </option>
-            ))}
-          </Select>
+          {initial?.is_cash_in_hand ? (
+            <div>
+              <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Type</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400 py-2">
+                Cash in Hand — every business has exactly one
+              </p>
+            </div>
+          ) : (
+            <Select label="Type" value={form.kind} onChange={set("kind")}>
+              {/* Physical cash lives in the one Cash in Hand account. */}
+              {KINDS.filter((k) => k.value !== "cash" || form.kind === "cash").map((k) => (
+                <option key={k.value} value={k.value}>
+                  {k.label}
+                </option>
+              ))}
+            </Select>
+          )}
           <Input
             label="Opening balance"
             type="number"
@@ -413,7 +428,7 @@ function AccountModal({ open, onClose, onSaved, initial }) {
           placeholder="Branch, who manages it, anything internal…"
         />
 
-        {editing && (
+        {editing && !initial?.is_cash_in_hand && (
           <Select
             label="Status"
             value={String(form.is_active)}

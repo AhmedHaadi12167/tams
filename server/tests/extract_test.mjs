@@ -10,11 +10,12 @@
 // test what happens to Claude's answer, including the answers it gets
 // wrong, which is the part that runs on every extraction in production.
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import os from "os";
 import path from "path";
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass = [], fail = [];
 const ck = (n, ok, d = "") => (ok ? pass : fail).push(n + (d ? ` — ${d}` : ""));
 

@@ -234,6 +234,7 @@ export const visasAPI = {
   update: (id, data) => api.put(`/visas/${id}`, data),
   delete: (id) => api.delete(`/visas/${id}`),
   addPayment: (id, data) => api.post(`/visas/${id}/payments`, data),
+  cancel: (id, data) => api.post(`/visas/${id}/cancel`, data),
 };
 
 export const packagesAPI = {
@@ -243,6 +244,7 @@ export const packagesAPI = {
   update: (id, data) => api.put(`/packages/${id}`, data),
   delete: (id) => api.delete(`/packages/${id}`),
   addPayment: (id, data) => api.post(`/packages/${id}/payments`, data),
+  cancel: (id, data) => api.post(`/packages/${id}/cancel`, data),
 };
 
 export const expensesAPI = {
@@ -269,6 +271,7 @@ export const financialsAPI = {
     api.post(`/financials/opening-items/${id}/payments`, data),
   updateOpeningBalances: (data) =>
     api.put("/financials/opening-balances", data),
+  getOpeningBalances: () => api.get("/financials/opening-balances"),
 };
 
 export const usersAPI = {

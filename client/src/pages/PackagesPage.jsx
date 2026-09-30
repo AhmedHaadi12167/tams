@@ -25,12 +25,14 @@ import {
   X,
   Wallet,
   AlertTriangle,
+  Ban,
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 import { openPrintWindow } from "../utils/printWindow";
 import { PaySupplierModal, supplierBalance } from "../components/PaySupplier";
 import ActionsMenu from "../components/ActionsMenu";
+import CancelServiceModal from "../components/CancelServiceModal";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -226,7 +228,7 @@ function PackageModal({ open, onClose, onSaved, initialId }) {
               </Select>
               <Input label="Package name *" value={form.label} onChange={set("label")} placeholder="Umrah — Ramadan 2027" />
               <Select label="Status" value={form.status} onChange={set("status")}>
-                {STATUSES.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
+                {STATUSES.filter((s) => s.value !== "cancelled").map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
               </Select>
               <Input label="Lead traveller" value={form.lead_name} onChange={set("lead_name")} placeholder="HASSAN ALI" />
               <Input label="Phone number" value={form.contact_number} onChange={set("contact_number")} placeholder="+252 61 234 5678" />
@@ -550,6 +552,8 @@ export default function PackagesPage() {
   const { hasRole } = useAuth();
   const canWrite = hasRole("admin", "agent");
   const canDelete = hasRole("admin");
+  const canCancel = hasRole("admin", "accountant", "super_admin");
+  const [cancelling, setCancelling] = useState(null);
 
   const [data, setData] = useState(null);
   const [pageMeta, setPageMeta] = useState({ total: 0, totalPages: 1 });
@@ -708,14 +712,17 @@ export default function PackagesPage() {
                             <ActionsMenu
                               items={[
                                 { label: "View", icon: Eye, onClick: () => setDetail(p.id) },
-                                balance > 0
+                                balance > 0 && p.status !== "cancelled"
                                   ? { label: "Collect payment", icon: Banknote, onClick: () => setCollect(p) }
                                   : null,
-                                supplierBalance("package", p) > 0
+                                supplierBalance("package", p) > 0 && p.status !== "cancelled"
                                   ? { label: "Pay operator", icon: Banknote, onClick: () => setPaySupplier(p) }
                                   : null,
-                                canWrite
+                                canWrite && p.status !== "cancelled"
                                   ? { label: "Edit", icon: Pencil, onClick: () => setModal({ open: true, id: p.id }) }
+                                  : null,
+                                canCancel && p.status !== "cancelled"
+                                  ? { label: "Cancel & refund", icon: Ban, danger: true, onClick: () => setCancelling(p) }
                                   : null,
                                 canDelete
                                   ? { label: "Delete", icon: Trash2, danger: true, onClick: () => remove(p) }
@@ -745,6 +752,9 @@ export default function PackagesPage() {
       />
       <DetailModal open={Boolean(detail)} packageId={detail} onClose={() => setDetail(null)} onChanged={load} />
       <CollectModal open={Boolean(collect)} pkg={collect} onClose={() => setCollect(null)} onDone={load} />
+      {cancelling && (
+        <CancelServiceModal kind="package" record={cancelling} onClose={() => setCancelling(null)} onDone={load} />
+      )}
       <PaySupplierModal
         kind="package"
         record={paySupplier}

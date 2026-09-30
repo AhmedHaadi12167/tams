@@ -14,12 +14,13 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import path from "path";
 import { seedAccounts } from "./seed.mjs";
 
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const pass = [];
 const fail = [];
@@ -96,6 +97,10 @@ const accountC = load("controllers/accountController.js");
 // ── Fixtures ───────────────────────────────────────────────────────────────
 const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('Ecos','e@x.c') RETURNING id`)).rows[0].id;
 await seedAccounts(pg, biz);
+// Accounts can't go below zero, so Premier Bank (which pays the rent and the
+// airline) starts with 1,000. The checks below count only this test's money.
+const FUND = 1000;
+await pg.query(`UPDATE payment_accounts SET opening_balance = $2 WHERE business_id = $1 AND name = 'Premier Bank'`, [biz, FUND]);
 const user = (await pg.query(
   `INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'Ahmed','a@x.c','h','admin') RETURNING id`,
   [biz])).rows[0].id;
@@ -103,7 +108,8 @@ const user = (await pg.query(
 const acc = Object.fromEntries(
   (await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`, [biz])).rows.map((r) => [r.name, r.id]),
 );
-check("a new business is seeded with 11 accounts", Object.keys(acc).length === 11, `${Object.keys(acc).length}`);
+// Eleven seeded here, plus the Cash in Hand account every business gets (v28).
+check("a new business has its 11 seeded accounts plus Cash in Hand", Object.keys(acc).length === 12, `${Object.keys(acc).length}`);
 
 const ctx = { businessId: biz, user: { id: user, role: "admin" } };
 const mkRes = () => {
@@ -221,7 +227,7 @@ check(
 // ── The reconciliation ─────────────────────────────────────────────────────
 const balances = (await pg.query(
   `SELECT name, balance FROM v_account_balance WHERE business_id=$1 ORDER BY name`, [biz])).rows;
-const sumBal = balances.reduce((s, r) => s + Number(r.balance), 0);
+const sumBal = balances.reduce((s, r) => s + Number(r.balance), 0) - FUND;
 
 const flow = (await pg.query(
   `SELECT COALESCE(SUM(amount) FILTER (WHERE direction='in'),0) tin,
@@ -240,7 +246,7 @@ check("the total held matches a hand calculation", m2(sumBal) === m2(expectedHel
 // ── The API a person actually sees ─────────────────────────────────────────
 const listed = await call(accountC.getAccounts, { query: {} });
 const apiTotal = listed.body.data.summary.total_balance;
-check("the accounts screen agrees with the database", m2(apiTotal) === m2(sumBal), `API ${m2(apiTotal)} vs DB ${m2(sumBal)}`);
+check("the accounts screen agrees with the database", m2(apiTotal - FUND) === m2(sumBal), `API ${m2(apiTotal - FUND)} vs DB ${m2(sumBal)}`);
 
 const ledger = await call(accountC.getLedger, { query: { limit: 200 } });
 const rows = ledger.body.data.movements;
@@ -252,8 +258,8 @@ check("every movement names its account or is flagged unassigned",
 
 const led = ledger.body.data.totals;
 check("ledger totals match the balances",
-  m2(Number(led.total_in) - Number(led.total_out)) === m2(sumBal),
-  `ledger net ${m2(Number(led.total_in) - Number(led.total_out))} vs balances ${m2(sumBal)}`);
+  m2(Number(led.total_in) - Number(led.total_out)) === m2(sumBal + FUND),
+  `ledger net ${m2(Number(led.total_in) - Number(led.total_out))} vs balances ${m2(sumBal + FUND)}`);
 
 // Filtering by one account must reproduce that account's own balance
 const evcLedger = await call(accountC.getLedger, { query: { account_id: acc["EVC"], limit: 200 } });

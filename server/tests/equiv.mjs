@@ -38,7 +38,14 @@ const fresh = await shape(await build(["schema.sql"]));
 const upgraded = await shape(
   await build([
     "schema.sql",
-    ...Array.from({ length: 14 }, (_, i) => `migration_v${i + 10}.sql`),
+    // Every migration from v10 on, found on disk so a new one is never
+    // forgotten here.
+    ...fs
+      .readdirSync("cfg")
+      .map((f) => /^migration_v(\d+)\.sql$/.exec(f))
+      .filter((m) => m && Number(m[1]) >= 10)
+      .sort((a, b) => Number(a[1]) - Number(b[1]))
+      .map((m) => m[0]),
   ]),
 );
 

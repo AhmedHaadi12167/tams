@@ -2,10 +2,12 @@
 // the legacy "method" text that still defaults to "cash".
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import { seedAccounts } from "./seed.mjs";
 const require=createRequire(import.meta.url);
-const SERVER="/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass=[],fail=[];const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
 
 const pg=await PGlite.create();
@@ -33,6 +35,9 @@ const mkRes=()=>{const r={code:200,body:null};r.status=c=>(r.code=c,r);r.json=b=
 const call=async(fn,req)=>{const res=mkRes();let err=null;await fn({...ctx,...req},res,e=>err=e);if(err)throw err;return res;};
 
 const AMAL = A["Amal Bank"];
+// Accounts can't go below zero, so Amal Bank starts with money to spend.
+// The ledger checks below count movements only, so this changes none of them.
+await pg.query(`UPDATE payment_accounts SET opening_balance=1000 WHERE id=$1`,[AMAL]);
 
 // Every kind of payment, all into or out of Amal Bank.
 const t=await call(ticketC.createTicket,{body:{ticket_type:"LOCAL",passenger_name:"AHEMD AWIL ABHSIR",contact_number:"061",

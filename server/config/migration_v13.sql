@@ -22,6 +22,8 @@ BEGIN;
 -- read it dropped with it. Nothing is lost: a generated column stores no
 -- independent data, and every existing row has a weight and a rate, so the
 -- rebuilt values come out identical.
+-- v29's journal reads this column too; it is rebuilt by migration_v29.
+DROP VIEW IF EXISTS v_journal;
 DROP VIEW IF EXISTS v_receivables;
 DROP VIEW IF EXISTS v_monthly_income;
 

@@ -113,16 +113,19 @@ const getAccounts = async (req, res, next) => {
       return response.error(res, MIGRATION_MSG, 503);
 
     const invoiceCols = await presentInvoiceColumns();
+    const cashFlag = (await hasColumn("payment_accounts", "is_cash_in_hand"))
+      ? ", a.is_cash_in_hand"
+      : "";
 
     const [accountsRes, unassignedRes, tradeRes] = await Promise.all([
       query(
-        `SELECT b.*, a.notes, a.opening_date${invoiceCols
+        `SELECT b.*, a.notes, a.opening_date${cashFlag}${invoiceCols
           .map((c) => `, a.${c}`)
           .join("")}
            FROM v_account_balance b
            JOIN payment_accounts a ON a.id = b.account_id
           WHERE b.business_id = $1
-          ORDER BY a.is_active DESC, b.sort_order, b.name`,
+          ORDER BY a.is_active DESC${cashFlag ? ", a.is_cash_in_hand DESC" : ""}, b.sort_order, b.name`,
         [req.businessId],
       ),
       // Money recorded before accounts existed, or where the old text label
@@ -364,6 +367,15 @@ const createAccount = async (req, res, next) => {
 
     const { name, kind, opening_balance, opening_date, notes } = req.body;
 
+    // Every business has exactly one Cash in Hand account, created with the
+    // business. A second cash account would split "cash in hand" in two.
+    if (kind === "cash")
+      return response.error(
+        res,
+        "Your business already has a Cash in Hand account. Physical cash belongs there — add a bank, mobile-money or merchant account instead.",
+        400,
+      );
+
     const cols = [
       "business_id",
       "name",
@@ -410,6 +422,34 @@ const updateAccount = async (req, res, next) => {
     const { name, kind, opening_balance, opening_date, notes, is_active } =
       req.body;
 
+    // Cash in Hand stays a cash account and stays active; no other account
+    // can become a second cash account.
+    const target = await query(
+      `SELECT kind, ${(await hasColumn("payment_accounts", "is_cash_in_hand")) ? "is_cash_in_hand" : "FALSE AS is_cash_in_hand"}
+         FROM payment_accounts WHERE id = $1 AND business_id = $2`,
+      [uuidOrThrow(req.params.id, "account id"), req.businessId],
+    );
+    if (target.rows.length === 0)
+      return response.notFound(res, "Account not found");
+    const isCashInHand = target.rows[0].is_cash_in_hand === true;
+    if (isCashInHand && is_active === false)
+      return response.error(
+        res,
+        "Cash in Hand can't be deactivated — every business keeps one.",
+        400,
+      );
+    if (!isCashInHand && kind === "cash" && target.rows[0].kind !== "cash")
+      return response.error(
+        res,
+        "Only the Cash in Hand account can be a cash account. Choose bank, mobile, merchant or other.",
+        400,
+      );
+    const effectiveKind = isCashInHand
+      ? "cash"
+      : KINDS.includes(kind)
+        ? kind
+        : "bank";
+
     const sets = [];
     const vals = [];
     const p = (v) => `$${vals.push(v)}`;
@@ -419,7 +459,7 @@ const updateAccount = async (req, res, next) => {
     // up meaning the account id in one branch and the business id in the
     // other.
     sets.push(`name = ${p(String(name).trim())}`);
-    sets.push(`kind = ${p(KINDS.includes(kind) ? kind : "bank")}`);
+    sets.push(`kind = ${p(effectiveKind)}`);
     sets.push(`opening_balance = ${p(round2(opening_balance))}`);
     sets.push(`opening_date = ${p(opening_date || null)}`);
     sets.push(`notes = ${p(notes || null)}`);
@@ -460,6 +500,19 @@ const deleteAccount = async (req, res, next) => {
       return response.error(res, MIGRATION_MSG, 503);
 
     const id = uuidOrThrow(req.params.id, "account id");
+
+    if (await hasColumn("payment_accounts", "is_cash_in_hand")) {
+      const cih = await query(
+        `SELECT is_cash_in_hand FROM payment_accounts WHERE id = $1 AND business_id = $2`,
+        [id, req.businessId],
+      );
+      if (cih.rows[0]?.is_cash_in_hand)
+        return response.error(
+          res,
+          "Cash in Hand can't be deleted — every business keeps one.",
+          409,
+        );
+    }
 
     const used = await query(
       `SELECT COUNT(*)::INT AS n FROM v_cash_ledger

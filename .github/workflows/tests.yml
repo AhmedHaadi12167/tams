@@ -1,0 +1,28 @@
+# Runs the money tests on every push and pull request.
+#
+# They use PGlite (PostgreSQL compiled to WebAssembly), so no database
+# service is needed — the real schema, migrations and controllers run
+# in-process. A red cross here means the books would not add up.
+name: Money tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm test
+        env:
+          APP_TIMEZONE: Africa/Mogadishu

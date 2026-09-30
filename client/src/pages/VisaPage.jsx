@@ -23,11 +23,13 @@ import {
   Eye,
   Wallet,
   AlertTriangle,
+  Ban,
 } from "lucide-react";
 import { fmtDate, toDateInput } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 import { PaySupplierModal, supplierBalance } from "../components/PaySupplier";
 import ActionsMenu from "../components/ActionsMenu";
+import CancelServiceModal from "../components/CancelServiceModal";
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -189,7 +191,7 @@ function VisaModal({ open, onClose, onSaved, initial }) {
             {editing && <Input label="Decision date" type="date" value={form.decision_date} onChange={set("decision_date")} />}
             <Input label="Visa expiry" type="date" value={form.expiry_date} onChange={set("expiry_date")} />
             <Select label="Status" value={form.status} onChange={set("status")}>
-              {STATUSES.map((s) => (
+              {STATUSES.filter((s) => s.value !== "cancelled").map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </Select>
@@ -341,6 +343,8 @@ export default function VisaPage() {
   const { hasRole } = useAuth();
   const canWrite = hasRole("admin", "agent");
   const canDelete = hasRole("admin");
+  const canCancel = hasRole("admin", "accountant", "super_admin");
+  const [cancelling, setCancelling] = useState(null);
 
   const [data, setData] = useState(null);
   const [meta, setMeta] = useState({ total: 0, totalPages: 1 });
@@ -491,14 +495,17 @@ export default function VisaPage() {
                             <ActionsMenu
                               items={[
                                 { label: "View", icon: Eye, onClick: () => setView(v) },
-                                balance > 0
+                                balance > 0 && v.status !== "cancelled"
                                   ? { label: "Collect payment", icon: Banknote, onClick: () => setCollect(v) }
                                   : null,
-                                supplierBalance("visa", v) > 0
+                                supplierBalance("visa", v) > 0 && v.status !== "cancelled"
                                   ? { label: "Pay embassy fee", icon: Banknote, onClick: () => setPaySupplier(v) }
                                   : null,
-                                canWrite
+                                canWrite && v.status !== "cancelled"
                                   ? { label: "Edit", icon: Pencil, onClick: () => setModal({ open: true, initial: v }) }
+                                  : null,
+                                canCancel && v.status !== "cancelled"
+                                  ? { label: "Cancel & refund", icon: Ban, danger: true, onClick: () => setCancelling(v) }
                                   : null,
                                 canDelete
                                   ? { label: "Delete", icon: Trash2, danger: true, onClick: () => remove(v) }
@@ -527,6 +534,9 @@ export default function VisaPage() {
         onSaved={load}
       />
       <CollectModal open={Boolean(collect)} visa={collect} onClose={() => setCollect(null)} onDone={load} />
+      {cancelling && (
+        <CancelServiceModal kind="visa" record={cancelling} onClose={() => setCancelling(null)} onDone={load} />
+      )}
 
       <Modal open={Boolean(view)} onClose={() => setView(null)} title="Visa application">
         {view && (

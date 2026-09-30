@@ -12,11 +12,13 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import { seedAccounts } from "./seed.mjs";
 
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const pass = [];
 const fail = [];
@@ -78,6 +80,8 @@ const expenseC = require(`${SERVER}/controllers/expenseController.js`);
 
 const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.c') RETURNING id`)).rows[0].id;
 await seedAccounts(pg, biz);
+// Accounts can't go below zero; the ones money is paid out of start funded.
+await pg.query(`UPDATE payment_accounts SET opening_balance = 1000 WHERE business_id = $1 AND name IN ('Premier Bank', 'Dahabshiil Bank', 'SOMBANK')`, [biz]);
 const user = (await pg.query(
   `INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`, [biz])).rows[0].id;
 const A = Object.fromEntries(

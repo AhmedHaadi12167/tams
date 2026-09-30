@@ -10,12 +10,13 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import path from "path";
 import { seedAccounts } from "./seed.mjs";
 
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const pass = [];
 const fail = [];
@@ -76,6 +77,8 @@ const financialsC = require(`${SERVER}/controllers/financialsController.js`);
 
 const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.c') RETURNING id`)).rows[0].id;
 await seedAccounts(pg, biz);
+// Accounts can't go below zero, so the bank that pays airlines starts funded.
+await pg.query(`UPDATE payment_accounts SET opening_balance = 10000 WHERE business_id = $1 AND name = 'Premier Bank'`, [biz]);
 const user = (await pg.query(
   `INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`, [biz])).rows[0].id;
 const A = Object.fromEntries(
@@ -105,7 +108,7 @@ await call(airlineC.payAirline, {
 });
 
 const before = Number((await pg.query(
-  `SELECT COALESCE(SUM(balance),0) s FROM v_account_balance WHERE business_id=$1`, [biz])).rows[0].s);
+  `SELECT COALESCE(SUM(balance),0) - 10000 s FROM v_account_balance WHERE business_id=$1`, [biz])).rows[0].s);
 ck("before cancelling, accounts hold 100", m2(before) === "100.00", m2(before));
 
 // ── Cancel: refund 350, keep 150; airline returns 300 ──────────────────────
@@ -133,6 +136,9 @@ ck("payment history matches the ticket", m2(rows) === m2(tk.amount_paid), `${m2(
 // ── Balances ───────────────────────────────────────────────────────────────
 const bal = Object.fromEntries((await pg.query(
   `SELECT name, balance FROM v_account_balance WHERE business_id=$1`, [biz])).rows.map(r => [r.name, Number(r.balance)]));
+// Premier Bank was funded with 10,000 so it could pay the airline; count
+// only this test's movements.
+bal["Premier Bank"] -= 10000;
 ck("Cash: 500 in, 350 refunded out = 150", m2(bal["Cash"]) === "150.00", m2(bal["Cash"]));
 ck("Premier Bank: 400 out, 300 back = −100", m2(bal["Premier Bank"]) === "-100.00", m2(bal["Premier Bank"]));
 
@@ -175,12 +181,12 @@ try {
   await call(ticketC.cancelTicket, { params: { id: ticketId }, body: { refund_amount: 10 } });
 } catch { blocked = true; }
 const second = await call(ticketC.cancelTicket, { params: { id: ticketId }, body: { refund_amount: 10 } }).catch(() => ({ code: 400 }));
-ck("cancelling twice is refused", blocked || second.code === 400);
+ck("cancelling twice is refused", blocked || second.code >= 400);
 
 const acc = await call(accountC.getAccounts, { query: {} });
 ck("accounts screen agrees with the database",
-   m2(acc.body.data.summary.total_balance) === m2(after),
-   `${m2(acc.body.data.summary.total_balance)} vs ${m2(after)}`);
+   m2(acc.body.data.summary.total_balance - 10000) === m2(after),
+   `${m2(acc.body.data.summary.total_balance - 10000)} vs ${m2(after)}`);
 
 console.log(`\nPASS (${pass.length})`);
 pass.forEach(p => console.log("  ✓ " + p));

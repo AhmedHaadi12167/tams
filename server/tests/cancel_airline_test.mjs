@@ -1,10 +1,12 @@
 // Reproduce Ahmed's −$150 and prove it nets to zero, with the loss visible.
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import { seedAccounts } from "./seed.mjs";
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass=[],fail=[]; const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
 const m2=v=>Number(v).toFixed(2);
 
@@ -26,6 +28,8 @@ const biz=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.
 await seedAccounts(pg, biz);
 const user=(await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`,[biz])).rows[0].id;
 const A=Object.fromEntries((await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`,[biz])).rows.map(r=>[r.name,r.id]));
+// Accounts can't go below zero, so the bank that pays the airline starts funded.
+await pg.query(`UPDATE payment_accounts SET opening_balance=1000 WHERE id=$1`,[A["Premier Bank"]]);
 const ctx={businessId:biz,user:{id:user,role:"admin"}};
 const mkRes=()=>{const r={code:200,body:null};r.status=c=>(r.code=c,r);r.json=b=>(r.body=b,r);return r;};
 const call=async(fn,req)=>{const res=mkRes();let err=null;await fn({...ctx,...req},res,e=>err=e);if(err)throw err;return res;};
@@ -40,9 +44,10 @@ await call(airlineC.payAirline,{params:{id:airlineId},body:{amount:150,account_i
 const b1=(await pg.query(`SELECT balance FROM v_airline_account WHERE airline_id=$1`,[airlineId])).rows[0].balance;
 ck("before cancelling, the airline is square", m2(b1)==="0.00", m2(b1));
 
-// Cancel: refund the customer 200, airline refunds nothing.
+// Cancel with the airline refunding nothing. The refund can't exceed what
+// the ticket still funds: 200 collected - 150 paid to the airline = 50.
 await call(ticketC.cancelTicket,{params:{id:t.body.data.id},
-  body:{refund_amount:200,airline_refund:0,account_id:A["Cash"]}});
+  body:{refund_amount:50,airline_refund:0,account_id:A["Cash"]}});
 
 const b2=(await pg.query(`SELECT balance, total_cost, total_paid FROM v_airline_account WHERE airline_id=$1`,[airlineId])).rows[0];
 ck("airline balance is NOT negative after a cancellation",
@@ -51,8 +56,8 @@ ck("airline balance is NOT negative after a cancellation",
 const pl=(await call(finC.getProfitLoss,{query:{}})).body.data;
 ck("cancelled sale left revenue", m2(pl.revenue.ticket_sales)==="0.00", m2(pl.revenue.ticket_sales));
 ck("the 150 lost to the airline is shown", m2(pl.cancellations.unrecovered_cost)==="150.00", m2(pl.cancellations.unrecovered_cost));
-ck("no fee was kept (full refund)", m2(pl.cancellations.fees_kept)==="0.00", m2(pl.cancellations.fees_kept));
-ck("net profit reflects the real loss", m2(pl.net_profit)==="-150.00", m2(pl.net_profit));
+ck("the 150 kept covers the airline loss", m2(pl.cancellations.fees_kept)==="150.00", m2(pl.cancellations.fees_kept));
+ck("so the cancellation nets to zero profit", m2(pl.net_profit)==="0.00", m2(pl.net_profit));
 
 // And a partial airline refund nets to zero too.
 const t2=await call(ticketC.createTicket,{body:{ticket_type:"LOCAL",passenger_name:"P2",contact_number:"062",
@@ -60,7 +65,7 @@ const t2=await call(ticketC.createTicket,{body:{ticket_type:"LOCAL",passenger_na
   cost_price:100,selling_price:150,amount_paid:150,account_id:A["Cash"]}});
 await call(airlineC.payAirline,{params:{id:airlineId},body:{amount:100,account_id:A["Premier Bank"]}});
 await call(ticketC.cancelTicket,{params:{id:t2.body.data.id},
-  body:{refund_amount:150,airline_refund:60,account_id:A["Cash"],airline_account_id:A["Premier Bank"]}});
+  body:{refund_amount:110,airline_refund:60,account_id:A["Cash"],airline_account_id:A["Premier Bank"]}});
 const b3=(await pg.query(`SELECT balance FROM v_airline_account WHERE airline_id=$1`,[airlineId])).rows[0].balance;
 ck("partial airline refund also nets to zero", m2(b3)==="0.00", m2(b3));
 

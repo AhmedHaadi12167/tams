@@ -58,6 +58,8 @@ $carry$;
 
 -- One column every report reads, so "what did we make on this shipment" has
 -- exactly one answer however it was priced.
+-- v29's journal reads this column too; it is rebuilt by migration_v29.
+DROP VIEW IF EXISTS v_journal;
 ALTER TABLE cargo_shipments DROP COLUMN IF EXISTS profit_total;
 ALTER TABLE cargo_shipments ADD COLUMN profit_total NUMERIC(12,2)
     GENERATED ALWAYS AS (

@@ -731,53 +731,61 @@ const addDeposit = async (req, res, next) => {
     const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
     if (!amount) return response.error(res, "Enter an amount", 400);
 
-    const customer = await query(
-      `SELECT id, name FROM customers WHERE id = $1 AND business_id = $2`,
-      [uuidOrThrow(req.params.id, "customer id"), req.businessId],
-    );
-    if (customer.rows.length === 0)
-      return response.notFound(res, "Customer not found");
-
-    // Giving money back can't exceed what is being held, or the customer
-    // ends up owing the agency a deposit, which is not a thing.
-    if (amount < 0) {
-      const held = await query(
-        `SELECT COALESCE(SUM(amount), 0) AS total
-           FROM customer_deposits WHERE business_id = $1 AND customer_id = $2`,
-        [req.businessId, req.params.id],
+    // Locked, and checked against what is still UNSPENT. The old check
+    // compared a refund with everything ever deposited, so money already
+    // spent on bookings could be handed back a second time.
+    const outcome = await withTransaction(async (client) => {
+      const found = await client.query(
+        `SELECT id, name FROM customers WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [uuidOrThrow(req.params.id, "customer id"), req.businessId],
       );
-      const balance = Math.round(Number(held.rows[0].total) * 100) / 100;
-      if (Math.abs(amount) > balance + 0.001)
-        return response.error(
-          res,
-          `Only $${balance.toFixed(2)} is being held for ${customer.rows[0].name}.`,
-          400,
+      if (found.rows.length === 0) return { notFound: true };
+
+      if (amount < 0) {
+        const balance = await depositBalance(
+          req.businessId,
+          req.params.id,
+          client,
         );
-    }
+        if (Math.abs(amount) > balance + 0.001)
+          return {
+            error: `Only $${balance.toFixed(2)} is being held for ${found.rows[0].name}.`,
+            status: 400,
+          };
+      }
 
-    const accountId = await requireAccount(
-      req.body,
-      req.businessId,
-      null,
-      amount > 0 ? "deposit" : "deposit refund",
-    );
-
-    const result = await query(
-      `INSERT INTO customer_deposits
-         (business_id, customer_id, amount, account_id, collected_by, method, reference, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       RETURNING *`,
-      [
+      const accountId = await requireAccount(
+        req.body,
         req.businessId,
-        req.params.id,
-        amount,
-        accountId,
-        req.user.id,
-        (req.body.method || "cash").trim() || "cash",
-        req.body.reference || null,
-        req.body.note || null,
-      ],
-    );
+        client,
+        amount > 0 ? "deposit" : "deposit refund",
+      );
+
+      const inserted = await client.query(
+        `INSERT INTO customer_deposits
+           (business_id, customer_id, amount, account_id, collected_by, method, reference, note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING *`,
+        [
+          req.businessId,
+          req.params.id,
+          amount,
+          accountId,
+          req.user.id,
+          (req.body.method || "cash").trim() || "cash",
+          req.body.reference || null,
+          req.body.note || null,
+        ],
+      );
+      return { row: inserted.rows[0], name: found.rows[0].name };
+    });
+
+    if (outcome.notFound) return response.notFound(res, "Customer not found");
+    if (outcome.error)
+      return response.error(res, outcome.error, outcome.status);
+    const result = { rows: [outcome.row] };
+    const customer = { rows: [{ name: outcome.name }] };
 
     return response.created(
       res,
@@ -1284,6 +1292,30 @@ const updateCustomer = async (req, res, next) => {
  */
 const deleteCustomer = async (req, res, next) => {
   try {
+    // A customer with money history is part of the books: their deposits
+    // are in the bank and their bookings are sales. Deleting them used to
+    // delete their deposits too, which took that cash out of the accounts.
+    const id = uuidOrThrow(req.params.id, "customer id");
+    const history = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM customer_deposits WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM deposit_applications WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM opening_balance_items WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM tickets
+           WHERE customer_id = $1 OR booked_by_customer_id = $1)
+       + (SELECT COUNT(*) FROM booking_groups WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM visa_applications WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM packages WHERE customer_id = $1)
+       + (SELECT COUNT(*) FROM cargo_shipments WHERE customer_id = $1) AS n`,
+      [id],
+    );
+    if (Number(history.rows[0].n) > 0)
+      return response.error(
+        res,
+        "This customer has bookings, deposits or balances on file and can't be deleted. Their history is part of your accounts.",
+        409,
+      );
+
     const result = await query(
       `DELETE FROM customers WHERE id = $1 AND business_id = $2 RETURNING id`,
       [req.params.id, req.businessId],

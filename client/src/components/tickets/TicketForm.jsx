@@ -617,17 +617,9 @@ export default function TicketForm({
           <option value="one_way">One way</option>
           <option value="round_trip">Round trip (Go &amp; Back)</option>
         </Select>
-        {mode === "edit" && (
-          <Select
-            label="Status"
-            value={form.status || "active"}
-            onChange={set("status")}
-          >
-            <option value="active">Active</option>
-            <option value="cancelled">Cancelled</option>
-            <option value="refunded">Refunded</option>
-          </Select>
-        )}
+        {/* No status here: cancelling moves money (refund, fee, tax,
+            airline return), so it is done with Cancel & refund on the
+            ticket, which records every movement. */}
       </div>
 
       {/* ── Travel documents (international only) ──

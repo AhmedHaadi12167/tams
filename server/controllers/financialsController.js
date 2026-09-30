@@ -21,6 +21,7 @@ const {
   cashMovement,
   cashBySource,
   cashDaily,
+  TZ,
 } = require("../services/cashLedger");
 const { hasTable } = require("../services/schemaInfo");
 
@@ -87,6 +88,15 @@ const getProfitLoss = async (req, res, next) => {
     const vRange = dateRange("v.created_at::DATE", from_date, to_date, 2);
     const pRange = dateRange("pk.created_at::DATE", from_date, to_date, 2);
 
+    const sRange = (alias) =>
+      dateRange(`${alias}.created_at::DATE`, from_date, to_date, 2);
+    const fRange = dateRange(
+      `(tr.transferred_at AT TIME ZONE '${TZ}')::DATE`,
+      from_date,
+      to_date,
+      2,
+    );
+
     const [
       ticketRes,
       cargoRes,
@@ -95,6 +105,8 @@ const getProfitLoss = async (req, res, next) => {
       trendRes,
       visaRes,
       packageRes,
+      serviceCancelRes,
+      feeRes,
     ] = await Promise.all([
       query(
         `SELECT
@@ -107,7 +119,17 @@ const getProfitLoss = async (req, res, next) => {
              -- on it was still earned. Dropping the row entirely would lose
              -- that income and leave the accounts holding money the profit
              -- and loss could not explain.
-             COALESCE(SUM(t.cancellation_fee) FILTER (WHERE t.status = 'cancelled'), 0)  AS cancellation_fees,
+             -- What the customer's payments net to, less the tax still owed
+             -- on it. Derived here rather than read from cancellation_fee so
+             -- the three parts below always add up to each ticket's revenue.
+             COALESCE(SUM(GREATEST(COALESCE(t.amount_paid, 0)
+                          - GREATEST(COALESCE(t.tax, 0) - COALESCE(t.tax_refunded, 0), 0), 0))
+                      FILTER (WHERE t.status = 'cancelled'), 0)                  AS cancellation_fees,
+             -- Tax still owed on a cancelled ticket that the customer never
+             -- paid: the agency pays it out of its own pocket.
+             COALESCE(SUM(GREATEST(GREATEST(COALESCE(t.tax, 0) - COALESCE(t.tax_refunded, 0), 0)
+                          - COALESCE(t.amount_paid, 0), 0))
+                      FILTER (WHERE t.status = 'cancelled'), 0)                  AS tax_shortfall,
              COUNT(*) FILTER (WHERE t.status = 'cancelled')                      AS cancelled_count,
              -- What the agency paid the airline and never got back on a
              -- cancelled ticket. The sale disappears from revenue, so if this
@@ -205,6 +227,34 @@ const getProfitLoss = async (req, res, next) => {
         [businessId, ...pRange.params],
         { package_count: 0, gross_sales: 0, cost_of_sales: 0, collected: 0 },
       ),
+      // Cancelled visas, packages and shipments: what the customer's payments
+      // net to, less what was paid to the supplier and not returned.
+      query(
+        `SELECT
+           (SELECT COALESCE(SUM(COALESCE(v.amount_paid, 0) - COALESCE(v.supplier_paid, 0)), 0)
+              FROM visa_applications v
+             WHERE v.business_id = $1 AND v.status = 'cancelled'${sRange("v").clause})
+         + (SELECT COALESCE(SUM(COALESCE(pk.amount_paid, 0) - COALESCE(pk.supplier_paid, 0)), 0)
+              FROM packages pk
+             WHERE pk.business_id = $1 AND pk.status = 'cancelled'${sRange("pk").clause})
+         + (SELECT COALESCE(SUM(COALESCE(cs.amount_paid, 0) - COALESCE(cs.supplier_paid, 0)), 0)
+              FROM cargo_shipments cs
+             WHERE cs.business_id = $1 AND cs.cargo_status = 'cancelled'${sRange("cs").clause}) AS net,
+           (SELECT COUNT(*) FROM visa_applications v
+             WHERE v.business_id = $1 AND v.status = 'cancelled'${sRange("v").clause})
+         + (SELECT COUNT(*) FROM packages pk
+             WHERE pk.business_id = $1 AND pk.status = 'cancelled'${sRange("pk").clause})
+         + (SELECT COUNT(*) FROM cargo_shipments cs
+             WHERE cs.business_id = $1 AND cs.cargo_status = 'cancelled'${sRange("cs").clause}) AS count`,
+        [businessId, ...sRange("v").params],
+      ),
+      // Fees charged on transfers between the agency's own accounts.
+      query(
+        `SELECT COALESCE(SUM(COALESCE(tr.fee, 0)), 0) AS total
+           FROM account_transfers tr
+          WHERE tr.business_id = $1${fRange.clause}`,
+        [businessId, ...fRange.params],
+      ),
     ]);
 
     const t = ticketRes.rows[0];
@@ -228,7 +278,8 @@ const getProfitLoss = async (req, res, next) => {
     const grossProfit = round2(grossSales - costOfSales);
     const commission = round2(t.agent_commission);
     const recordedExpenses = round2(e.total_expenses);
-    const operatingCosts = round2(commission + recordedExpenses);
+    const bankFees = round2(feeRes.rows[0].total);
+    const operatingCosts = round2(commission + recordedExpenses + bankFees);
 
     // Fees kept on cancelled bookings. Not a sale — there is no journey and
     // no cost of sale against it — but money genuinely earned, so it belongs
@@ -249,7 +300,11 @@ const getProfitLoss = async (req, res, next) => {
     // of those tickets — the Tickets page and the income statement cannot
     // drift apart. The written-off balances are shown beside it but not
     // subtracted; see the query above.
-    const cancellationNet = round2(cancellationFees - unrecoveredCost);
+    const taxShortfall = round2(t.tax_shortfall);
+    const serviceCancellations = round2(serviceCancelRes.rows[0].net);
+    const cancellationNet = round2(
+      cancellationFees - unrecoveredCost - taxShortfall + serviceCancellations,
+    );
 
     const netProfit = round2(grossProfit + cancellationNet - operatingCosts);
 
@@ -280,6 +335,9 @@ const getProfitLoss = async (req, res, next) => {
         cancelled_count: parseInt(t.cancelled_count),
         fees_kept: cancellationFees,
         unrecovered_cost: unrecoveredCost,
+        tax_shortfall: taxShortfall,
+        other_services: serviceCancellations,
+        other_services_count: parseInt(serviceCancelRes.rows[0].count),
         written_off: writtenOff,
         net: cancellationNet,
       },
@@ -288,6 +346,7 @@ const getProfitLoss = async (req, res, next) => {
       operating_costs: {
         agent_commission: commission,
         recorded_expenses: recordedExpenses,
+        bank_fees: bankFees,
         by_category: categoryRes.rows.map((r) => ({
           category: r.category,
           amount: round2(r.amount),
@@ -324,130 +383,176 @@ const getProfitLoss = async (req, res, next) => {
 };
 
 // ── GET /api/financials/balance-sheet ────────────────────────────────────────
+//
+// Built so that it balances by construction, on any date.
+//
+// Every figure is read from the same events the Accounts page reads — the
+// payment rows, not the running totals on the booking — and every one is cut
+// off at the same moment: the end of `as_of` on the agency's own calendar.
+// Cash is therefore what the accounts held THAT night, receivables are what
+// was owed THAT night, and the profit behind retained earnings is the
+// profit earned up to that night. If one of them were taken "as of today"
+// while the others were historical (as cash used to be), the sheet could not
+// balance and would not mean anything.
+//
+// For each kind of booking:
+//   live       → sale - cost is profit; unpaid sale is a receivable, overpaid
+//                is money owed back to the customer; unpaid cost is owed to
+//                the airline / supplier, overpaid cost is a credit with them
+//   cancelled  → what the customer's payments net to, less what the
+//                supplier kept (and, for tickets, less tax still owed) is the
+//                result of the cancellation; nothing is owed either way
+// Tax on tickets is owed to the government, not the airline, and is shown as
+// its own liability. Transfer fees are an expense.
 
 const getBalanceSheet = async (req, res, next) => {
   try {
     if (!requireBusiness(req, res)) return;
     const businessId = req.businessId;
-    const { as_of } = req.query;
+    const asOf = req.query.as_of || null;
+    if (asOf && !/^\d{4}-\d{2}-\d{2}$/.test(String(asOf)))
+      return response.error(res, "as_of must be a date (YYYY-MM-DD)", 400);
 
-    const asOfClause = as_of ? ` AND created_at::DATE <= $2` : "";
-    const asOfExpClause = as_of ? ` AND expense_date <= $2` : "";
-    const p = as_of ? [businessId, as_of] : [businessId];
+    const p = asOf ? [businessId, asOf] : [businessId];
+    // A timestamp, seen as a date on the agency's calendar, on or before as_of.
+    const upto = (col) =>
+      asOf ? ` AND (${col} AT TIME ZONE '${TZ}')::DATE <= $2::DATE` : "";
+    // A plain DATE column on or before as_of.
+    const uptoDate = (col) => (asOf ? ` AND ${col} <= $2::DATE` : "");
+    // Was this record cancelled by the end of as_of?
+    const cancelledBy = (statusExpr, col) =>
+      asOf
+        ? `(${statusExpr} = 'cancelled' AND (COALESCE(${col}, created_at) AT TIME ZONE '${TZ}')::DATE <= $2::DATE)`
+        : `(${statusExpr} = 'cancelled')`;
+
+    // Payment rows per record, cut off at as_of. Deposit-funded rows count:
+    // they settle the customer's debt even though no cash moved.
+    const paidSub = (table, fk) =>
+      `(SELECT ${fk} AS id, SUM(amount) AS paid FROM ${table}
+         WHERE business_id = $1${upto("created_at")} GROUP BY ${fk})`;
 
     const [
       bizRes,
       ticketRes,
-      cargoRes,
-      expenseRes,
-      visaRes,
-      packageRes,
-      airlinePaidRes,
+      unallocatedAirlineRes,
+      serviceRes,
       agentPaidRes,
-      supplierPaidRes,
+      taxPaidRes,
       depositRes,
-      depositUsedRes,
+      expenseRes,
+      feeRes,
       openingItemsRes,
+      accountsRes,
+      looseRes,
     ] = await Promise.all([
       query(
         `SELECT name, opening_cash, fixed_assets, liabilities, owner_capital, financials_start
-         FROM businesses WHERE id = $1`,
+           FROM businesses WHERE id = $1`,
         [businessId],
       ),
       query(
-        `SELECT
-           COALESCE(SUM(selling_price) FILTER (WHERE status <> 'cancelled'), 0) AS gross_sales,
-           COALESCE(SUM(cost_price) FILTER (WHERE status <> 'cancelled'), 0) AS cost_of_sales,
-           COALESCE(SUM(agent_commission) FILTER (WHERE status <> 'cancelled'), 0) AS commission,
-           COALESCE(SUM(amount_paid) FILTER (WHERE status <> 'cancelled'), 0) AS collected,
-             COALESCE(SUM(cancellation_fee) FILTER (WHERE status = 'cancelled'), 0) AS cancellation_fees,
-             COALESCE(SUM(GREATEST(COALESCE(airline_paid, 0), 0))
-                      FILTER (WHERE status = 'cancelled'), 0) AS unrecovered_cost
-         FROM tickets
-         WHERE business_id = $1${asOfClause}`,
+        `WITH t AS (
+           SELECT t.*,
+                  ${cancelledBy("t.status::TEXT", "t.cancelled_at")} AS is_cancelled,
+                  COALESCE(pay.paid, 0) AS paid_rows,
+                  COALESCE(ap.paid, 0)  AS airline_rows
+             FROM tickets t
+             LEFT JOIN ${paidSub("ticket_payments", "ticket_id")} pay ON pay.id = t.id
+             LEFT JOIN (SELECT ticket_id AS id, SUM(amount) AS paid FROM airline_payments
+                         WHERE business_id = $1 AND ticket_id IS NOT NULL${upto("created_at")}
+                         GROUP BY ticket_id) ap ON ap.id = t.id
+            WHERE t.business_id = $1${upto("t.created_at")}
+         )
+         SELECT
+           COALESCE(SUM(selling_price) FILTER (WHERE NOT is_cancelled), 0) AS sales,
+           COALESCE(SUM(cost_price) FILTER (WHERE NOT is_cancelled), 0) AS cost,
+           COALESCE(SUM(COALESCE(agent_commission, 0)) FILTER (WHERE NOT is_cancelled), 0) AS commission,
+           COALESCE(SUM(GREATEST(selling_price - paid_rows, 0)) FILTER (WHERE NOT is_cancelled), 0) AS receivable,
+           COALESCE(SUM(GREATEST(paid_rows - selling_price, 0)) FILTER (WHERE NOT is_cancelled), 0) AS customer_credit,
+           COALESCE(SUM(GREATEST(cost_price - COALESCE(tax, 0), 0)) FILTER (WHERE NOT is_cancelled), 0) AS airline_cost,
+           COALESCE(SUM(airline_rows) FILTER (WHERE NOT is_cancelled), 0) AS airline_paid,
+           COALESCE(SUM(COALESCE(tax, 0)) FILTER (WHERE NOT is_cancelled), 0) AS tax_live,
+           COALESCE(SUM(paid_rows) FILTER (WHERE is_cancelled), 0) AS cancelled_kept,
+           COALESCE(SUM(GREATEST(COALESCE(tax, 0) - COALESCE(tax_refunded, 0), 0))
+                    FILTER (WHERE is_cancelled), 0) AS cancelled_tax,
+           COALESCE(SUM(airline_rows) FILTER (WHERE is_cancelled), 0) AS cancelled_airline
+         FROM t`,
+        p,
+      ),
+      query(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM airline_payments
+          WHERE business_id = $1 AND ticket_id IS NULL AND opening_item_id IS NULL${upto("created_at")}`,
+        p,
+      ),
+      // Visas, packages and cargo share one shape: a sale, a supplier cost,
+      // customer payments and supplier payments.
+      query(
+        `WITH s AS (
+           SELECT 'visa' AS kind, v.selling_price AS sales, COALESCE(v.cost_price, 0) AS cost,
+                  ${cancelledBy("v.status::TEXT", "v.cancelled_at")} AS is_cancelled,
+                  COALESCE(pay.paid, 0) AS paid_rows, COALESCE(sp.paid, 0) AS supplier_rows
+             FROM visa_applications v
+             LEFT JOIN ${paidSub("visa_payments", "visa_id")} pay ON pay.id = v.id
+             LEFT JOIN ${paidSub("supplier_payments", "visa_id")} sp ON sp.id = v.id
+            WHERE v.business_id = $1${upto("v.created_at")}
+           UNION ALL
+           SELECT 'package', pk.selling_price, COALESCE(pk.total_cost, 0),
+                  ${cancelledBy("pk.status::TEXT", "pk.cancelled_at")},
+                  COALESCE(pay.paid, 0), COALESCE(sp.paid, 0)
+             FROM packages pk
+             LEFT JOIN ${paidSub("package_payments", "package_id")} pay ON pay.id = pk.id
+             LEFT JOIN ${paidSub("supplier_payments", "package_id")} sp ON sp.id = pk.id
+            WHERE pk.business_id = $1${upto("pk.created_at")}
+           UNION ALL
+           SELECT 'cargo', cs.total_price,
+                  CASE WHEN cs.profit_total IS NULL THEN 0
+                       ELSE GREATEST(cs.total_price - cs.profit_total, 0) END,
+                  ${cancelledBy("cs.cargo_status::TEXT", "cs.cancelled_at")},
+                  COALESCE(pay.paid, 0), COALESCE(sp.paid, 0)
+             FROM cargo_shipments cs
+             LEFT JOIN ${paidSub("cargo_payments", "cargo_id")} pay ON pay.id = cs.id
+             LEFT JOIN ${paidSub("supplier_payments", "cargo_id")} sp ON sp.id = cs.id
+            WHERE cs.business_id = $1${upto("cs.created_at")}
+         )
+         SELECT kind,
+           COALESCE(SUM(sales) FILTER (WHERE NOT is_cancelled), 0) AS sales,
+           COALESCE(SUM(cost) FILTER (WHERE NOT is_cancelled), 0) AS cost,
+           COALESCE(SUM(GREATEST(sales - paid_rows, 0)) FILTER (WHERE NOT is_cancelled), 0) AS receivable,
+           COALESCE(SUM(GREATEST(paid_rows - sales, 0)) FILTER (WHERE NOT is_cancelled), 0) AS customer_credit,
+           COALESCE(SUM(GREATEST(cost - supplier_rows, 0)) FILTER (WHERE NOT is_cancelled), 0) AS supplier_payable,
+           COALESCE(SUM(GREATEST(supplier_rows - cost, 0)) FILTER (WHERE NOT is_cancelled), 0) AS supplier_credit,
+           COALESCE(SUM(paid_rows - supplier_rows) FILTER (WHERE is_cancelled), 0) AS cancelled_net
+         FROM s GROUP BY kind`,
+        p,
+      ),
+      query(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM agent_payments WHERE business_id = $1${upto("created_at")}`,
+        p,
+      ),
+      query(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM tax_payments WHERE business_id = $1${upto("paid_at")}`,
         p,
       ),
       query(
         `SELECT
-           COALESCE(SUM(total_price), 0) AS gross_sales,
-           COALESCE(SUM(amount_paid), 0) AS collected,
-           -- A shipment with a profit entered has a carrier cost behind it:
-           -- whatever the customer paid, less the margin the agency kept.
-           -- One with no profit entered is treated as pure margin, exactly
-           -- as every shipment was before this field existed.
-           COALESCE(SUM(GREATEST(total_price - profit_total, 0))
-                    FILTER (WHERE profit_total IS NOT NULL), 0) AS carrier_cost
-         FROM cargo_shipments
-         WHERE business_id = $1 AND cargo_status <> 'cancelled'${asOfClause}`,
+           COALESCE((SELECT SUM(amount) FROM customer_deposits
+                      WHERE business_id = $1${upto("created_at")}), 0)
+         - COALESCE((SELECT SUM(amount) FROM deposit_applications
+                      WHERE business_id = $1${upto("created_at")}), 0) AS held`,
         p,
       ),
       query(
         `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM expenses WHERE business_id = $1${asOfExpClause}`,
+           FROM expenses WHERE business_id = $1${uptoDate("expense_date")}`,
         p,
       ),
-      optional(
-        "visa_applications",
-        `SELECT COALESCE(SUM(selling_price), 0) AS gross_sales,
-                COALESCE(SUM(cost_price), 0)    AS cost,
-                COALESCE(SUM(amount_paid), 0)   AS collected
-         FROM visa_applications
-         WHERE business_id = $1 AND status <> 'cancelled'${asOfClause}`,
+      query(
+        `SELECT COALESCE(SUM(COALESCE(fee, 0)), 0) AS total
+           FROM account_transfers WHERE business_id = $1${upto("transferred_at")}`,
         p,
-        { gross_sales: 0, cost: 0, collected: 0 },
-      ),
-      optional(
-        "packages",
-        `SELECT COALESCE(SUM(selling_price), 0) AS gross_sales,
-                COALESCE(SUM(total_cost), 0)    AS cost,
-                COALESCE(SUM(amount_paid), 0)   AS collected
-         FROM packages
-         WHERE business_id = $1 AND status <> 'cancelled'${asOfClause}`,
-        p,
-        { gross_sales: 0, cost: 0, collected: 0 },
-      ),
-      optional(
-        "airline_payments",
-        `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM airline_payments ap
-        WHERE ap.business_id = $1
-          AND ap.opening_item_id IS NULL
-          AND (ap.ticket_id IS NULL OR EXISTS (
-            SELECT 1 FROM tickets t
-             WHERE t.id = ap.ticket_id
-               AND t.business_id = ap.business_id
-               AND t.status <> 'cancelled'
-          ))${asOfClause.replace(/created_at/g, "ap.created_at")}`,
-        p,
-        { total: 0 },
-      ),
-      optional(
-        "agent_payments",
-        `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM agent_payments WHERE business_id = $1${asOfClause}`,
-        p,
-        { total: 0 },
-      ),
-      optional(
-        "supplier_payments",
-        `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM supplier_payments WHERE business_id = $1${asOfClause}`,
-        p,
-        { total: 0 },
-      ),
-      optional(
-        "customer_deposits",
-        `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM customer_deposits WHERE business_id = $1${asOfClause}`,
-        p,
-        { total: 0 },
-      ),
-      optional(
-        "deposit_applications",
-        `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM deposit_applications WHERE business_id = $1${asOfClause}`,
-        p,
-        { total: 0 },
       ),
       query(
         `SELECT
@@ -463,72 +568,100 @@ const getBalanceSheet = async (req, res, next) => {
                UNION ALL
                SELECT opening_item_id, amount, created_at FROM airline_payments
                 WHERE opening_item_id IS NOT NULL
-             ) p ON p.opening_item_id = o.id${as_of ? " AND p.created_at::DATE <= $2::DATE" : ""}
-            WHERE o.business_id = $1${as_of ? " AND o.entry_date <= $2::DATE" : ""}
+             ) p ON p.opening_item_id = o.id${upto("p.created_at")}
+            WHERE o.business_id = $1${uptoDate("o.entry_date")}
             GROUP BY o.id
-         ) opening
-         `,
+         ) opening`,
+        p,
+      ),
+      // Each account as it stood at the end of as_of: its opening balance (if
+      // it had opened by then) plus every movement up to that night.
+      query(
+        `SELECT a.id AS account_id, a.name, a.kind, a.sort_order,
+                COALESCE(a.is_cash_in_hand, FALSE) AS is_cash_in_hand,
+                CASE WHEN ${asOf ? "a.opening_date IS NULL OR a.opening_date <= $2::DATE" : "TRUE"}
+                     THEN a.opening_balance ELSE 0 END AS opening_balance,
+                COALESCE(l.net, 0) AS movements
+           FROM payment_accounts a
+           LEFT JOIN (
+             SELECT account_id,
+                    SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END) AS net
+               FROM v_cash_ledger
+              WHERE business_id = $1 AND account_id IS NOT NULL${upto("occurred_at")}
+              GROUP BY account_id
+           ) l ON l.account_id = a.id
+          WHERE a.business_id = $1
+          ORDER BY COALESCE(a.is_cash_in_hand, FALSE) DESC, a.sort_order, a.name`,
+        p,
+      ),
+      // Money received but not yet filed against an account is still money
+      // the agency holds. Shown on its own line rather than hidden.
+      query(
+        `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END), 0) AS net
+           FROM v_cash_ledger
+          WHERE business_id = $1 AND account_id IS NULL${upto("occurred_at")}`,
         p,
       ),
     ]);
 
+    // Owners, and what each has put in and taken out by the end of as_of.
+    const hasOwners = await hasTable("business_owners");
+    const ownersRes = hasOwners
+      ? await query(
+          `SELECT ow.id, ow.name, ow.opening_capital, ow.ownership_pct,
+                  ow.profit_share_pct, ow.is_active,
+                  COALESCE(SUM(tx.amount) FILTER (WHERE tx.amount > 0), 0)  AS contributed,
+                  COALESCE(-SUM(tx.amount) FILTER (WHERE tx.amount < 0), 0) AS withdrawn
+             FROM business_owners ow
+             LEFT JOIN owner_transactions tx
+               ON tx.owner_id = ow.id${upto("tx.occurred_at")}
+            WHERE ow.business_id = $1
+            GROUP BY ow.id
+            ORDER BY ow.opening_capital DESC, ow.name`,
+          p,
+        )
+      : { rows: [] };
+
     const biz = bizRes.rows[0] || {};
     const t = ticketRes.rows[0];
-    const c = cargoRes.rows[0];
-    const v = visaRes.rows[0];
-    const pk = packageRes.rows[0];
-    const airlinePaid = round2(airlinePaidRes.rows[0].total);
-    const agentPaid = round2(agentPaidRes.rows[0].total);
-    const supplierPaid = round2(supplierPaidRes.rows[0].total);
-    // Money the agency is holding for customers against nothing yet. It is
-    // in the bank, so it is in cash — and it is owed back, so it has to be
-    // in liabilities too, or the sheet balances by pretending a deposit is
-    // profit.
-    // Taken, LESS what has since been spent on the customer's bookings.
-    //
-    // Leaving the applications out was a real error, caught by the test that
-    // spends a deposit: the receivable fell by $250 while the liability
-    // stayed at $300, so the sheet came out $250 short. A deposit the agency
-    // has already delivered against is not money it still owes.
-    const customerDeposits = round2(
-      Math.max(
-        n(depositRes.rows[0].total) - n(depositUsedRes.rows[0].total),
-        0,
-      ),
-    );
+    const svc = Object.fromEntries(serviceRes.rows.map((r) => [r.kind, r]));
+    const sumSvc = (field) =>
+      round2(
+        ["visa", "package", "cargo"].reduce(
+          (a, k) => a + n(svc[k]?.[field]),
+          0,
+        ),
+      );
 
-    // What the agency's accounts actually hold. This is the same figure the
-    // Accounts page shows, computed the same way — opening balances plus
-    // every movement in the ledger — because there is only one right answer
-    // to "how much money do we have" and it is the one you can check against
-    // a bank statement.
-    const held = await query(
-      `SELECT account_id, name, kind, opening_balance, balance
-         FROM v_account_balance
-        WHERE business_id = $1
-        ORDER BY sort_order, name`,
-      [businessId],
+    // ── Assets ──────────────────────────────────────────────
+    const accounts = accountsRes.rows.map((a) => ({
+      account_id: a.account_id,
+      name: a.name,
+      kind: a.kind,
+      is_cash_in_hand: a.is_cash_in_hand,
+      opening_balance: round2(a.opening_balance),
+      balance: round2(n(a.opening_balance) + n(a.movements)),
+    }));
+    // Opening cash used to be typed on the business record and added on top
+    // of the accounts. migration_v28 moves it into the Cash in Hand account;
+    // anything still sitting here (an unmigrated database) is folded into
+    // the same Cash in Hand line so it is never shown twice.
+    const legacyOpeningCash = round2(biz.opening_cash);
+    const unassignedCash = round2(looseRes.rows[0].net);
+    const cashInHandAccount = accounts.find((a) => a.is_cash_in_hand);
+    const cashInHand = round2(
+      (cashInHandAccount ? cashInHandAccount.balance : 0) + legacyOpeningCash,
     );
-    // Money received but not yet filed against an account is still money the
-    // agency holds. Leaving it out would make the sheet disagree with the
-    // Accounts page, which shows it separately rather than pretending it
-    // isn't there.
-    const loose = await query(
-      `SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END), 0) AS net
-         FROM v_cash_ledger
-        WHERE business_id = $1 AND account_id IS NULL`,
-      [businessId],
+    const otherAccounts = accounts.filter((a) => !a.is_cash_in_hand);
+    const cash = round2(
+      cashInHand +
+        otherAccounts.reduce((s, a) => s + a.balance, 0) +
+        unassignedCash,
     );
-
-    const openingCash = round2(biz.opening_cash);
     const accountOpeningCash = round2(
-      held.rows.reduce(
-        (total, account) => total + n(account.opening_balance),
-        0,
-      ),
+      accounts.reduce((s, a) => s + a.opening_balance, 0),
     );
-    const fixedAssets = round2(biz.fixed_assets);
-    const manualLiabilities = round2(biz.liabilities);
+
     const openingReceivables = round2(openingItemsRes.rows[0].receivables);
     const openingPayables = round2(openingItemsRes.rows[0].payables);
     const openingReceivablesGross = round2(
@@ -536,146 +669,203 @@ const getBalanceSheet = async (req, res, next) => {
     );
     const openingPayablesGross = round2(openingItemsRes.rows[0].payables_gross);
 
-    const grossSales = round2(
-      n(t.gross_sales) +
-        n(c.gross_sales) +
-        n(v.gross_sales) +
-        n(pk.gross_sales),
-    );
-    const collected = round2(
-      n(t.collected) + n(c.collected) + n(v.collected) + n(pk.collected),
-    );
-    const airlineCost = round2(t.cost_of_sales);
-    // Visa fees and package suppliers are settled when the work is done —
-    // TAMS keeps no account for them, so they leave cash immediately.
-    const directPaidCost = round2(n(v.cost) + n(pk.cost) + n(c.carrier_cost));
-    const costOfSales = round2(airlineCost + directPaidCost);
-    const commission = round2(t.commission);
-    const expensesPaid = round2(expenseRes.rows[0].total);
-    const cancellationNet = round2(
-      n(t.cancellation_fees) - n(t.unrecovered_cost),
-    );
+    const tradeReceivables = round2(n(t.receivable) + sumSvc("receivable"));
+    const receivables = round2(tradeReceivables + openingReceivables);
 
-    // ── Assets ──────────────────────────────────────────────
-    //
-    // Cash used to be *derived*: opening balance, plus everything collected,
-    // minus everything assumed paid. The last of those assumptions was the
-    // bug — it subtracted the cost price typed on every visa and package as
-    // though the embassy had already been paid, so one visa costing 1,900
-    // silently removed 1,900 from the agency's cash while the money sat in
-    // the bank. Cash & bank read 130 where the Accounts page read 2,030.
-    //
-    // Cash is not a derivation. It is a fact, and the ledger holds it.
-    const cash = round2(
-      held.rows.reduce((total, account) => total + n(account.balance), 0) +
-        n(loose.rows[0].net) +
-        openingCash,
+    const airlineNet = round2(
+      n(t.airline_cost) -
+        n(t.airline_paid) -
+        n(unallocatedAirlineRes.rows[0].total),
     );
-    const receivables = round2(grossSales - collected + openingReceivables);
-    const airlineNetPayable = round2(airlineCost - airlinePaid);
-    const airlineReceivable = round2(Math.max(-airlineNetPayable, 0));
-    const airlinePayable = round2(Math.max(airlineNetPayable, 0));
+    const airlinePayable = round2(Math.max(airlineNet, 0));
+    const airlineReceivable = round2(Math.max(-airlineNet, 0));
+    const supplierPayable = sumSvc("supplier_payable");
+    const supplierCredit = sumSvc("supplier_credit");
+
+    const taxAccrued = round2(n(t.tax_live) + n(t.cancelled_tax));
+    const taxNet = round2(taxAccrued - n(taxPaidRes.rows[0].total));
+    const taxPayable = round2(Math.max(taxNet, 0));
+    const taxCredit = round2(Math.max(-taxNet, 0));
+
+    const commissionNet = round2(
+      n(t.commission) - n(agentPaidRes.rows[0].total),
+    );
+    const commissionPayable = round2(Math.max(commissionNet, 0));
+    const agentAdvances = round2(Math.max(-commissionNet, 0));
+
+    const fixedAssets = round2(biz.fixed_assets);
     const totalAssets = round2(
-      cash + receivables + airlineReceivable + fixedAssets,
+      cash +
+        receivables +
+        airlineReceivable +
+        supplierCredit +
+        taxCredit +
+        agentAdvances +
+        fixedAssets,
     );
 
     // ── Liabilities ─────────────────────────────────────────
-    // Only what is genuinely still owed: airline cost not yet settled and
-    // commission not yet paid out.
-    // An embassy fee or a tour operator's bill is owed until someone pays
-    // it, exactly like an airline fare. Recording it as a cost while
-    // pretending the cash had already gone was what unbalanced the sheet.
-    const supplierPayable = round2(Math.max(directPaidCost - supplierPaid, 0));
-    const commissionPayable = round2(commission - agentPaid);
+    const customerDeposits = round2(depositRes.rows[0].held);
+    const customerCredits = round2(
+      n(t.customer_credit) + sumSvc("customer_credit"),
+    );
+    const manualLiabilities = round2(biz.liabilities);
     const totalLiabilities = round2(
       airlinePayable +
-        commissionPayable +
         supplierPayable +
-        openingPayables +
+        taxPayable +
+        commissionPayable +
         customerDeposits +
+        customerCredits +
+        openingPayables +
         manualLiabilities,
     );
 
     // ── Equity ──────────────────────────────────────────────
-    const ownerCapital = n(biz.owner_capital)
-      ? round2(biz.owner_capital)
-      : round2(
-          openingCash +
-            accountOpeningCash +
-            fixedAssets +
-            openingReceivablesGross -
-            manualLiabilities -
-            openingPayablesGross,
-        );
-    const openingRetainedEarnings = round2(
-      openingCash +
+    const openingPosition = round2(
+      legacyOpeningCash +
         accountOpeningCash +
         fixedAssets +
         openingReceivablesGross -
         manualLiabilities -
-        openingPayablesGross -
-        ownerCapital,
+        openingPayablesGross,
     );
-    const retainedEarnings = round2(
-      openingRetainedEarnings +
-        grossSales -
-        costOfSales -
-        commission -
-        expensesPaid +
-        cancellationNet,
+    // If the owner never entered a capital figure, the opening position is
+    // the capital, so the sheet balances (Assets = Liabilities + Equity).
+    const ownerCapital = n(biz.owner_capital)
+      ? round2(biz.owner_capital)
+      : openingPosition;
+    const openingRetainedEarnings = round2(openingPosition - ownerCapital);
+
+    const ticketProfit = round2(n(t.sales) - n(t.cost) - n(t.commission));
+    const ticketCancellations = round2(
+      n(t.cancelled_kept) - n(t.cancelled_tax) - n(t.cancelled_airline),
     );
-    // If the owner never entered a capital figure, derive it from the
-    // opening balances so the sheet balances (Assets = Liabilities + Equity).
-    const totalEquity = round2(ownerCapital + retainedEarnings);
+    const serviceProfit = round2(sumSvc("sales") - sumSvc("cost"));
+    const serviceCancellations = sumSvc("cancelled_net");
+    const expenses = round2(expenseRes.rows[0].total);
+    const bankFees = round2(feeRes.rows[0].total);
+    const profitToDate = round2(
+      ticketProfit +
+        ticketCancellations +
+        serviceProfit +
+        serviceCancellations -
+        expenses -
+        bankFees,
+    );
+    // ── Owners ──────────────────────────────────────────────
+    //
+    // With owners registered, equity is shown owner by owner:
+    //   opening capital + capital put in − drawings + profit-share % of profit
+    // Anything the opening position holds beyond the owners' opening capital
+    // is "retained earnings brought forward", and profit not covered by the
+    // profit-share percentages stays unallocated. Every cent is accounted
+    // for: the lines add up to exactly the same total equity as before.
+    const owners = ownersRes.rows.map((o) => ({
+      owner_id: o.id,
+      name: o.name,
+      is_active: o.is_active,
+      ownership_pct: n(o.ownership_pct),
+      profit_share_pct: n(o.profit_share_pct),
+      opening_capital: round2(o.opening_capital),
+      contributed: round2(o.contributed),
+      withdrawn: round2(o.withdrawn),
+      profit_share: round2((profitToDate * n(o.profit_share_pct)) / 100),
+    }));
+    owners.forEach((o) => {
+      o.capital = round2(o.opening_capital + o.contributed);
+      o.total = round2(o.capital - o.withdrawn + o.profit_share);
+    });
+    const ownersContributed = round2(
+      owners.reduce((s, o) => s + o.contributed, 0),
+    );
+    const ownersWithdrawn = round2(owners.reduce((s, o) => s + o.withdrawn, 0));
+    const hasOwnerRecords = owners.length > 0;
+
+    let retainedEarnings;
+    let totalEquity;
+    let equityOwners = null;
+    if (hasOwnerRecords) {
+      const openingCapital = round2(
+        owners.reduce((s, o) => s + o.opening_capital, 0),
+      );
+      const allocated = round2(owners.reduce((s, o) => s + o.profit_share, 0));
+      const broughtForward = round2(openingPosition - openingCapital);
+      const unallocated = round2(profitToDate - allocated);
+      retainedEarnings = round2(broughtForward + unallocated);
+      totalEquity = round2(
+        owners.reduce((s, o) => s + o.total, 0) + broughtForward + unallocated,
+      );
+      equityOwners = {
+        owners,
+        opening_capital: openingCapital,
+        contributed: ownersContributed,
+        withdrawn: ownersWithdrawn,
+        profit_allocated: allocated,
+        retained_brought_forward: broughtForward,
+        unallocated_profit: unallocated,
+      };
+    } else {
+      retainedEarnings = round2(openingRetainedEarnings + profitToDate);
+      totalEquity = round2(
+        ownerCapital + retainedEarnings + ownersContributed - ownersWithdrawn,
+      );
+    }
 
     const difference = round2(totalAssets - (totalLiabilities + totalEquity));
 
     return response.success(res, {
       business_name: biz.name,
-      as_of: as_of || new Date().toISOString().slice(0, 10),
+      as_of: asOf || new Date().toISOString().slice(0, 10),
       assets: {
         cash_and_bank: cash,
-        cash_in_hand: openingCash,
-        accounts: held.rows.map((account) => ({
-          account_id: account.account_id,
-          name: account.name,
-          kind: account.kind,
-          balance: round2(account.balance),
-        })),
+        // One Cash in Hand line: the business's Cash in Hand account.
+        cash_in_hand: cashInHand,
+        cash_in_hand_account_id: cashInHandAccount?.account_id || null,
+        // The other accounts (banks, mobile money, merchant).
+        accounts: otherAccounts,
+        unassigned_cash: unassignedCash,
         accounts_receivable: receivables,
-        airline_receivable: airlineReceivable,
+        trade_receivables: tradeReceivables,
         opening_receivables: openingReceivables,
+        airline_receivable: airlineReceivable,
+        supplier_credit: supplierCredit,
+        tax_credit: taxCredit,
+        agent_advances: agentAdvances,
         fixed_assets: fixedAssets,
         total: totalAssets,
       },
       liabilities: {
         payable_to_airlines: airlinePayable,
         payable_to_suppliers: supplierPayable,
+        tax_payable: taxPayable,
         customer_deposits: customerDeposits,
+        customer_credits: customerCredits,
         agent_commission_payable: commissionPayable,
         other_liabilities: manualLiabilities,
         opening_payables: openingPayables,
         total: totalLiabilities,
       },
-      settled: {
-        paid_to_airlines: airlinePaid,
-        paid_to_agents: agentPaid,
-        visa_and_package_suppliers: directPaidCost,
-      },
       equity: {
-        owner_capital: ownerCapital,
+        owner_capital: hasOwnerRecords
+          ? round2(equityOwners.opening_capital + ownersContributed)
+          : ownerCapital,
         retained_earnings: retainedEarnings,
+        profit_to_date: profitToDate,
+        // Present when owners are registered: one line per owner.
+        by_owner: equityOwners,
         total: totalEquity,
       },
       total_liabilities_and_equity: round2(totalLiabilities + totalEquity),
       balanced: Math.abs(difference) < 0.01,
       difference,
       notes: [
-        "Cash & bank combines cash in hand, each payment account, and unassigned cash movements; each is shown separately.",
-        "An airline credit is shown as an airline receivable; amounts still owed are shown as payable to airlines.",
+        "Cash in hand is the business's Cash in Hand account, including the opening cash entered for it. Bank and mobile-money accounts are listed separately.",
+        "Every figure is as at the end of the selected date on the agency's calendar, including cash.",
+        "Tax collected on tickets is owed to the government and shown as Tax payable, not as money owed to airlines.",
+        "Visa, package and cargo supplier costs stay payable until they are paid from the Suppliers page.",
+        "Money a customer paid beyond the price is shown as a customer credit — it is owed back or can be applied later.",
         "Agent commission payable is what agents have earned but not been paid. Pay it from the Agents page.",
-        "Visa fees and package supplier costs are treated as paid when the work is done, since TAMS keeps no account for those suppliers.",
-        "Set opening cash, fixed assets, liabilities and owner capital on the business record for an accurate opening position.",
       ],
     });
   } catch (err) {
@@ -691,100 +881,26 @@ const getCashFlow = async (req, res, next) => {
     const businessId = req.businessId;
     const { from_date, to_date } = req.query;
 
-    const pRange = dateRange("p.created_at::DATE", from_date, to_date, 2);
-    const cRange = dateRange("cs.created_at::DATE", from_date, to_date, 2);
-    const eRange = dateRange("e.expense_date", from_date, to_date, 2);
-    // The daily query unions payments and expenses in one statement, so the
-    // expense placeholders must continue where the payment ones stopped —
-    // otherwise Postgres is handed more parameters than the query references.
-    const eRangeShifted = dateRange(
-      "e.expense_date",
+    // "Collected by method" reads the same ledger as the totals, so it covers
+    // every kind of money in (tickets, visas, packages, cargo, deposits), not
+    // ticket payments alone. The eight side queries that used to run here
+    // were computed and never used, and have been removed.
+    const mRange = dateRange(
+      `(l.occurred_at AT TIME ZONE '${TZ}')::DATE`,
       from_date,
       to_date,
-      2 + pRange.params.length,
+      2,
     );
-
-    const vpRange = dateRange("vp.created_at::DATE", from_date, to_date, 2);
-    const ppRange = dateRange("pp.created_at::DATE", from_date, to_date, 2);
-    const apRange = dateRange("ap.created_at::DATE", from_date, to_date, 2);
-    const gpRange = dateRange("gp.created_at::DATE", from_date, to_date, 2);
-
-    const [
-      inflowRes,
-      cargoInRes,
-      outflowRes,
-      dailyRes,
-      methodRes,
-      visaInRes,
-      packageInRes,
-      airlineOutRes,
-      agentOutRes,
-    ] = await Promise.all([
-      query(
-        `SELECT COALESCE(SUM(p.amount), 0) AS total, COUNT(*) AS entries
-           FROM ticket_payments p
-           WHERE p.business_id = $1${pRange.clause}`,
-        [businessId, ...pRange.params],
-      ),
-      query(
-        `SELECT COALESCE(SUM(cs.amount_paid), 0) AS total
-           FROM cargo_shipments cs
-           WHERE cs.business_id = $1 AND cs.cargo_status <> 'cancelled'${cRange.clause}`,
-        [businessId, ...cRange.params],
-      ),
-      query(
-        `SELECT COALESCE(SUM(e.amount), 0) AS total, COUNT(*) AS entries
-           FROM expenses e WHERE e.business_id = $1${eRange.clause}`,
-        [businessId, ...eRange.params],
-      ),
-      query(
-        `SELECT day, COALESCE(SUM(inflow), 0) AS inflow, COALESCE(SUM(outflow), 0) AS outflow
-           FROM (
-             SELECT p.created_at::DATE AS day, p.amount AS inflow, 0 AS outflow
-             FROM ticket_payments p WHERE p.business_id = $1${pRange.clause}
-             UNION ALL
-             SELECT e.expense_date AS day, 0 AS inflow, e.amount AS outflow
-             FROM expenses e WHERE e.business_id = $1${eRangeShifted.clause}
-           ) x
-           GROUP BY day ORDER BY day`,
-        [businessId, ...pRange.params, ...eRangeShifted.params],
-      ),
-      query(
-        `SELECT p.method, COALESCE(SUM(p.amount), 0) AS total
-         FROM ticket_payments p
-         WHERE p.business_id = $1${pRange.clause}
-         GROUP BY p.method ORDER BY total DESC`,
-        [businessId, ...pRange.params],
-      ),
-      optional(
-        "visa_payments",
-        `SELECT COALESCE(SUM(vp.amount), 0) AS total
-         FROM visa_payments vp WHERE vp.business_id = $1${vpRange.clause}`,
-        [businessId, ...vpRange.params],
-        { total: 0 },
-      ),
-      optional(
-        "package_payments",
-        `SELECT COALESCE(SUM(pp.amount), 0) AS total
-         FROM package_payments pp WHERE pp.business_id = $1${ppRange.clause}`,
-        [businessId, ...ppRange.params],
-        { total: 0 },
-      ),
-      optional(
-        "airline_payments",
-        `SELECT COALESCE(SUM(ap.amount), 0) AS total, COUNT(*) AS entries
-         FROM airline_payments ap WHERE ap.business_id = $1${apRange.clause}`,
-        [businessId, ...apRange.params],
-        { total: 0, entries: 0 },
-      ),
-      optional(
-        "agent_payments",
-        `SELECT COALESCE(SUM(gp.amount), 0) AS total, COUNT(*) AS entries
-         FROM agent_payments gp WHERE gp.business_id = $1${gpRange.clause}`,
-        [businessId, ...gpRange.params],
-        { total: 0, entries: 0 },
-      ),
-    ]);
+    const methodRes = await query(
+      `SELECT COALESCE(a.name, NULLIF(l.legacy_method, ''), 'Unassigned') AS method,
+              COALESCE(SUM(l.amount), 0) AS total
+         FROM v_cash_ledger l
+         LEFT JOIN payment_accounts a ON a.id = l.account_id
+        WHERE l.business_id = $1 AND l.direction = 'in'
+          AND l.source NOT LIKE 'transfer%'${mRange.clause}
+        GROUP BY 1 ORDER BY total DESC`,
+      [businessId, ...mRange.params],
+    );
 
     // ── One source of truth ──────────────────────────────────
     //
@@ -815,6 +931,13 @@ const getCashFlow = async (req, res, next) => {
         cargo_payments: inOf("cargo"),
         visa_payments: inOf("visa"),
         package_payments: inOf("package"),
+        deposits: inOf("deposit"),
+        opening_receivables: inOf("opening_receivable"),
+        owner_capital: inOf("owner_contribution"),
+        // Money coming back from the other side of a payment.
+        airline_refunds: inOf("airline"),
+        supplier_refunds: inOf("supplier"),
+        agent_refunds: inOf("agent"),
         total: money.collected,
         entries: money.entries,
         by_method: methodRes.rows.map((r) => ({
@@ -827,6 +950,10 @@ const getCashFlow = async (req, res, next) => {
         airline_settlements: outOf("airline"),
         agent_commission: outOf("agent"),
         tax: outOf("tax"),
+        supplier_payments: outOf("supplier"),
+        bank_fees: outOf("bank_fee"),
+        owner_drawings: outOf("owner_withdrawal"),
+        deposit_refunds: outOf("deposit"),
         // Money handed back to customers is an outflow like any other. It was
         // previously netted invisibly against the day's takings, so a day
         // with a large refund looked like a quiet day rather than a costly
@@ -1344,8 +1471,95 @@ const deleteOpeningItem = async (req, res, next) => {
   }
 };
 
-// ── PUT /api/financials/opening-balances ─────────────────────────────────────
+// ── Opening balances ─────────────────────────────────────────────────────────
+//
+// Opening cash lives in the business's Cash in Hand account (its opening
+// balance), not on the business record. One place, so the balance sheet shows
+// one Cash in Hand figure and the Accounts page agrees with it.
 
+/** Find or create the business's one Cash in Hand account. */
+const cashInHandAccount = async (client, businessId) => {
+  await client.query(`SELECT id FROM businesses WHERE id = $1 FOR UPDATE`, [
+    businessId,
+  ]);
+
+  const found = await client.query(
+    `SELECT id
+       FROM payment_accounts
+      WHERE business_id = $1
+        AND (is_cash_in_hand OR LOWER(name) = 'cash in hand' OR kind = 'cash')
+      ORDER BY (LOWER(name) = 'cash in hand') DESC,
+               is_cash_in_hand DESC,
+               (kind = 'cash') DESC,
+               is_active DESC, sort_order, created_at
+      LIMIT 1
+      FOR UPDATE`,
+    [businessId],
+  );
+
+  if (found.rows.length) {
+    const id = found.rows[0].id;
+    await client.query(
+      `UPDATE payment_accounts
+          SET is_cash_in_hand = FALSE
+        WHERE business_id = $1 AND is_cash_in_hand AND id <> $2`,
+      [businessId, id],
+    );
+    const normalized = await client.query(
+      `UPDATE payment_accounts
+          SET name = 'Cash in Hand', kind = 'cash', is_cash_in_hand = TRUE,
+              is_active = TRUE, updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, name, opening_balance`,
+      [id],
+    );
+    if (normalized.rows[0]) return normalized.rows[0];
+  }
+
+  const created = await client.query(
+    `INSERT INTO payment_accounts
+       (business_id, name, kind, sort_order, is_cash_in_hand, notes)
+     VALUES (
+       $1, 'Cash in Hand', 'cash',
+       COALESCE((SELECT MIN(sort_order) - 10 FROM payment_accounts WHERE business_id = $1), 0),
+       TRUE, 'Created automatically for opening cash.'
+     )
+     RETURNING id, name, opening_balance`,
+    [businessId],
+  );
+  if (!created.rows[0])
+    throw new Error("Could not create the business Cash in Hand account");
+  return created.rows[0];
+};
+
+const readOpeningBalances = async (run, businessId) => {
+  const r = await run(
+    `SELECT b.id, b.name, b.fixed_assets, b.liabilities, b.owner_capital,
+            b.financials_start,
+            COALESCE(a.opening_balance, 0) + COALESCE(b.opening_cash, 0) AS opening_cash,
+            a.id AS cash_in_hand_account_id, a.name AS cash_in_hand_account
+       FROM businesses b
+       LEFT JOIN payment_accounts a
+         ON a.business_id = b.id AND a.is_cash_in_hand
+      WHERE b.id = $1`,
+    [businessId],
+  );
+  return r.rows[0] || null;
+};
+
+// ── GET /api/financials/opening-balances ─────────────────────────────────────
+const getOpeningBalances = async (req, res, next) => {
+  try {
+    if (!requireBusiness(req, res)) return;
+    const row = await readOpeningBalances(query, req.businessId);
+    if (!row) return response.notFound(res, "Business not found");
+    return response.success(res, row);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── PUT /api/financials/opening-balances ─────────────────────────────────────
 const updateOpeningBalances = async (req, res, next) => {
   try {
     if (!requireBusiness(req, res)) return;
@@ -1357,28 +1571,62 @@ const updateOpeningBalances = async (req, res, next) => {
       financials_start,
     } = req.body;
 
-    const result = await query(
-      `UPDATE businesses SET
-         opening_cash     = COALESCE($1, opening_cash),
-         fixed_assets     = COALESCE($2, fixed_assets),
-         liabilities      = COALESCE($3, liabilities),
-         owner_capital    = COALESCE($4, owner_capital),
-         financials_start = COALESCE($5, financials_start)
-       WHERE id = $6
-       RETURNING id, name, opening_cash, fixed_assets, liabilities, owner_capital, financials_start`,
-      [
-        opening_cash ?? null,
-        fixed_assets ?? null,
-        liabilities ?? null,
-        owner_capital ?? null,
-        financials_start || null,
-        req.businessId,
-      ],
-    );
+    // Blank means "leave as it is"; anything else must be a number >= 0.
+    const amountOrNull = (v, label) => {
+      if (v === undefined || v === null || v === "") return null;
+      const num = Number(v);
+      if (!Number.isFinite(num) || num < 0) {
+        const err = new Error(`${label} must be a number of zero or more`);
+        err.statusCode = 400;
+        err.expose = true;
+        throw err;
+      }
+      return round2(num);
+    };
+    const cashValue = amountOrNull(opening_cash, "Cash in hand");
+    const fixedValue = amountOrNull(fixed_assets, "Fixed assets");
+    const liabilitiesValue = amountOrNull(liabilities, "Existing liabilities");
+    const capitalValue = amountOrNull(owner_capital, "Owner's capital");
 
-    if (result.rows.length === 0)
-      return response.notFound(res, "Business not found");
-    return response.success(res, result.rows[0], "Opening balances updated");
+    const row = await withTransaction(async (client) => {
+      const updated = await client.query(
+        `UPDATE businesses SET
+           fixed_assets     = COALESCE($1, fixed_assets),
+           liabilities      = COALESCE($2, liabilities),
+           owner_capital    = COALESCE($3, owner_capital),
+           financials_start = COALESCE($4, financials_start)
+         WHERE id = $5
+         RETURNING id`,
+        [
+          fixedValue,
+          liabilitiesValue,
+          capitalValue,
+          financials_start || null,
+          req.businessId,
+        ],
+      );
+      if (updated.rows.length === 0) return null;
+
+      if (cashValue !== null) {
+        const account = await cashInHandAccount(client, req.businessId);
+        // Whatever was left on the old business-level field is replaced by
+        // the figure entered now, so the opening cash is counted once.
+        await client.query(
+          `UPDATE payment_accounts
+              SET opening_balance = $1, updated_at = NOW()
+            WHERE id = $2`,
+          [cashValue, account.id],
+        );
+        await client.query(
+          `UPDATE businesses SET opening_cash = 0 WHERE id = $1`,
+          [req.businessId],
+        );
+      }
+      return readOpeningBalances(client.query.bind(client), req.businessId);
+    });
+
+    if (!row) return response.notFound(res, "Business not found");
+    return response.success(res, row, "Opening balances updated");
   } catch (err) {
     next(err);
   }
@@ -1395,4 +1643,5 @@ module.exports = {
   deleteOpeningItem,
   collectOpeningReceivable,
   updateOpeningBalances,
+  getOpeningBalances,
 };

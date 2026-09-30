@@ -171,7 +171,8 @@ const paySupplier = async (req, res, next) => {
     const recRes = await query(
       `SELECT r.id, ${k.label} AS name,
               (${k.cost})::NUMERIC(12,2)   AS cost,
-              COALESCE(r.supplier_paid, 0) AS paid
+              COALESCE(r.supplier_paid, 0) AS paid,
+              r.${k.statusColumn}::TEXT    AS status
          FROM ${k.table} r
         WHERE r.id = $1 AND r.business_id = $2`,
       [id, req.businessId],
@@ -179,6 +180,12 @@ const paySupplier = async (req, res, next) => {
     if (recRes.rows.length === 0) return response.notFound(res, "Record not found");
 
     const rec = recRes.rows[0];
+    if (rec.status === "cancelled")
+      return response.error(
+        res,
+        `This ${k.what.split(" ")[0]} is cancelled, so nothing is owed to the supplier.`,
+        409,
+      );
     const owed = round2(Number(rec.cost) - Number(rec.paid));
 
     if (owed <= 0.001)
@@ -212,6 +219,28 @@ const paySupplier = async (req, res, next) => {
     );
 
     const result = await withTransaction(async (client) => {
+      // Re-checked under a lock: two payments sent together must not both
+      // pass the "still owed" check above and pay the supplier twice.
+      const locked = await client.query(
+        `SELECT (${k.cost})::NUMERIC(12,2) AS cost,
+                COALESCE(supplier_paid, 0) AS paid
+           FROM ${k.table}
+          WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [id, req.businessId],
+      );
+      const stillOwed = round2(
+        Number(locked.rows[0].cost) - Number(locked.rows[0].paid),
+      );
+      if (amount > stillOwed + 0.001) {
+        const err = new Error(
+          `That is more than the $${stillOwed.toFixed(2)} still owed on this ${k.what}.`,
+        );
+        err.statusCode = 409;
+        err.expose = true;
+        throw err;
+      }
+
       await client.query(
         `INSERT INTO supplier_payments
            (business_id, ${k.column}, amount, account_id, paid_by, method, reference, note)

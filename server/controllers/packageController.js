@@ -276,7 +276,7 @@ const createPackage = async (req, res, next) => {
           pilgrim_count ? parseInt(pilgrim_count) : null,
           departure_date || null,
           return_date || null,
-          status || null,
+          status === "cancelled" ? null : status || null,
           selling,
           paid,
           calcPaymentStatus(paid, selling),
@@ -372,11 +372,27 @@ const updatePackage = async (req, res, next) => {
     if (!errors.isEmpty()) return response.validationError(res, errors.array());
 
     const existing = await query(
-      `SELECT amount_paid FROM packages WHERE id = $1 AND business_id = $2`,
+      `SELECT amount_paid, status::TEXT AS status FROM packages WHERE id = $1 AND business_id = $2`,
       [req.params.id, req.businessId],
     );
     if (existing.rows.length === 0)
       return response.notFound(res, "Package not found");
+    // Cancelling moves money and has its own endpoint (POST .../cancel),
+    // which records the refund. The form can't cancel, and a cancelled
+    // record can't be edited back into a live sale.
+    if (existing.rows[0].status === "cancelled")
+      return response.error(
+        res,
+        "This package is cancelled and can no longer be edited.",
+        409,
+      );
+    if (req.body.status === "cancelled")
+      return response.error(
+        res,
+        "Use Cancel to cancel this package, so any refund is recorded.",
+        400,
+      );
+
 
     const paid = round2(existing.rows[0].amount_paid);
     const selling = round2(req.body.selling_price);
@@ -443,6 +459,24 @@ const deletePackage = async (req, res, next) => {
   try {
     if (!(await hasTable("packages")))
       return response.error(res, MIGRATION_MSG, 503);
+    // Refused when money has moved. Deleting used to take the payment rows
+    // with it, which silently lowered the account balances: the cash was
+    // still in the drawer but the books no longer knew it had arrived.
+    // Cancel it instead — the history stays and the refund is recorded.
+    const history = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM package_payments WHERE package_id = $1)
+       + (SELECT COUNT(*) FROM supplier_payments WHERE package_id = $1)
+       + (SELECT COUNT(*) FROM deposit_applications WHERE package_id = $1) AS n`,
+      [req.params.id],
+    );
+    if (Number(history.rows[0].n) > 0)
+      return response.error(
+        res,
+        "This package has payments recorded against it and can't be deleted. Use Cancel instead so the money history is kept.",
+        409,
+      );
+
     const r = await query(
       `DELETE FROM packages WHERE id = $1 AND business_id = $2 RETURNING id`,
       [req.params.id, req.businessId],
@@ -460,39 +494,46 @@ const addPackagePayment = async (req, res, next) => {
     if (!(await hasTable("packages")))
       return response.error(res, MIGRATION_MSG, 503);
 
-    const pkgRes = await query(
-      `SELECT id, label, selling_price, amount_paid
-       FROM packages WHERE id = $1 AND business_id = $2`,
-      [req.params.id, req.businessId],
-    );
-    if (pkgRes.rows.length === 0)
-      return response.notFound(res, "Package not found");
-
-    const p = pkgRes.rows[0];
-    const balance = round2(Number(p.selling_price) - Number(p.amount_paid));
-    const amount =
-      req.body.amount === undefined ||
-      req.body.amount === null ||
-      req.body.amount === ""
-        ? balance
-        : round2(req.body.amount);
-
-    if (!(amount > 0))
-      return response.error(res, "Amount must be greater than 0", 400);
-    if (amount > balance + 0.001)
-      return response.error(
-        res,
-        `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
-        400,
+    // Locked read, check and write in one transaction: two payments taken
+    // at the same moment can no longer both pass the balance check and then
+    // overwrite each other's amount_paid.
+    const outcome = await withTransaction(async (client) => {
+      const found = await client.query(
+        `SELECT id, label AS label, selling_price, amount_paid, status
+           FROM packages WHERE id = $1 AND business_id = $2
+           FOR UPDATE`,
+        [req.params.id, req.businessId],
       );
+      if (found.rows.length === 0) return { notFound: true };
+      const v = found.rows[0];
+      if (v.status === "cancelled")
+        return {
+          error: "This package is cancelled. Payments can't be added to it.",
+          status: 409,
+        };
 
-    const updated = await withTransaction(async (client) => {
+      const balance = round2(Number(v.selling_price) - Number(v.amount_paid));
+      const amount =
+        req.body.amount === undefined ||
+        req.body.amount === null ||
+        req.body.amount === ""
+          ? balance
+          : round2(req.body.amount);
+
+      if (!(amount > 0))
+        return { error: "Amount must be greater than 0", status: 400 };
+      if (amount > balance + 0.001)
+        return {
+          error: `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
+          status: 400,
+        };
+
       await client.query(
         `INSERT INTO package_payments (business_id, package_id, collected_by, amount, method, note, account_id)
          VALUES ($1,$2,$3,$4,$5,$6, $7)`,
         [
           req.businessId,
-          p.id,
+          v.id,
           req.user.id,
           amount,
           req.body.method || "cash",
@@ -500,19 +541,25 @@ const addPackagePayment = async (req, res, next) => {
           await requireAccount(req.body, req.businessId, client, "payment"),
         ],
       );
-      const newPaid = round2(Number(p.amount_paid) + amount);
       const r = await client.query(
-        `UPDATE packages SET amount_paid = $1, payment_status = $2
-         WHERE id = $3 RETURNING *`,
-        [newPaid, calcPaymentStatus(newPaid, p.selling_price), p.id],
+        `UPDATE packages
+            SET amount_paid = amount_paid + $1,
+                payment_status = CASE
+                  WHEN amount_paid + $1 >= selling_price THEN 'paid'::payment_status
+                  WHEN amount_paid + $1 > 0 THEN 'partial'::payment_status
+                  ELSE 'unpaid'::payment_status END
+          WHERE id = $2 RETURNING *`,
+        [amount, v.id],
       );
-      return r.rows[0];
+      return { updated: r.rows[0], amount, label: v.label };
     });
 
+    if (outcome.notFound) return response.notFound(res, "Package not found");
+    if (outcome.error) return response.error(res, outcome.error, outcome.status);
     return response.created(
       res,
-      updated,
-      `Collected $${amount.toFixed(2)} for ${p.label}`,
+      outcome.updated,
+      `Collected $${outcome.amount.toFixed(2)} for ${outcome.label}`,
     );
   } catch (err) {
     next(err);

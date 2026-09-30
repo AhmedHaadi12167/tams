@@ -2,10 +2,12 @@
 // 200 already paid. Every figure on the page must agree.
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import { seedAccounts } from "./seed.mjs";
 const require=createRequire(import.meta.url);
-const SERVER="/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass=[],fail=[];const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
 const m2=v=>Number(v).toFixed(2);
 
@@ -24,6 +26,8 @@ const taxC=require(`${SERVER}/controllers/taxController.js`);
 
 const biz=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('Mubah','m@x.c') RETURNING id`)).rows[0].id;
 await seedAccounts(pg, biz);
+// Accounts can't go below zero, so the bank that pays airlines starts funded.
+await pg.query(`UPDATE payment_accounts SET opening_balance = 10000 WHERE business_id = $1 AND name = 'Premier Bank'`, [biz]);
 const user=(await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'Mohamed','m@x.c','h','admin') RETURNING id`,[biz])).rows[0].id;
 const A=Object.fromEntries((await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`,[biz])).rows.map(r=>[r.name,r.id]));
 const ctx={businessId:biz,user:{id:user,role:"admin"}};

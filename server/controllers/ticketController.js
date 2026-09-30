@@ -178,6 +178,15 @@ const createTicket = async (req, res, next) => {
     } = req.body;
 
     const paid = parseFloat(amount_paid) || 0;
+    // Taking more than the price at booking used to be accepted silently; the
+    // extra then hid inside receivables as a negative balance. Refuse it and
+    // let staff record the surplus as a customer deposit instead.
+    if (paid > (parseFloat(selling_price) || 0) + 0.001)
+      return response.error(
+        res,
+        `Amount paid ($${paid.toFixed(2)}) can't be more than the selling price. Record any extra as a customer deposit.`,
+        400,
+      );
     const paymentStatus = calcPaymentStatus(paid, selling_price);
     const tripType = trip_type === "round_trip" ? "round_trip" : "one_way";
     const method = (payment_method || "cash").trim() || "cash";
@@ -699,7 +708,6 @@ const updateTicket = async (req, res, next) => {
       base_price,
       tax,
       surcharge,
-      status,
       trip_type,
       return_date,
       agent_commission,
@@ -713,118 +721,148 @@ const updateTicket = async (req, res, next) => {
       visa_expiry_date,
     } = req.body;
 
+    // Status is deliberately NOT taken from the form. Cancelling moves money
+    // (refund, fee, tax, airline return) and only POST /tickets/:id/cancel
+    // records those movements. Setting "cancelled" here used to drop the sale
+    // while the money stayed in the bank, and anyone who could edit a ticket
+    // could do it, including roles that are not allowed to cancel.
     const tripType = trip_type === "round_trip" ? "round_trip" : "one_way";
-    const paid = parseFloat(amount_paid) || 0;
-    const paymentStatus = calcPaymentStatus(paid, selling_price);
+    const paid = round2(amount_paid);
+    const selling = round2(selling_price);
+    if (paid < 0)
+      return response.error(res, "Amount paid cannot be negative", 400);
+    if (paid > selling + 0.001)
+      return response.error(
+        res,
+        `Amount paid ($${paid.toFixed(2)}) can't be more than the selling price ($${selling.toFixed(2)}).`,
+        400,
+      );
+    const paymentStatus = calcPaymentStatus(paid, selling);
 
     const airline = await resolveAirline(req.body.airline_name, req.businessId);
     const airline_name = airline.name;
-
-    // What the customer had paid before this edit. Changing amount_paid
-    // without writing a matching payment row would leave the ticket and the
-    // ledger disagreeing — a drift that predates accounts but only becomes
-    // visible now that balances are derived from the payment history.
-    const priorPaid = (
-      await query(
-        `SELECT amount_paid FROM tickets WHERE id=$1 AND business_id=$2`,
-        [req.params.id, req.businessId],
-      )
-    ).rows[0]?.amount_paid;
-
-    const result = await query(
-      `UPDATE tickets SET
-        ticket_type=$1, passenger_name=$2, contact_number=$3,
-        from_city=$4, to_city=$5, flight_date=$6,
-        airline_name=$7, ticket_reference=$8,
-        cost_price=$9, selling_price=$10,
-        base_price=$11, tax=$12, surcharge=$13,
-        status=COALESCE($14::ticket_status, status),
-        trip_type=$15, return_date=$16,
-        agent_commission=$17,
-        amount_paid=$18, payment_status=$19,
-        booked_by_customer_id=COALESCE($20, booked_by_customer_id),
-        passport_number=$23, nationality=$24, date_of_birth=$25,
-        passport_expiry_date=$26, visa_type=$27, visa_expiry_date=$28
-       WHERE id=$21 AND business_id=$22 RETURNING *`,
-      [
-        ticket_type,
-        passenger_name,
-        contact_number || null,
-        from_city,
-        to_city,
-        flight_date,
-        airline_name,
-        ticket_reference || null,
-        cost_price,
-        selling_price,
-        base_price || null,
-        tax || null,
-        surcharge || null,
-        status || null,
-        tripType,
-        tripType === "round_trip" ? return_date || null : null,
-        parseFloat(agent_commission) || 0,
-        paid,
-        paymentStatus,
-        booked_by_customer_id || null,
-        req.params.id,
-        req.businessId,
-        nullIfBlank(passport_number),
-        nullIfBlank(nationality),
-        nullIfBlank(date_of_birth),
-        nullIfBlank(passport_expiry_date),
-        nullIfBlank(visa_type),
-        nullIfBlank(visa_expiry_date),
-      ],
-    );
-
-    if (result.rows.length === 0)
-      return response.notFound(res, "Ticket not found");
-
-    // Record the change in what has been paid as its own movement, so the
-    // payment history still adds up to the ticket's amount_paid. A negative
-    // delta is a correction or refund; both are real and both belong here.
-    const paidDelta = Math.round((paid - (Number(priorPaid) || 0)) * 100) / 100;
-    if (Math.abs(paidDelta) > 0.001) {
-      await query(
-        `INSERT INTO ticket_payments
-           (business_id, ticket_id, collected_by, amount, method, note, account_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          req.businessId,
-          req.params.id,
-          req.user.id,
-          paidDelta,
-          (req.body.payment_method || "cash").trim() || "cash",
-          paidDelta > 0
-            ? "Further payment (edit)"
-            : "Correction or refund (edit)",
-          await requireAccount(req.body, req.businessId, null, "adjustment"),
-        ],
-      );
-    }
-
-    if (airline.id) {
-      await query(`UPDATE tickets SET airline_id = $1 WHERE id = $2`, [
-        airline.id,
-        req.params.id,
-      ]);
-      result.rows[0].airline_id = airline.id;
-    }
-
-    if (await hasColumn("tickets", "agent_id")) {
-      const wantsCommission = (parseFloat(agent_commission) || 0) > 0;
-      const agent = wantsCommission
+    const trackAgent = await hasColumn("tickets", "agent_id");
+    const wantsCommission = (parseFloat(agent_commission) || 0) > 0;
+    const agent =
+      trackAgent && wantsCommission
         ? await resolveAgent(req.body, req.businessId)
         : { id: null };
-      await query(
-        `UPDATE tickets SET agent_id = $1 WHERE id = $2 AND business_id = $3`,
-        [agent.id, req.params.id, req.businessId],
-      );
-      result.rows[0].agent_id = agent.id;
-    }
 
-    return response.success(res, result.rows[0], "Ticket updated successfully");
+    const outcome = await withTransaction(async (client) => {
+      // Locked, so a payment taken at the same moment can't be overwritten
+      // by this edit's idea of what had been paid.
+      const current = await client.query(
+        `SELECT id, amount_paid, status FROM tickets
+          WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
+      );
+      if (current.rows.length === 0) return { notFound: true };
+      if (current.rows[0].status === "cancelled")
+        return {
+          error:
+            "This ticket is cancelled. Its money has been settled by the cancellation and it can no longer be edited.",
+          status: 409,
+        };
+
+      // Record the change in what has been paid as its own movement, so the
+      // payment history still adds up to the ticket's amount_paid. Resolved
+      // BEFORE the ticket is changed: if no account is chosen the whole edit
+      // is refused, instead of leaving a ticket that says "paid" with no
+      // matching money in any account.
+      const paidDelta = round2(paid - Number(current.rows[0].amount_paid || 0));
+      const accountId =
+        Math.abs(paidDelta) > 0.001
+          ? await requireAccount(req.body, req.businessId, client, "adjustment")
+          : null;
+
+      const result = await client.query(
+        `UPDATE tickets SET
+          ticket_type=$1, passenger_name=$2, contact_number=$3,
+          from_city=$4, to_city=$5, flight_date=$6,
+          airline_name=$7, ticket_reference=$8,
+          cost_price=$9, selling_price=$10,
+          base_price=$11, tax=$12, surcharge=$13,
+          trip_type=$14, return_date=$15,
+          agent_commission=$16,
+          amount_paid=$17, payment_status=$18,
+          booked_by_customer_id=COALESCE($19, booked_by_customer_id),
+          passport_number=$22, nationality=$23, date_of_birth=$24,
+          passport_expiry_date=$25, visa_type=$26, visa_expiry_date=$27
+         WHERE id=$20 AND business_id=$21 RETURNING *`,
+        [
+          ticket_type,
+          passenger_name,
+          contact_number || null,
+          from_city,
+          to_city,
+          flight_date,
+          airline_name,
+          ticket_reference || null,
+          cost_price,
+          selling,
+          base_price || null,
+          tax || null,
+          surcharge || null,
+          tripType,
+          tripType === "round_trip" ? return_date || null : null,
+          parseFloat(agent_commission) || 0,
+          paid,
+          paymentStatus,
+          booked_by_customer_id || null,
+          req.params.id,
+          req.businessId,
+          nullIfBlank(passport_number),
+          nullIfBlank(nationality),
+          nullIfBlank(date_of_birth),
+          nullIfBlank(passport_expiry_date),
+          nullIfBlank(visa_type),
+          nullIfBlank(visa_expiry_date),
+        ],
+      );
+      const ticket = result.rows[0];
+
+      if (Math.abs(paidDelta) > 0.001) {
+        await client.query(
+          `INSERT INTO ticket_payments
+             (business_id, ticket_id, collected_by, amount, method, note, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            req.businessId,
+            ticket.id,
+            req.user.id,
+            paidDelta,
+            (req.body.payment_method || "cash").trim() || "cash",
+            paidDelta > 0
+              ? "Further payment (edit)"
+              : "Correction or refund (edit)",
+            accountId,
+          ],
+        );
+      }
+
+      if (airline.id) {
+        await client.query(`UPDATE tickets SET airline_id = $1 WHERE id = $2`, [
+          airline.id,
+          ticket.id,
+        ]);
+        ticket.airline_id = airline.id;
+      }
+
+      if (trackAgent) {
+        await client.query(
+          `UPDATE tickets SET agent_id = $1 WHERE id = $2 AND business_id = $3`,
+          [agent.id, ticket.id, req.businessId],
+        );
+        ticket.agent_id = agent.id;
+      }
+      return { ticket };
+    });
+
+    if (outcome.notFound) return response.notFound(res, "Ticket not found");
+    if (outcome.error)
+      return response.error(res, outcome.error, outcome.status);
+    return response.success(res, outcome.ticket, "Ticket updated successfully");
   } catch (err) {
     next(err);
   }
@@ -922,29 +960,38 @@ const deleteTicket = async (req, res, next) => {
 const addPayment = async (req, res, next) => {
   try {
     const { amount, method, note } = req.body;
-    const paid = parseFloat(amount);
-    if (!paid || paid <= 0)
+    const paid = round2(amount);
+    if (!(paid > 0))
       return response.error(res, "Amount must be greater than 0", 400);
 
-    const ticketRes = await query(
-      `SELECT id, selling_price, amount_paid FROM tickets
-       WHERE id = $1 AND business_id = $2`,
-      [req.params.id, req.businessId],
-    );
-    if (ticketRes.rows.length === 0)
-      return response.notFound(res, "Ticket not found");
-
-    const ticket = ticketRes.rows[0];
-    const balance =
-      parseFloat(ticket.selling_price) - parseFloat(ticket.amount_paid);
-    if (paid > balance + 0.001)
-      return response.error(
-        res,
-        `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
-        400,
+    // Everything below happens with the ticket row locked. Reading the
+    // balance outside the transaction let two payments submitted together
+    // both pass the check and then overwrite each other's amount_paid —
+    // two payment rows, one payment on the ticket.
+    const outcome = await withTransaction(async (client) => {
+      const ticketRes = await client.query(
+        `SELECT id, selling_price, amount_paid, status FROM tickets
+          WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
       );
+      if (ticketRes.rows.length === 0) return { notFound: true };
+      const ticket = ticketRes.rows[0];
+      if (ticket.status === "cancelled")
+        return {
+          error: "This ticket is cancelled. Payments can't be added to it.",
+          status: 409,
+        };
 
-    const updated = await withTransaction(async (client) => {
+      const balance = round2(
+        Number(ticket.selling_price) - Number(ticket.amount_paid),
+      );
+      if (paid > balance + 0.001)
+        return {
+          error: `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
+          status: 400,
+        };
+
       await client.query(
         `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, note, account_id)
          VALUES ($1,$2,$3,$4,$5,$6, $7)`,
@@ -958,16 +1005,27 @@ const addPayment = async (req, res, next) => {
           await requireAccount(req.body, req.businessId, client, "payment"),
         ],
       );
-      const newPaid = parseFloat(ticket.amount_paid) + paid;
       const result = await client.query(
-        `UPDATE tickets SET amount_paid = $1, payment_status = $2
-         WHERE id = $3 RETURNING *`,
-        [newPaid, calcPaymentStatus(newPaid, ticket.selling_price), ticket.id],
+        `UPDATE tickets
+            SET amount_paid = amount_paid + $1,
+                payment_status = CASE
+                  WHEN amount_paid + $1 >= selling_price THEN 'paid'::payment_status
+                  WHEN amount_paid + $1 > 0 THEN 'partial'::payment_status
+                  ELSE 'unpaid'::payment_status END
+          WHERE id = $2 RETURNING *`,
+        [paid, ticket.id],
       );
-      return result.rows[0];
+      return { ticket: result.rows[0] };
     });
 
-    return response.created(res, updated, "Payment collected successfully");
+    if (outcome.notFound) return response.notFound(res, "Ticket not found");
+    if (outcome.error)
+      return response.error(res, outcome.error, outcome.status);
+    return response.created(
+      res,
+      outcome.ticket,
+      "Payment collected successfully",
+    );
   } catch (err) {
     next(err);
   }
@@ -1009,19 +1067,28 @@ const getPayments = async (req, res, next) => {
  */
 const cancelTicket = async (req, res, next) => {
   try {
-    const ticketRes = await query(
+    const hasAirlinePaid = await hasColumn("tickets", "airline_paid");
+    const hasTaxRefunded = await hasColumn("tickets", "tax_refunded");
+
+    // The whole cancellation runs inside one transaction with the ticket row
+    // locked. Before, the "already cancelled?" check ran outside it, so two
+    // clicks (or two staff) cancelling together both passed the check and
+    // both refunded the customer.
+    const outcome = await withTransaction(async (client) => {
+    const fail = (message, status = 400) => ({ error: message, status });
+    const ticketRes = await client.query(
       `SELECT id, passenger_name, selling_price, amount_paid, cost_price,
               status, airline_id, tax
-              ${(await hasColumn("tickets", "airline_paid")) ? ", airline_paid" : ""}
-         FROM tickets WHERE id = $1 AND business_id = $2`,
+              ${hasAirlinePaid ? ", airline_paid" : ""}
+         FROM tickets WHERE id = $1 AND business_id = $2
+         FOR UPDATE`,
       [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
     );
-    if (ticketRes.rows.length === 0)
-      return response.notFound(res, "Ticket not found");
+    if (ticketRes.rows.length === 0) return { notFound: true };
 
     const ticket = ticketRes.rows[0];
     if (ticket.status === "cancelled")
-      return response.error(res, "This ticket is already cancelled", 400);
+      return fail("This ticket is already cancelled", 409);
 
     const paid = round2(ticket.amount_paid);
     const airlinePaid = round2(ticket.airline_paid || 0);
@@ -1031,7 +1098,7 @@ const cancelTicket = async (req, res, next) => {
     const airlineRefund = round2(req.body.airline_refund);
 
     if (refund < 0 || airlineRefund < 0)
-      return response.error(res, "Refunds cannot be negative", 400);
+      return fail("Refunds cannot be negative");
 
     // The tax is not the agency's money to give back. It was collected on
     // the government's behalf and is owed whether or not anyone flies, so
@@ -1047,25 +1114,20 @@ const cancelTicket = async (req, res, next) => {
     const refundable = round2(Math.max(paid - (tax - taxRefunded), 0));
 
     if (refund > refundable + 0.001)
-      return response.error(
-        res,
+      return fail(
         tax > 0 && !taxReturnedByAirline
           ? `You can't refund more than $${refundable.toFixed(2)}. The customer paid ` +
               `$${paid.toFixed(2)}, but $${tax.toFixed(2)} of it is government tax, ` +
               `which is not refundable. If the airline returned the tax as well, ` +
               `tick "the airline returned the tax" and the full amount can go back.`
           : `You can't refund more than the customer paid ($${paid.toFixed(2)})`,
-        400,
       );
     if (airlineRefund > airlinePaid + 0.001)
-      return response.error(
-        res,
+      return fail(
         `The airline can't return more than you paid them ($${airlinePaid.toFixed(2)})`,
-        400,
       );
     if (airlineRefund > 0.001 && !ticket.airline_id)
-      return response.error(
-        res,
+      return fail(
         "Link this ticket to a registered airline before recording an airline refund, so the money can be credited to an account.",
         409,
       );
@@ -1081,13 +1143,11 @@ const cancelTicket = async (req, res, next) => {
     );
     const maxRefund = round2(Math.min(refundable, refundFundingLimit));
     if (refund > maxRefund + 0.001) {
-      return response.error(
-        res,
+      return fail(
         `Refund exceeds the $${maxRefund.toFixed(2)} available from this ticket. ` +
           `The airline returned $${airlineRefund.toFixed(2)}; after airline ` +
           `payments and $${taxStillOwed.toFixed(2)} tax still owed, the ticket ` +
           `cannot fund a larger refund.`,
-        400,
       );
     }
 
@@ -1117,19 +1177,19 @@ const cancelTicket = async (req, res, next) => {
     // cancellation with no refund and no airline return moves nothing.
     const accountId =
       refund > 0.001
-        ? await requireAccount(req.body, req.businessId, null, "refund")
+        ? await requireAccount(req.body, req.businessId, client, "refund")
         : null;
     const airlineAccountId =
       airlineRefund > 0.001
         ? await requireAccount(
             { account_id: req.body.airline_account_id || req.body.account_id },
             req.businessId,
-            null,
+            client,
             "airline refund",
           )
         : null;
 
-    const result = await withTransaction(async (client) => {
+    {
       // 1. Money back to the customer, recorded as a negative payment so it
       //    sits in the same history as everything else they paid.
       if (refund > 0.001) {
@@ -1198,9 +1258,9 @@ const cancelTicket = async (req, res, next) => {
         `cancel_reason = ${p(req.body.reason || null)}`,
         `cancelled_by = ${p(req.user.id)}`,
       ];
-      if (await hasColumn("tickets", "airline_paid"))
+      if (hasAirlinePaid)
         sets.push(`airline_paid = airline_paid - ${p(airlineRefund)}`);
-      if (await hasColumn("tickets", "tax_refunded"))
+      if (hasTaxRefunded)
         sets.push(`tax_refunded = ${p(taxRefunded)}`);
 
       const upd = await client.query(
@@ -1210,8 +1270,7 @@ const cancelTicket = async (req, res, next) => {
         vals,
       );
 
-      return upd.rows[0];
-    });
+      const result = upd.rows[0];
 
     const parts = [];
     if (refund > 0) parts.push(`$${refund.toFixed(2)} refunded`);
@@ -1233,11 +1292,19 @@ const cancelTicket = async (req, res, next) => {
         `$${writeOff.toFixed(2)} written off — the customer owes nothing`,
       );
 
-    return response.success(
-      res,
+    return {
       result,
-      parts.length ? `Cancelled. ${parts.join(", ")}.` : "Ticket cancelled.",
-    );
+      message: parts.length
+        ? `Cancelled. ${parts.join(", ")}.`
+        : "Ticket cancelled.",
+    };
+    }
+    });
+
+    if (outcome.notFound) return response.notFound(res, "Ticket not found");
+    if (outcome.error)
+      return response.error(res, outcome.error, outcome.status);
+    return response.success(res, outcome.result, outcome.message);
   } catch (err) {
     next(err);
   }

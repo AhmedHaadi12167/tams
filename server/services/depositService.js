@@ -130,12 +130,19 @@ const applyDeposit = async (
   const t = targetOrThrow(kind);
   const id = uuidOrThrow(recordId, `${kind} id`);
 
+  // Lock the customer first: two bookings paid from the same deposit at the
+  // same moment would otherwise both see the full balance and spend it twice.
+  await client.query(
+    `SELECT id FROM customers WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+    [uuidOrThrow(customerId, "customer id"), businessId],
+  );
   const held = await depositBalance(businessId, customerId, client);
   if (held <= 0.001) return { applied: 0, remaining: 0, outstanding: 0 };
 
   const recRes = await client.query(
     `SELECT ${t.total} AS total, COALESCE(amount_paid, 0) AS paid
-       FROM ${t.table} WHERE id = $1 AND business_id = $2`,
+       FROM ${t.table} WHERE id = $1 AND business_id = $2
+      FOR UPDATE`,
     [id, businessId],
   );
   if (recRes.rows.length === 0) {

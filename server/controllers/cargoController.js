@@ -371,6 +371,7 @@ const updateCargo = async (req, res, next) => {
     // paid is known — an edit that doesn't touch the money needs no account.
     const trackPayments = await hasTable("cargo_payments");
     const hasProfit = await hasColumn("cargo_shipments", "profit_per_kg");
+    const stampCancel = await hasColumn("cargo_shipments", "cancelled_at");
     const marginTouched =
       req.body.profit_per_kg !== undefined || req.body.profit_flat !== undefined;
     const margin = marginColumns(req.body, flat !== null && flat > 0 ? "flat" : "weight");
@@ -380,7 +381,8 @@ const updateCargo = async (req, res, next) => {
       // movement. Editing the total without a matching row would leave the
       // shipment and the ledger disagreeing, and nothing would reveal it.
       const before = await client.query(
-        `SELECT amount_paid FROM cargo_shipments WHERE id=$1 AND business_id=$2`,
+        `SELECT amount_paid FROM cargo_shipments WHERE id=$1 AND business_id=$2
+          FOR UPDATE`,
         [req.params.id, req.businessId],
       );
       if (before.rows.length === 0) return null;
@@ -400,6 +402,11 @@ const updateCargo = async (req, res, next) => {
           -- Stamped the moment it is first marked delivered, and never
           -- overwritten afterwards, so 'arrived on' means what it says even
           -- if the record is edited later.
+          ${stampCancel ? `cancelled_at = CASE
+            WHEN $11::cargo_status = 'cancelled' AND cancelled_at IS NULL THEN NOW()
+            WHEN $11::cargo_status IS NOT NULL AND $11::cargo_status <> 'cancelled' THEN NULL
+            ELSE cancelled_at
+          END,` : ""}
           arrived_at = CASE
             WHEN $11::cargo_status = 'delivered' AND arrived_at IS NULL THEN NOW()
             WHEN $11::cargo_status IS NOT NULL AND $11::cargo_status <> 'delivered' THEN NULL
@@ -470,6 +477,25 @@ const updateCargo = async (req, res, next) => {
  */
 const deleteCargo = async (req, res, next) => {
   try {
+    // Refused when money has moved. Deleting used to take the payment rows
+    // with it, which silently lowered the account balances: the cash was
+    // still in the drawer but the books no longer knew it had arrived.
+    // Cancel it instead — the history stays and the refund is recorded.
+    const history = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM cargo_payments WHERE cargo_id = $1)
+       + (SELECT COUNT(*) FROM cargo_shipments WHERE id = $1 AND COALESCE(amount_paid, 0) <> 0)
+       + (SELECT COUNT(*) FROM supplier_payments WHERE cargo_id = $1)
+       + (SELECT COUNT(*) FROM deposit_applications WHERE cargo_id = $1) AS n`,
+      [req.params.id],
+    );
+    if (Number(history.rows[0].n) > 0)
+      return response.error(
+        res,
+        "This shipment has payments recorded against it and can't be deleted. Use Cancel instead so the money history is kept.",
+        409,
+      );
+
     const result = await query(
       `DELETE FROM cargo_shipments WHERE id = $1 AND business_id = $2 RETURNING id`,
       [req.params.id, req.businessId],
@@ -531,36 +557,41 @@ const addCargoPayment = async (req, res, next) => {
     const amount = Math.round((Number(req.body.amount) || 0) * 100) / 100;
     if (amount <= 0) return response.error(res, "Enter a valid amount", 400);
 
-    const found = await query(
-      `SELECT id, sender_name, total_price, amount_paid
-         FROM cargo_shipments WHERE id = $1 AND business_id = $2`,
-      [req.params.id, req.businessId],
-    );
-    if (found.rows.length === 0)
-      return response.notFound(res, "Shipment not found");
-
-    const cargo = found.rows[0];
-    const balance =
-      Math.round(
-        (Number(cargo.total_price) - Number(cargo.amount_paid)) * 100,
-      ) / 100;
-
-    if (amount > balance + 0.001)
-      return response.error(
-        res,
-        `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
-        400,
-      );
-
-    const accountId = await requireAccount(
-      req.body,
-      req.businessId,
-      null,
-      "payment",
-    );
     const trackPayments = await hasTable("cargo_payments");
 
-    const updated = await withTransaction(async (client) => {
+    // Locked read, check and write in one transaction, so two payments taken
+    // together cannot both pass the balance check and overwrite each other.
+    const outcome = await withTransaction(async (client) => {
+      const found = await client.query(
+        `SELECT id, sender_name, total_price, amount_paid, cargo_status
+           FROM cargo_shipments WHERE id = $1 AND business_id = $2
+           FOR UPDATE`,
+        [req.params.id, req.businessId],
+      );
+      if (found.rows.length === 0) return { notFound: true };
+      const cargo = found.rows[0];
+      if (cargo.cargo_status === "cancelled")
+        return {
+          error: "This shipment is cancelled. Payments can't be added to it.",
+          status: 409,
+        };
+
+      const balance =
+        Math.round(
+          (Number(cargo.total_price) - Number(cargo.amount_paid)) * 100,
+        ) / 100;
+      if (amount > balance + 0.001)
+        return {
+          error: `Amount exceeds the remaining balance ($${balance.toFixed(2)})`,
+          status: 400,
+        };
+
+      const accountId = await requireAccount(
+        req.body,
+        req.businessId,
+        client,
+        "payment",
+      );
       if (trackPayments) {
         await client.query(
           `INSERT INTO cargo_payments
@@ -578,28 +609,27 @@ const addCargoPayment = async (req, res, next) => {
         );
       }
 
-      const newPaid = Math.round((Number(cargo.amount_paid) + amount) * 100) / 100;
-      const status =
-        newPaid >= Number(cargo.total_price) - 0.001
-          ? "paid"
-          : newPaid > 0
-            ? "partial"
-            : "unpaid";
-
       const r = await client.query(
         `UPDATE cargo_shipments
-            SET amount_paid = $1, payment_status = $2::payment_status
-          WHERE id = $3 AND business_id = $4
+            SET amount_paid = amount_paid + $1,
+                payment_status = CASE
+                  WHEN amount_paid + $1 >= total_price - 0.001 THEN 'paid'::payment_status
+                  WHEN amount_paid + $1 > 0 THEN 'partial'::payment_status
+                  ELSE 'unpaid'::payment_status END
+          WHERE id = $2 AND business_id = $3
           RETURNING *`,
-        [newPaid, status, cargo.id, req.businessId],
+        [amount, cargo.id, req.businessId],
       );
-      return r.rows[0];
+      return { updated: r.rows[0], sender: cargo.sender_name };
     });
 
+    if (outcome.notFound) return response.notFound(res, "Shipment not found");
+    if (outcome.error)
+      return response.error(res, outcome.error, outcome.status);
     return response.success(
       res,
-      updated,
-      `$${amount.toFixed(2)} collected from ${cargo.sender_name}`,
+      outcome.updated,
+      `$${amount.toFixed(2)} collected from ${outcome.sender}`,
     );
   } catch (err) {
     next(err);

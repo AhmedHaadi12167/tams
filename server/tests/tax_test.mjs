@@ -1,10 +1,12 @@
 // Tax belongs to the government, not the airline — and not to the agency.
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
+import path from "path";
+import { fileURLToPath } from "url";
 import fs from "fs";
 import { seedAccounts } from "./seed.mjs";
 const require=createRequire(import.meta.url);
-const SERVER="/sessions/awesome-festive-mccarthy/mnt/tams/server";
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pass=[],fail=[];const ck=(n,ok,d="")=>(ok?pass:fail).push(n+(d?` — ${d}`:""));
 const m2=v=>Number(v).toFixed(2);
 
@@ -25,6 +27,8 @@ const finC=require(`${SERVER}/controllers/financialsController.js`);
 
 const biz=(await pg.query(`INSERT INTO businesses (name,email) VALUES ('E','e@x.c') RETURNING id`)).rows[0].id;
 await seedAccounts(pg, biz);
+// Accounts can't go below zero, so the bank that pays airlines starts funded.
+await pg.query(`UPDATE payment_accounts SET opening_balance = 10000 WHERE business_id = $1 AND name = 'Premier Bank'`, [biz]);
 const user=(await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`,[biz])).rows[0].id;
 const A=Object.fromEntries((await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`,[biz])).rows.map(r=>[r.name,r.id]));
 const ctx={businessId:biz,user:{id:user,role:"admin"}};
@@ -65,7 +69,8 @@ const led=(await pg.query(`SELECT direction,amount FROM v_cash_ledger WHERE busi
 ck("the tax payment appears in the ledger as money out", led.length===1 && led[0].direction==="out" && m2(led[0].amount)==="80.00");
 
 // Accounts still reconcile.
-const bal=Number((await pg.query(`SELECT COALESCE(SUM(balance),0) s FROM v_account_balance WHERE business_id=$1`,[biz])).rows[0].s);
+// Less the 10,000 Premier Bank was funded with, so only this test's money is counted.
+const bal=Number((await pg.query(`SELECT COALESCE(SUM(balance),0) - 10000 s FROM v_account_balance WHERE business_id=$1`,[biz])).rows[0].s);
 const flow=(await pg.query(`SELECT COALESCE(SUM(amount) FILTER (WHERE direction='in'),0) i, COALESCE(SUM(amount) FILTER (WHERE direction='out'),0) o FROM v_cash_ledger WHERE business_id=$1 AND account_id IS NOT NULL`,[biz])).rows[0];
 ck("accounts still equal money in minus out", m2(bal)===m2(Number(flow.i)-Number(flow.o)), `${m2(bal)}`);
 ck("what's left is 700 in less 420 airline less 80 tax", m2(bal)==="200.00", m2(bal));

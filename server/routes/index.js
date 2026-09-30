@@ -25,6 +25,10 @@ const packageController = require("../controllers/packageController");
 const accountController = require("../controllers/accountController");
 const trackingController = require("../controllers/trackingController");
 const taxController = require("../controllers/taxController");
+const { cancelHandler } = require("../services/serviceCancel");
+const ownerController = require("../controllers/ownerController");
+const journalController = require("../controllers/journalController");
+const openingImport = require("../controllers/openingImportController");
 
 const {
   groupBookingValidation,
@@ -529,6 +533,13 @@ router.post(
   authorize("super_admin", "admin", "agent", "accountant"),
   visaController.addVisaPayment,
 );
+// Cancelling records the refund and any supplier return. The edit form can
+// no longer set "cancelled", so this is the only way to cancel a visa.
+router.post(
+  "/visas/:id/cancel",
+  authorize("super_admin", "admin", "accountant"),
+  cancelHandler("visa"),
+);
 
 // ── Hajj / Umrah packages ─────────────────────────────────
 router.get(
@@ -562,6 +573,11 @@ router.post(
   "/packages/:id/payments",
   authorize("super_admin", "admin", "agent", "accountant"),
   packageController.addPackagePayment,
+);
+router.post(
+  "/packages/:id/cancel",
+  authorize("super_admin", "admin", "accountant"),
+  cancelHandler("package"),
 );
 
 // ── Payment accounts and the cash ledger ──────────────────
@@ -713,6 +729,31 @@ router.post(
   "/financials/opening-items/:id/payments",
   authorize("super_admin", "admin", "accountant"),
   financialsController.collectOpeningReceivable,
+);
+// ── Owners: capital, ownership %, profit share, contributions, drawings ──
+router.get("/owners", authorize("super_admin", "admin", "accountant"), ownerController.getOwners);
+router.post("/owners", authorize("super_admin", "admin"), ownerController.createOwner);
+router.put("/owners/:id", authorize("super_admin", "admin"), ownerController.updateOwner);
+router.delete("/owners/:id", authorize("super_admin", "admin"), ownerController.deleteOwner);
+router.get("/owners/:id/transactions", authorize("super_admin", "admin", "accountant"), ownerController.getOwnerTransactions);
+router.post("/owners/:id/transactions", authorize("super_admin", "admin"), ownerController.addOwnerTransaction);
+router.delete("/owners/transactions/:txId", authorize("super_admin", "admin"), ownerController.deleteOwnerTransaction);
+
+// ── The books: journal, general ledger, trial balance ────
+router.get("/financials/chart-of-accounts", authorize("super_admin", "admin", "accountant"), journalController.getChartOfAccounts);
+router.get("/financials/trial-balance", authorize("super_admin", "admin", "accountant"), journalController.getTrialBalance);
+router.get("/financials/general-ledger", authorize("super_admin", "admin", "accountant"), journalController.getGeneralLedger);
+router.get("/financials/journal", authorize("super_admin", "admin", "accountant"), journalController.getJournal);
+
+// ── Importing balances from the previous system ──────────
+router.get("/financials/opening-items/template", authorize("super_admin", "admin"), openingImport.downloadTemplate);
+router.post("/financials/opening-items/import/preview", authorize("super_admin", "admin"), openingImport.previewImport);
+router.post("/financials/opening-items/import/commit", authorize("super_admin", "admin"), openingImport.commitImport);
+
+router.get(
+  "/financials/opening-balances",
+  authorize("super_admin", "admin", "accountant"),
+  financialsController.getOpeningBalances,
 );
 router.put(
   "/financials/opening-balances",

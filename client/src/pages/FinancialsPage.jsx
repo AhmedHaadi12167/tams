@@ -51,10 +51,17 @@ import {
   EyeOff,
   Landmark,
   Banknote,
+  Users,
+  BookOpen,
+  FileSpreadsheet,
 } from "lucide-react";
 import { format } from "date-fns";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
+import BalanceSheetPanel from "./financials/BalanceSheetPanel";
+import OwnersPanel from "./financials/OwnersPanel";
+import BooksPanel from "./financials/BooksPanel";
+import OpeningImportModal from "./financials/OpeningImportModal";
 
 const COLORS = [
   "#3b82f6",
@@ -93,6 +100,8 @@ const tooltipStyle = {
 const TABS = [
   { key: "pl", label: "Profit & Loss", icon: TrendingUp },
   { key: "balance", label: "Balance Sheet", icon: Scale },
+  { key: "owners", label: "Owners", icon: Users },
+  { key: "books", label: "Books", icon: BookOpen },
   { key: "cash", label: "Cash Flow", icon: Wallet },
   { key: "receivables", label: "Receivables", icon: AlertTriangle },
   { key: "expenses", label: "Expenses", icon: Receipt },
@@ -333,7 +342,27 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
     financials_start: "",
   });
   const [saving, setSaving] = useState(false);
+  const [current, setCurrent] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Show what is saved now, so editing one figure doesn't mean retyping all.
+  useEffect(() => {
+    if (!open) return;
+    financialsAPI
+      .getOpeningBalances()
+      .then((r) => {
+        const d = r.data.data || {};
+        setCurrent(d);
+        setForm({
+          opening_cash: d.opening_cash ?? "",
+          fixed_assets: d.fixed_assets ?? "",
+          liabilities: d.liabilities ?? "",
+          owner_capital: d.owner_capital ?? "",
+          financials_start: d.financials_start ? String(d.financials_start).slice(0, 10) : "",
+        });
+      })
+      .catch(() => setCurrent(null));
+  }, [open]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -362,14 +391,21 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
           current value.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Input
-            label="Cash in hand"
-            type="number"
-            step="0.01"
-            value={form.opening_cash}
-            onChange={set("opening_cash")}
-            placeholder="0.00"
-          />
+          <div>
+            <Input
+              label="Opening cash in hand"
+              type="number"
+              step="0.01"
+              min="0"
+              value={form.opening_cash}
+              onChange={set("opening_cash")}
+              placeholder="0.00"
+            />
+            <p className="text-[11px] text-gray-500 mt-1">
+              Saved as the opening balance of your{" "}
+              <b>{current?.cash_in_hand_account || "Cash in Hand"}</b> account.
+            </p>
+          </div>
           <Input
             label="Fixed assets"
             type="number"
@@ -394,6 +430,11 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
             onChange={set("owner_capital")}
             placeholder="Auto-derived if blank"
           />
+          <p className="sm:col-span-2 -mt-2 text-[11px] text-gray-500">
+            With several owners, register each one on the Owners tab instead —
+            their opening capital, ownership % and profit share. The balance
+            sheet then shows every owner's equity.
+          </p>
         </div>
         <Input
           label="Financials start date"
@@ -787,6 +828,7 @@ export default function FinancialsPage() {
     initial: null,
   });
   const [openingModal, setOpeningModal] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [openingItemModal, setOpeningItemModal] = useState({
     open: false,
     type: "receivable",
@@ -1043,10 +1085,11 @@ export default function FinancialsPage() {
                     </p>
                   )}
 
-                  {pl.cancellations?.cancelled_count > 0 && (
+                  {(pl.cancellations?.cancelled_count > 0 ||
+                    pl.cancellations?.other_services_count > 0) && (
                     <>
                       <Line
-                        label={`CANCELLATIONS (${pl.cancellations.cancelled_count} ticket${pl.cancellations.cancelled_count === 1 ? "" : "s"})`}
+                        label={`CANCELLATIONS (${pl.cancellations.cancelled_count} ticket${pl.cancellations.cancelled_count === 1 ? "" : "s"}${pl.cancellations.other_services_count ? `, ${pl.cancellations.other_services_count} other` : ""})`}
                         value=""
                         bold
                       />
@@ -1062,6 +1105,22 @@ export default function FinancialsPage() {
                           value={`(${money(pl.cancellations.unrecovered_cost)})`}
                           indent
                           tone="red"
+                        />
+                      )}
+                      {pl.cancellations.tax_shortfall > 0 && (
+                        <Line
+                          label="Tax still owed but not collected from the customer"
+                          value={`(${money(pl.cancellations.tax_shortfall)})`}
+                          indent
+                          tone="red"
+                        />
+                      )}
+                      {Math.abs(pl.cancellations.other_services || 0) > 0.004 && (
+                        <Line
+                          label="Visas, packages & cargo cancelled (kept less supplier loss)"
+                          value={money(pl.cancellations.other_services)}
+                          indent
+                          tone={pl.cancellations.other_services >= 0 ? "green" : "red"}
                         />
                       )}
                       <Line
@@ -1099,6 +1158,14 @@ export default function FinancialsPage() {
                       tone="red"
                     />
                   ))}
+                  {pl.operating_costs.bank_fees > 0 && (
+                    <Line
+                      label="Bank & transfer fees"
+                      value={`(${money(pl.operating_costs.bank_fees)})`}
+                      indent
+                      tone="red"
+                    />
+                  )}
                   {pl.operating_costs.by_category.length === 0 && (
                     <Line
                       label="No expenses recorded"
@@ -1237,145 +1304,10 @@ export default function FinancialsPage() {
           {/* ── BALANCE SHEET ────────────────────────── */}
           {tab === "balance" && balance && (
             <div className="space-y-6">
-              <Card className="p-4 flex items-center gap-3">
-                {balance.balanced ? (
-                  <>
-                    <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0" />
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      Balanced as of{" "}
-                      <span className="font-semibold text-gray-900 dark:text-white">
-                        {fmtDate(balance.as_of)}
-                      </span>{" "}
-                      — assets equal liabilities plus equity.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <AlertTriangle className="w-5 h-5 text-orange-500 shrink-0" />
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      Out of balance by{" "}
-                      <span className="font-semibold text-orange-600">
-                        {money(balance.difference)}
-                      </span>{" "}
-                      — check the opening balances.
-                    </p>
-                  </>
-                )}
-              </Card>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <Card className="p-6">
-                  <h2 className="font-semibold text-gray-900 dark:text-white text-sm mb-4">
-                    Assets
-                  </h2>
-                  <Line
-                    label="Cash & bank"
-                    value={money(balance.assets.cash_and_bank)}
-                    indent
-                  />
-                  <Line
-                    label="Cash in hand"
-                    value={money(balance.assets.cash_in_hand)}
-                    indent
-                  />
-                  {(balance.assets.accounts || []).map((account) => (
-                    <Line
-                      key={account.account_id}
-                      label={account.name}
-                      value={money(account.balance)}
-                      indent
-                    />
-                  ))}
-                  <Line
-                    label="Accounts receivable"
-                    value={money(balance.assets.accounts_receivable)}
-                    indent
-                  />
-                  <Line
-                    label="Airline receivable"
-                    value={money(balance.assets.airline_receivable)}
-                    indent
-                  />
-                  <Line
-                    label="Fixed assets"
-                    value={money(balance.assets.fixed_assets)}
-                    indent
-                  />
-                  <Line
-                    label="Total Assets"
-                    value={money(balance.assets.total)}
-                    bold
-                    divider
-                    tone="blue"
-                  />
-                </Card>
-
-                <Card className="p-6">
-                  <h2 className="font-semibold text-gray-900 dark:text-white text-sm mb-4">
-                    Liabilities &amp; Equity
-                  </h2>
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">
-                    Liabilities
-                  </p>
-                  <Line
-                    label="Payable to airlines"
-                    value={money(balance.liabilities.payable_to_airlines)}
-                    indent
-                  />
-                  <Line
-                    label="Agent commission payable"
-                    value={money(balance.liabilities.agent_commission_payable)}
-                    indent
-                  />
-                  <Line
-                    label="Opening payables"
-                    value={money(balance.liabilities.opening_payables)}
-                    indent
-                  />
-                  <Line
-                    label="Other liabilities"
-                    value={money(balance.liabilities.other_liabilities)}
-                    indent
-                  />
-                  <Line
-                    label="Total Liabilities"
-                    value={money(balance.liabilities.total)}
-                    bold
-                    divider
-                  />
-
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
-                    Equity
-                  </p>
-                  <Line
-                    label="Owner's capital"
-                    value={money(balance.equity.owner_capital)}
-                    indent
-                  />
-                  <Line
-                    label="Retained earnings"
-                    value={money(balance.equity.retained_earnings)}
-                    indent
-                    tone={
-                      balance.equity.retained_earnings >= 0 ? "green" : "red"
-                    }
-                  />
-                  <Line
-                    label="Total Equity"
-                    value={money(balance.equity.total)}
-                    bold
-                    divider
-                  />
-
-                  <Line
-                    label="Total Liabilities & Equity"
-                    value={money(balance.total_liabilities_and_equity)}
-                    bold
-                    divider
-                    tone="blue"
-                  />
-                </Card>
-              </div>
+              <BalanceSheetPanel
+                balance={balance}
+                onShowOwners={() => setTab("owners")}
+              />
 
               <Card className="p-5">
                 <div className="flex items-center justify-between gap-3 mb-3">
@@ -1394,6 +1326,11 @@ export default function FinancialsPage() {
                       }
                     >
                       <Plus className="w-4 h-4" /> Add payable
+                    </Button>
+                  )}
+                  {canEditOpening && (
+                    <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+                      <FileSpreadsheet className="w-4 h-4" /> Import
                     </Button>
                   )}
                 </div>
@@ -1456,27 +1393,20 @@ export default function FinancialsPage() {
                   </div>
                 )}
               </Card>
-
-              <Card className="p-5">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                  How these numbers are built
-                </p>
-                <ul className="space-y-1.5">
-                  {(balance.notes || []).map((nt, i) => (
-                    <li
-                      key={i}
-                      className="text-sm text-gray-600 dark:text-gray-400 flex gap-2"
-                    >
-                      <span className="text-gray-300 dark:text-gray-600">
-                        •
-                      </span>
-                      {nt}
-                    </li>
-                  ))}
-                </ul>
-              </Card>
             </div>
           )}
+
+          {/* ── OWNERS ───────────────────────────────── */}
+          {tab === "owners" && (
+            <OwnersPanel
+              balance={balance}
+              canEdit={canEditOpening}
+              onChanged={loadStatements}
+            />
+          )}
+
+          {/* ── BOOKS: trial balance, ledger, journal ─── */}
+          {tab === "books" && <BooksPanel range={range} />}
 
           {/* ── CASH FLOW ────────────────────────────── */}
           {tab === "cash" && cash && (
@@ -1617,18 +1547,24 @@ export default function FinancialsPage() {
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">
                     Money in
                   </p>
-                  <Line
-                    label="Ticket payments"
-                    value={money(cash.inflow.ticket_payments)}
-                    indent
-                    tone="green"
-                  />
-                  <Line
-                    label="Cargo payments"
-                    value={money(cash.inflow.cargo_payments)}
-                    indent
-                    tone="green"
-                  />
+                  {/* Every source is listed, so the lines add up to the
+                      totals beneath them. */}
+                  {[
+                    ["Ticket payments", cash.inflow.ticket_payments],
+                    ["Visa payments", cash.inflow.visa_payments],
+                    ["Package payments", cash.inflow.package_payments],
+                    ["Cargo payments", cash.inflow.cargo_payments],
+                    ["Customer deposits", cash.inflow.deposits],
+                    ["Opening balances collected", cash.inflow.opening_receivables],
+                    ["Capital from owners", cash.inflow.owner_capital],
+                    ["Refunds from airlines", cash.inflow.airline_refunds],
+                    ["Refunds from suppliers", cash.inflow.supplier_refunds],
+                    ["Returned by agents", cash.inflow.agent_refunds],
+                  ]
+                    .filter(([, v]) => Number(v) > 0)
+                    .map(([k, v]) => (
+                      <Line key={k} label={k} value={money(v)} indent tone="green" />
+                    ))}
                   <Line
                     label="Total in"
                     value={money(cash.inflow.total)}
@@ -1640,12 +1576,21 @@ export default function FinancialsPage() {
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mt-4 mb-1">
                     Money out
                   </p>
-                  <Line
-                    label="Operating expenses"
-                    value={money(cash.outflow.expenses)}
-                    indent
-                    tone="red"
-                  />
+                  {[
+                    ["Airlines", cash.outflow.airline_settlements],
+                    ["Suppliers (visa, package, cargo)", cash.outflow.supplier_payments],
+                    ["Refunds to customers", cash.outflow.refunds],
+                    ["Agent commission", cash.outflow.agent_commission],
+                    ["Tax paid", cash.outflow.tax],
+                    ["Operating expenses", cash.outflow.expenses],
+                    ["Bank & transfer fees", cash.outflow.bank_fees],
+                    ["Owners' drawings", cash.outflow.owner_drawings],
+                    ["Deposits handed back", cash.outflow.deposit_refunds],
+                  ]
+                    .filter(([, v]) => Number(v) > 0)
+                    .map(([k, v]) => (
+                      <Line key={k} label={k} value={money(v)} indent tone="red" />
+                    ))}
                   <Line
                     label="Total out"
                     value={money(cash.outflow.total)}
@@ -1677,19 +1622,24 @@ export default function FinancialsPage() {
           {/* ── RECEIVABLES ──────────────────────────── */}
           {tab === "receivables" && receivables && (
             <div className="space-y-6">
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2 flex-wrap">
                 {canEditOpening && (
-                  <Button
-                    onClick={() =>
-                      setOpeningItemModal({
-                        open: true,
-                        type: "receivable",
-                        initial: null,
-                      })
-                    }
-                  >
-                    <Plus className="w-4 h-4" /> Add opening receivable
-                  </Button>
+                  <>
+                    <Button variant="outline" onClick={() => setImportOpen(true)}>
+                      <FileSpreadsheet className="w-4 h-4" /> Import from Excel
+                    </Button>
+                    <Button
+                      onClick={() =>
+                        setOpeningItemModal({
+                          open: true,
+                          type: "receivable",
+                          initial: null,
+                        })
+                      }
+                    >
+                      <Plus className="w-4 h-4" /> Add opening receivable
+                    </Button>
+                  </>
                 )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -2214,6 +2164,11 @@ export default function FinancialsPage() {
         open={openingModal}
         onClose={() => setOpeningModal(false)}
         onSaved={refreshAll}
+      />
+      <OpeningImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={refreshAll}
       />
       <OpeningItemModal
         open={openingItemModal.open}

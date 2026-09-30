@@ -361,14 +361,28 @@ if (
     `Opening balance sheet did not reconcile: ${JSON.stringify(balanceSheet.body?.data)}`,
   );
 
-await db.query(
+// A cancelled ticket whose money really moved: the customer paid 10 (kept
+// as the fee) and 5 went to the airline and never came back — so the
+// cancellation earned 5, in the books and in the accounts.
+const cancelledTicket = (await db.query(
   `INSERT INTO tickets
      (business_id, created_by, ticket_type, status, passenger_name,
-      from_city, to_city, flight_date, airline_name, cost_price,
-      selling_price, airline_paid, cancellation_fee)
+      from_city, to_city, flight_date, airline_name, airline_id, cost_price,
+      selling_price, amount_paid, airline_paid, cancellation_fee, cancelled_at)
    VALUES ($1, $2, 'LOCAL', 'cancelled', 'Cancelled Passenger',
-      'MGQ', 'HGA', CURRENT_DATE, 'Test Carrier', 20, 30, 5, 10)`,
-  [business, user],
+      'MGQ', 'HGA', CURRENT_DATE, 'Test Carrier', $3, 20, 30, 10, 5, 10, NOW())
+   RETURNING id`,
+  [business, user, airlineId],
+)).rows[0].id;
+await db.query(
+  `INSERT INTO ticket_payments (business_id, ticket_id, collected_by, amount, method, account_id, created_at)
+   VALUES ($1, $2, $3, 10, 'cash', $4, NOW() - INTERVAL '1 minute')`,
+  [business, cancelledTicket, user, account],
+);
+await db.query(
+  `INSERT INTO airline_payments (business_id, airline_id, ticket_id, paid_by, amount, method, account_id, created_at)
+   VALUES ($1, $2, $3, $4, 5, 'cash', $5, NOW() - INTERVAL '1 minute')`,
+  [business, airlineId, cancelledTicket, user, account],
 );
 const profitLoss = await invoke(financialsController.getProfitLoss, {
   ...context,
