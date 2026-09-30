@@ -14,30 +14,52 @@
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "module";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { seedAccounts } from "./seed.mjs";
 const require = createRequire(import.meta.url);
-const SERVER = "/sessions/awesome-festive-mccarthy/mnt/tams/server";
-const pass = [], fail = [];
+const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const pass = [],
+  fail = [];
 const ck = (n, ok, d = "") => (ok ? pass : fail).push(n + (d ? ` — ${d}` : ""));
 const m2 = (v) => Number(v).toFixed(2);
 
 const pg = await PGlite.create();
-await pg.exec(`CREATE OR REPLACE FUNCTION uuid_generate_v4() RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()';`);
+await pg.exec(
+  `CREATE OR REPLACE FUNCTION uuid_generate_v4() RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()';`,
+);
 const strip = (s) => s.replace(/CREATE EXTENSION[^;]*;/gi, "");
 await pg.exec(strip(fs.readFileSync("cfg/schema.sql", "utf8")));
+for (const migration of [
+  "migration_v24.sql",
+  "migration_v26.sql",
+  "migration_v27.sql",
+])
+  await pg.exec(strip(fs.readFileSync(`../config/${migration}`, "utf8")));
 
 const dbShim = {
   query: (t, p = []) => pg.query(t, p),
   withTransaction: async (fn) => {
     await pg.exec("BEGIN");
-    try { const r = await fn({ query: (t, p = []) => pg.query(t, p) }); await pg.exec("COMMIT"); return r; }
-    catch (e) { await pg.exec("ROLLBACK"); throw e; }
+    try {
+      const r = await fn({ query: (t, p = []) => pg.query(t, p) });
+      await pg.exec("COMMIT");
+      return r;
+    } catch (e) {
+      await pg.exec("ROLLBACK");
+      throw e;
+    }
   },
 };
-const Module = require("module"); const orig = Module._resolveFilename;
+const Module = require("module");
+const orig = Module._resolveFilename;
 const S = {
   __DB__: dbShim,
-  __RPT__: { generateAirlinePDF: async () => Buffer.from(""), generatePDFReport: async () => Buffer.from(""), generateExcelReport: async () => Buffer.from("") },
+  __RPT__: {
+    generateAirlinePDF: async () => Buffer.from(""),
+    generatePDFReport: async () => Buffer.from(""),
+    generateExcelReport: async () => Buffer.from(""),
+  },
   __AI__: { extractTicketData: async () => ({}) },
   __MAIL__: { sendOTPEmail: async () => true },
 };
@@ -50,176 +72,581 @@ Module._resolveFilename = function (r, p, ...rest) {
   }
   return orig.call(this, r, p, ...rest);
 };
-for (const [id, exports] of Object.entries(S)) require.cache[id] = { id, filename: id, loaded: true, exports };
+for (const [id, exports] of Object.entries(S))
+  require.cache[id] = { id, filename: id, loaded: true, exports };
 
 const ticketC = require(`${SERVER}/controllers/ticketController.js`);
 const airlineC = require(`${SERVER}/controllers/airlineController.js`);
 const taxC = require(`${SERVER}/controllers/taxController.js`);
 const finC = require(`${SERVER}/controllers/financialsController.js`);
 
-const biz = (await pg.query(`INSERT INTO businesses (name,email) VALUES ('R','r@x.c') RETURNING id`)).rows[0].id;
+const biz = (
+  await pg.query(
+    `INSERT INTO businesses (name,email) VALUES ('R','r@x.c') RETURNING id`,
+  )
+).rows[0].id;
 await seedAccounts(pg, biz);
-const user = (await pg.query(`INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`, [biz])).rows[0].id;
-const A = Object.fromEntries((await pg.query(`SELECT id,name FROM payment_accounts WHERE business_id=$1`, [biz])).rows.map((r) => [r.name, r.id]));
+const user = (
+  await pg.query(
+    `INSERT INTO users (business_id,name,email,password_hash,role) VALUES ($1,'A','a@x.c','h','admin') RETURNING id`,
+    [biz],
+  )
+).rows[0].id;
+const A = Object.fromEntries(
+  (
+    await pg.query(
+      `SELECT id,name FROM payment_accounts WHERE business_id=$1`,
+      [biz],
+    )
+  ).rows.map((r) => [r.name, r.id]),
+);
+await pg.query(
+  `UPDATE payment_accounts SET opening_balance = 5000 WHERE id = $1`,
+  [A["Premier Bank"]],
+);
+await pg.query(
+  `UPDATE payment_accounts SET opening_balance = 500 WHERE id = $1`,
+  [A["EVC"]],
+);
 const ctx = { businessId: biz, user: { id: user, role: "admin" } };
-const mkRes = () => { const r = { code: 200, body: null }; r.status = (c) => ((r.code = c), r); r.json = (b) => ((r.body = b), r); return r; };
-const call = async (fn, req) => { const res = mkRes(); let err = null; await fn({ ...ctx, ...req }, res, (e) => (err = e)); if (err) throw err; return res; };
+const mkRes = () => {
+  const r = { code: 200, body: null };
+  r.status = (c) => ((r.code = c), r);
+  r.json = (b) => ((r.body = b), r);
+  return r;
+};
+const call = async (fn, req) => {
+  const res = mkRes();
+  let err = null;
+  await fn({ ...ctx, ...req }, res, (e) => (err = e));
+  if (err) throw err;
+  return res;
+};
 
 const book = async (o) =>
-  (await call(ticketC.createTicket, {
-    body: { ticket_type: "LOCAL", contact_number: "061", from_city: "MGQ", to_city: "NBO",
-            flight_date: "2026-10-01", account_id: A["Cash"], ...o },
-  })).body.data;
+  (
+    await call(ticketC.createTicket, {
+      body: {
+        ticket_type: "LOCAL",
+        contact_number: "061",
+        from_city: "MGQ",
+        to_city: "NBO",
+        flight_date: "2026-10-01",
+        account_id: A["Cash"],
+        ...o,
+      },
+    })
+  ).body.data;
 
 // Settle an airline in full so there is something for it to refund later.
 const payAirline = async (name) => {
-  const id = (await pg.query(`SELECT id FROM airlines WHERE business_id=$1 AND name=$2`, [biz, name])).rows[0].id;
-  await call(airlineC.payAirline, { params: { id }, body: { account_id: A["Premier Bank"] } });
+  const id = (
+    await pg.query(`SELECT id FROM airlines WHERE business_id=$1 AND name=$2`, [
+      biz,
+      name,
+    ])
+  ).rows[0].id;
+  await call(airlineC.payAirline, {
+    params: { id },
+    body: { account_id: A["Premier Bank"] },
+  });
   return id;
 };
 
-const ticket = async (id) => (await pg.query(`SELECT * FROM tickets WHERE id=$1`, [id])).rows[0];
+const ticket = async (id) =>
+  (await pg.query(`SELECT * FROM tickets WHERE id=$1`, [id])).rows[0];
 
 // ── Rule 1 + 3: refund everything refundable, keep nothing ─────────────────
 // Cost 500 of which 80 is government tax. Sold for 700, paid in full.
-const t1 = await book({ passenger_name: "Fully refunded", airline_name: "Star Airline",
-                        cost_price: 500, tax: 80, selling_price: 700, amount_paid: 700 });
+const t1 = await book({
+  passenger_name: "Fully refunded",
+  airline_name: "Star Airline",
+  cost_price: 500,
+  tax: 80,
+  selling_price: 700,
+  amount_paid: 700,
+});
 await payAirline("Star Airline");
 
 let refused;
 try {
-  refused = await call(ticketC.cancelTicket, { params: { id: t1.id },
-    body: { refund_amount: 700, airline_refund: 420, account_id: A["Cash"], airline_account_id: A["Cash"] } });
-} catch (e) { refused = { code: 500, body: { message: e.message } }; }
-ck("refunding the tax as well is refused", refused.code === 400,
-   refused.body?.message?.slice(0, 70));
+  refused = await call(ticketC.cancelTicket, {
+    params: { id: t1.id },
+    body: {
+      refund_amount: 700,
+      airline_refund: 420,
+      account_id: A["Cash"],
+      airline_account_id: A["Cash"],
+    },
+  });
+} catch (e) {
+  refused = { code: 500, body: { message: e.message } };
+}
+ck(
+  "refunding the tax as well is refused",
+  refused.code === 400,
+  refused.body?.message?.slice(0, 70),
+);
 
-await call(ticketC.cancelTicket, { params: { id: t1.id },
-  body: { refund_amount: 620, airline_refund: 420, account_id: A["Cash"], airline_account_id: A["Cash"] } });
+await call(ticketC.cancelTicket, {
+  params: { id: t1.id },
+  body: {
+    refund_amount: 620,
+    airline_refund: 420,
+    account_id: A["Cash"],
+    airline_account_id: A["Cash"],
+  },
+});
 
 const T1 = await ticket(t1.id);
-ck("the refundable 620 went back", m2(T1.refunded_amount) === "620.00", m2(T1.refunded_amount));
-ck("refunding everything leaves no revenue", m2(T1.revenue) === "0.00", m2(T1.revenue));
+ck(
+  "the refundable 620 went back",
+  m2(T1.refunded_amount) === "620.00",
+  m2(T1.refunded_amount),
+);
+ck(
+  "refunding everything leaves no revenue",
+  m2(T1.revenue) === "0.00",
+  m2(T1.revenue),
+);
+const airlineReturn = (
+  await pg.query(
+    `SELECT amount, account_id FROM airline_payments
+    WHERE ticket_id = $1 AND amount < 0`,
+    [t1.id],
+  )
+).rows[0];
+const cashAfterReturn = (
+  await pg.query(
+    `SELECT balance FROM v_account_balance WHERE account_id = $1`,
+    [A["Cash"]],
+  )
+).rows[0].balance;
+ck(
+  "the airline return is recorded as money into the selected account",
+  m2(airlineReturn?.amount) === "-420.00" &&
+    airlineReturn?.account_id === A["Cash"],
+  `payment ${airlineReturn?.amount}, account ${airlineReturn?.account_id}`,
+);
+ck(
+  "customer refund and airline return both affect cash",
+  m2(cashAfterReturn) === "500.00",
+  m2(cashAfterReturn),
+);
 
 const tax1 = (await call(taxC.getTaxAccount, { query: {} })).body.data.summary;
-ck("the tax survives the cancellation", m2(tax1.tax_owed) === "80.00", m2(tax1.tax_owed));
-ck("the tax kept back is not counted as a cancellation fee",
-   m2(T1.cancellation_fee) === "0.00", m2(T1.cancellation_fee));
+ck(
+  "the tax survives the cancellation",
+  m2(tax1.tax_owed) === "80.00",
+  m2(tax1.tax_owed),
+);
+ck(
+  "the tax kept back is not counted as a cancellation fee",
+  m2(T1.cancellation_fee) === "0.00",
+  m2(T1.cancellation_fee),
+);
 
 // ── Rule 4: a fee kept is revenue ─────────────────────────────────────────
-const t2 = await book({ passenger_name: "Fee kept", airline_name: "Jubba Airways",
-                        cost_price: 200, selling_price: 300, amount_paid: 300 });
+const t2 = await book({
+  passenger_name: "Fee kept",
+  airline_name: "Jubba Airways",
+  cost_price: 200,
+  selling_price: 300,
+  amount_paid: 300,
+});
 await payAirline("Jubba Airways");
-await call(ticketC.cancelTicket, { params: { id: t2.id },
-  body: { refund_amount: 250, airline_refund: 200, account_id: A["EVC"], airline_account_id: A["EVC"] } });
+await call(ticketC.cancelTicket, {
+  params: { id: t2.id },
+  body: {
+    refund_amount: 250,
+    airline_refund: 200,
+    account_id: A["EVC"],
+    airline_account_id: A["EVC"],
+  },
+});
 
 const T2 = await ticket(t2.id);
-ck("the 50 kept shows as the ticket's revenue", m2(T2.revenue) === "50.00", m2(T2.revenue));
+ck(
+  "the 50 kept shows as the ticket's revenue",
+  m2(T2.revenue) === "50.00",
+  m2(T2.revenue),
+);
+
+// A zero-margin ticket cannot fund a customer refund above the airline's
+// actual return. A refund that would leave a $10 cash deficit is rejected.
+const t2b = await book({
+  passenger_name: "Airline short refund",
+  airline_name: "Short Return Airline",
+  cost_price: 200,
+  selling_price: 200,
+  amount_paid: 200,
+});
+await payAirline("Short Return Airline");
+const excessiveRefund = await call(ticketC.cancelTicket, {
+  params: { id: t2b.id },
+  body: {
+    refund_amount: 200,
+    airline_refund: 190,
+    account_id: A["Cash"],
+    airline_account_id: A["Cash"],
+  },
+});
+ck(
+  "a zero-margin ticket refuses a refund $10 above the airline return",
+  excessiveRefund.code === 400 &&
+    excessiveRefund.body.message.includes("$190.00 available"),
+  excessiveRefund.body.message,
+);
+const ticketAfterRejectedRefund = await ticket(t2b.id);
+ck(
+  "a rejected over-refund leaves the ticket and ledger untouched",
+  ticketAfterRejectedRefund.status === "active" &&
+    m2(ticketAfterRejectedRefund.amount_paid) === "200.00",
+);
+await call(ticketC.cancelTicket, {
+  params: { id: t2b.id },
+  body: {
+    refund_amount: 190,
+    airline_refund: 190,
+    account_id: A["Cash"],
+    airline_account_id: A["Cash"],
+  },
+});
+const T2b = await ticket(t2b.id);
+ck(
+  "a correctly funded partial refund consumes the $10 retained ticket margin",
+  m2(T2b.cancellation_fee) === "10.00" &&
+    m2(T2b.airline_paid) === "10.00" &&
+    m2(T2b.revenue) === "0.00",
+  `fee ${m2(T2b.cancellation_fee)}, unrecovered ${m2(T2b.airline_paid)}, revenue ${m2(T2b.revenue)}`,
+);
+
+const t2c = await book({
+  passenger_name: "Ticket margin covers airline shortfall",
+  airline_name: "Margin Cushion Airline",
+  cost_price: 200,
+  selling_price: 210,
+  amount_paid: 210,
+});
+await payAirline("Margin Cushion Airline");
+const marginCushion = await call(ticketC.cancelTicket, {
+  params: { id: t2c.id },
+  body: {
+    refund_amount: 200,
+    airline_refund: 190,
+    account_id: A["Cash"],
+    airline_account_id: A["Cash"],
+  },
+});
+const T2c = await ticket(t2c.id);
+ck(
+  "the ticket's $10 margin may cover a $10 airline shortfall",
+  marginCushion.code === 200 &&
+    m2(T2c.cancellation_fee) === "10.00" &&
+    m2(T2c.airline_paid) === "10.00" &&
+    m2(T2c.revenue) === "0.00",
+  `status ${marginCushion.code}, fee ${m2(T2c.cancellation_fee)}, loss ${m2(T2c.airline_paid)}, revenue ${m2(T2c.revenue)}`,
+);
 
 // ── Rule 2: refunded AND written off, both visible ────────────────────────
-const t3 = await book({ passenger_name: "Part refund, rest written off", airline_name: "Daallo",
-                        cost_price: 100, selling_price: 400, amount_paid: 200 });
-await call(ticketC.cancelTicket, { params: { id: t3.id },
-  body: { refund_amount: 50, airline_refund: 0, write_off: true, account_id: A["Cash"] } });
+const t3 = await book({
+  passenger_name: "Part refund, rest written off",
+  airline_name: "Daallo",
+  cost_price: 100,
+  selling_price: 400,
+  amount_paid: 200,
+});
+await call(ticketC.cancelTicket, {
+  params: { id: t3.id },
+  body: {
+    refund_amount: 50,
+    airline_refund: 0,
+    write_off: true,
+    account_id: A["Cash"],
+  },
+});
 
 const T3 = await ticket(t3.id);
-ck("the part refund is recorded", m2(T3.refunded_amount) === "50.00", m2(T3.refunded_amount));
-ck("the balance written off is recorded alongside it",
-   m2(T3.written_off) === "200.00", m2(T3.written_off));
-ck("both are non-zero on the same ticket, so the screen can show both",
-   Number(T3.refunded_amount) > 0 && Number(T3.written_off) > 0);
-ck("nothing was paid to the airline, so nothing was lost there",
-   m2(T3.revenue) === "150.00", m2(T3.revenue));
+ck(
+  "the part refund is recorded",
+  m2(T3.refunded_amount) === "50.00",
+  m2(T3.refunded_amount),
+);
+ck(
+  "the balance written off is recorded alongside it",
+  m2(T3.written_off) === "200.00",
+  m2(T3.written_off),
+);
+ck(
+  "both are non-zero on the same ticket, so the screen can show both",
+  Number(T3.refunded_amount) > 0 && Number(T3.written_off) > 0,
+);
+ck(
+  "nothing was paid to the airline, so nothing was lost there",
+  m2(T3.revenue) === "150.00",
+  m2(T3.revenue),
+);
 
 // ── Rule 1, the exception: the airline gave the tax back too ──────────────
-const t4 = await book({ passenger_name: "Airline cancelled the flight", airline_name: "Turkish",
-                        cost_price: 300, tax: 60, selling_price: 400, amount_paid: 400 });
+const t4 = await book({
+  passenger_name: "Airline cancelled the flight",
+  airline_name: "Turkish",
+  cost_price: 300,
+  tax: 60,
+  selling_price: 400,
+  amount_paid: 400,
+});
 await payAirline("Turkish");
-await call(ticketC.cancelTicket, { params: { id: t4.id },
-  body: { refund_amount: 400, airline_refund: 240, refund_tax: true,
-          account_id: A["Cash"], airline_account_id: A["Cash"] } });
+await call(ticketC.cancelTicket, {
+  params: { id: t4.id },
+  body: {
+    refund_amount: 400,
+    airline_refund: 240,
+    refund_tax: true,
+    account_id: A["Cash"],
+    airline_account_id: A["Cash"],
+  },
+});
 
 const T4 = await ticket(t4.id);
-ck("the returned tax is recorded", m2(T4.tax_refunded) === "60.00", m2(T4.tax_refunded));
+ck(
+  "the returned tax is recorded",
+  m2(T4.tax_refunded) === "60.00",
+  m2(T4.tax_refunded),
+);
 const tax2 = (await call(taxC.getTaxAccount, { query: {} })).body.data.summary;
-ck("a tax the airline returned is no longer owed",
-   m2(tax2.tax_owed) === "80.00", `owed ${m2(tax2.tax_owed)}, expected only ticket 1's 80`);
+ck(
+  "a tax the airline returned is no longer owed",
+  m2(tax2.tax_owed) === "80.00",
+  `owed ${m2(tax2.tax_owed)}, expected only ticket 1's 80`,
+);
 
 // ── The reported bug: cancelling a ticket you never paid for ─────────────
 // Customer paid 60 of a 170 ticket, the agency had not paid the 160 fare.
 // Refund the 60, forgive the 110. The airline cannot return money it was
 // never sent, so the agency is out nothing and the revenue is zero — it read
 // -160 before, because the whole fare was treated as lost.
-const t5 = await book({ passenger_name: "Never paid the airline", airline_name: "Freedom Airline",
-                        cost_price: 160, selling_price: 170, amount_paid: 60 });
-await call(ticketC.cancelTicket, { params: { id: t5.id },
-  body: { refund_amount: 60, airline_refund: 0, write_off: true, account_id: A["Cash"] } });
+const t5 = await book({
+  passenger_name: "Never paid the airline",
+  airline_name: "Freedom Airline",
+  cost_price: 160,
+  selling_price: 170,
+  amount_paid: 60,
+});
+await call(ticketC.cancelTicket, {
+  params: { id: t5.id },
+  body: {
+    refund_amount: 60,
+    airline_refund: 0,
+    write_off: true,
+    account_id: A["Cash"],
+  },
+});
 
 const T5 = await ticket(t5.id);
-ck("a ticket the airline was never paid for loses nothing",
-   m2(T5.revenue) === "0.00", m2(T5.revenue));
-ck("the 110 balance was forgiven", m2(T5.written_off) === "110.00", m2(T5.written_off));
+ck(
+  "a ticket the airline was never paid for loses nothing",
+  m2(T5.revenue) === "0.00",
+  m2(T5.revenue),
+);
+ck(
+  "the 110 balance was forgiven",
+  m2(T5.written_off) === "110.00",
+  m2(T5.written_off),
+);
 
-const freedom = (await pg.query(
-  `SELECT total_cost, total_paid, balance FROM v_airline_account
-    WHERE business_id=$1 AND airline_name='Freedom Airline'`, [biz])).rows[0];
-ck("and the airline is not left owed for a seat nobody took",
-   m2(freedom.balance) === "0.00",
-   `cost ${m2(freedom.total_cost)}, paid ${m2(freedom.total_paid)}, balance ${m2(freedom.balance)}`);
+const freedom = (
+  await pg.query(
+    `SELECT total_cost, total_paid, balance FROM v_airline_account
+    WHERE business_id=$1 AND airline_name='Freedom Airline'`,
+    [biz],
+  )
+).rows[0];
+ck(
+  "and the airline is not left owed for a seat nobody took",
+  m2(freedom.balance) === "0.00",
+  `cost ${m2(freedom.total_cost)}, paid ${m2(freedom.total_paid)}, balance ${m2(freedom.balance)}`,
+);
 
 // ── Rule 2, second half: retained tax is not a fee ────────────────────────
 // Cost 100 of which 10 is tax, sold for 200, paid in full, airline unpaid.
 // Refunding the maximum leaves exactly the tax in hand — which is held, not
 // earned, and must not show up as a cancellation fee.
-const t6 = await book({ passenger_name: "Only the tax left", airline_name: "Halla",
-                        cost_price: 100, tax: 10, selling_price: 200, amount_paid: 200 });
-await call(ticketC.cancelTicket, { params: { id: t6.id },
-  body: { refund_amount: 190, airline_refund: 0, account_id: A["Cash"] } });
+const t6 = await book({
+  passenger_name: "Only the tax left",
+  airline_name: "Halla",
+  cost_price: 100,
+  tax: 10,
+  selling_price: 200,
+  amount_paid: 200,
+});
+await call(ticketC.cancelTicket, {
+  params: { id: t6.id },
+  body: { refund_amount: 190, airline_refund: 0, account_id: A["Cash"] },
+});
 
 const T6 = await ticket(t6.id);
-ck("the tax held back is not booked as a fee",
-   m2(T6.cancellation_fee) === "0.00", m2(T6.cancellation_fee));
-ck("the money kept is still recorded in full",
-   m2(T6.amount_paid) === "10.00", m2(T6.amount_paid));
+ck(
+  "the tax held back is not booked as a fee",
+  m2(T6.cancellation_fee) === "0.00",
+  m2(T6.cancellation_fee),
+);
+ck(
+  "the money kept is still recorded in full",
+  m2(T6.amount_paid) === "10.00",
+  m2(T6.amount_paid),
+);
 ck("so the ticket earned nothing", m2(T6.revenue) === "0.00", m2(T6.revenue));
 
 // ── The two screens have to agree ─────────────────────────────────────────
 const pl = (await call(finC.getProfitLoss, { query: {} })).body.data;
-const sumRevenue = (await pg.query(
-  `SELECT COALESCE(SUM(revenue),0) s FROM tickets WHERE business_id=$1 AND status='cancelled'`, [biz],
-)).rows[0].s;
+const sumRevenue = (
+  await pg.query(
+    `SELECT COALESCE(SUM(revenue),0) s FROM tickets WHERE business_id=$1 AND status='cancelled'`,
+    [biz],
+  )
+).rows[0].s;
 
-ck("net from cancellations equals the sum of the cancelled tickets' revenue",
-   m2(pl.cancellations.net) === m2(sumRevenue),
-   `statement ${m2(pl.cancellations.net)} vs tickets ${m2(sumRevenue)}`);
+ck(
+  "net from cancellations equals the sum of the cancelled tickets' revenue",
+  m2(pl.cancellations.net) === m2(sumRevenue),
+  `statement ${m2(pl.cancellations.net)} vs tickets ${m2(sumRevenue)}`,
+);
 
-ck("written-off balances are reported but not subtracted twice",
-   m2(pl.cancellations.written_off) === "310.00" &&
-   m2(pl.cancellations.net) === m2(Number(pl.cancellations.fees_kept) - Number(pl.cancellations.unrecovered_cost)),
-   `written off ${m2(pl.cancellations.written_off)}`);
+ck(
+  "written-off balances are reported but not subtracted twice",
+  m2(pl.cancellations.written_off) === "310.00" &&
+    m2(pl.cancellations.net) ===
+      m2(
+        Number(pl.cancellations.fees_kept) -
+          Number(pl.cancellations.unrecovered_cost),
+      ),
+  `written off ${m2(pl.cancellations.written_off)}`,
+);
 
-ck("the tax still owed is disclosed on the statement",
-   m2(pl.tax.collected) === "90.00", m2(pl.tax.collected));
-ck("no cancellation booked a fare the agency never paid",
-   m2(pl.cancellations.unrecovered_cost) === "0.00",
-   m2(pl.cancellations.unrecovered_cost));
+ck(
+  "the tax still owed is disclosed on the statement",
+  m2(pl.tax.collected) === "90.00",
+  m2(pl.tax.collected),
+);
+ck(
+  "airline short returns are recorded as cancellation loss",
+  m2(pl.cancellations.unrecovered_cost) === "20.00",
+  m2(pl.cancellations.unrecovered_cost),
+);
+
+// Repair a cancellation entered before the Delete form could record the
+// airline's return. The return must reach the selected account and clear the
+// cancelled ticket's residual airline-paid amount.
+const recoveryTicket = await book({
+  passenger_name: "Airline refund entered later",
+  airline_name: "Recovery Carrier",
+  cost_price: 345,
+  selling_price: 345,
+  amount_paid: 345,
+});
+await payAirline("Recovery Carrier");
+await pg.query(
+  `INSERT INTO ticket_payments
+     (business_id, ticket_id, collected_by, amount, method, account_id, note)
+   VALUES ($1, $2, $3, -345, 'cash', $4, 'Legacy customer refund')`,
+  [biz, recoveryTicket.id, user, A["Cash"]],
+);
+await pg.query(
+  `UPDATE tickets
+      SET status = 'cancelled', amount_paid = 0, payment_status = 'unpaid',
+          refunded_amount = 345, cancellation_fee = 0, airline_refund = 0,
+          cancelled_at = NOW(), cancel_reason = 'Legacy cancellation',
+          cancelled_by = $1
+    WHERE id = $2`,
+  [user, recoveryTicket.id],
+);
+const differenceBeforeRecovery = Number(
+  (await call(finC.getBalanceSheet, { query: {} })).body.data.difference,
+);
+const cashBeforeRecovery = Number(
+  (await call(finC.getBalanceSheet, { query: {} })).body.data.assets
+    .cash_and_bank,
+);
+const recovered = await call(ticketC.recordAirlineRefund, {
+  params: { id: recoveryTicket.id },
+  body: { amount: 345, account_id: A["Cash"] },
+});
+const recoveredTicket = await ticket(recoveryTicket.id);
+const recoveryPayment = (
+  await pg.query(
+    `SELECT amount, account_id FROM airline_payments
+      WHERE ticket_id = $1 AND amount < 0`,
+    [recoveryTicket.id],
+  )
+).rows[0];
+const differenceAfterRecovery = Number(
+  (await call(finC.getBalanceSheet, { query: {} })).body.data.difference,
+);
+const cashAfterRecovery = Number(
+  (await call(finC.getBalanceSheet, { query: {} })).body.data.assets
+    .cash_and_bank,
+);
+ck(
+  "a later airline return clears the cancelled ticket's unpaid airline amount",
+  recovered.code === 201 && m2(recoveredTicket.airline_paid) === "0.00",
+  `status ${recovered.code}, airline paid ${m2(recoveredTicket.airline_paid)}`,
+);
+ck(
+  "the later airline return is credited to the selected account",
+  m2(recoveryPayment?.amount) === "-345.00" &&
+    recoveryPayment?.account_id === A["Cash"],
+  `payment ${recoveryPayment?.amount}, account ${recoveryPayment?.account_id}`,
+);
+ck(
+  "recording the omitted return restores $345 cash without changing other balance-sheet items",
+  m2(cashAfterRecovery - cashBeforeRecovery) === "345.00" &&
+    m2(differenceAfterRecovery) === m2(differenceBeforeRecovery),
+  `cash +${m2(cashAfterRecovery - cashBeforeRecovery)}, differences ${m2(differenceBeforeRecovery)} / ${m2(differenceAfterRecovery)}`,
+);
 
 // ── And the money still adds up ───────────────────────────────────────────
-const bal = Number((await pg.query(`SELECT COALESCE(SUM(balance),0) s FROM v_account_balance WHERE business_id=$1`, [biz])).rows[0].s);
-const flow = (await pg.query(
-  `SELECT COALESCE(SUM(amount) FILTER (WHERE direction='in'),0) i,
-          COALESCE(SUM(amount) FILTER (WHERE direction='out'),0) o
-     FROM v_cash_ledger WHERE business_id=$1 AND account_id IS NOT NULL`, [biz])).rows[0];
-ck("accounts still equal money in minus money out",
-   m2(bal) === m2(Number(flow.i) - Number(flow.o)), `${m2(bal)} vs ${m2(Number(flow.i) - Number(flow.o))}`);
+const bal = Number(
+  (
+    await pg.query(
+      `SELECT COALESCE(SUM(balance),0) s FROM v_account_balance WHERE business_id=$1`,
+      [biz],
+    )
+  ).rows[0].s,
+);
+const flow = (
+  await pg.query(
+    `SELECT COALESCE(SUM(amount) FILTER (WHERE direction='in'),0) i,
+          COALESCE(SUM(amount) FILTER (WHERE direction='out'),0) o,
+          (SELECT COALESCE(SUM(opening_balance),0) FROM payment_accounts
+        WHERE business_id=$1) opening
+     FROM v_cash_ledger WHERE business_id=$1 AND account_id IS NOT NULL`,
+    [biz],
+  )
+).rows[0];
+ck(
+  "accounts still equal money in minus money out",
+  m2(bal) === m2(Number(flow.opening) + Number(flow.i) - Number(flow.o)),
+  `${m2(bal)} vs ${m2(Number(flow.opening) + Number(flow.i) - Number(flow.o))}`,
+);
 
 // ── An older migration must not undo the newer one ────────────────────────
 for (const old of ["migration_v15.sql", "migration_v17.sql"])
   await pg.exec(strip(fs.readFileSync(`cfg/${old}`, "utf8")));
 const tax3 = (await call(taxC.getTaxAccount, { query: {} })).body.data.summary;
-ck("re-running v15 does not forgive the cancelled ticket's tax",
-   m2(tax3.tax_owed) === "90.00", m2(tax3.tax_owed));
+ck(
+  "re-running v15 does not forgive the cancelled ticket's tax",
+  m2(tax3.tax_owed) === "90.00",
+  m2(tax3.tax_owed),
+);
 
-console.log(`\nPASS (${pass.length})`); pass.forEach((p) => console.log("  ✓ " + p));
-if (fail.length) { console.log(`\nFAIL (${fail.length})`); fail.forEach((f) => console.log("  ✗ " + f)); process.exit(1); }
-console.log("\nAll four rules hold, and the tickets and the income statement agree.");
+console.log(`\nPASS (${pass.length})`);
+pass.forEach((p) => console.log("  ✓ " + p));
+if (fail.length) {
+  console.log(`\nFAIL (${fail.length})`);
+  fail.forEach((f) => console.log("  ✗ " + f));
+  process.exit(1);
+}
+console.log(
+  "\nAll four rules hold, and the tickets and the income statement agree.",
+);

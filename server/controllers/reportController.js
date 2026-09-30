@@ -52,8 +52,10 @@ const getDashboard = async (req, res, next) => {
     const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d);
     const bookedIn = (column, w) => {
       if (!w || !isDate(w.from) || !isDate(w.to)) return "";
-      return ` AND (${column} AT TIME ZONE '${TZ}')::DATE` +
-             ` BETWEEN '${w.from}' AND '${w.to}'`;
+      return (
+        ` AND (${column} AT TIME ZONE '${TZ}')::DATE` +
+        ` BETWEEN '${w.from}' AND '${w.to}'`
+      );
     };
 
     const tFilter = bookedIn("t.created_at", window);
@@ -63,8 +65,12 @@ const getDashboard = async (req, res, next) => {
 
     // Matching window immediately before the selected one, so the KPI cards
     // can show a real period-over-period change instead of a decorative one.
-    const tPrevFilter = prevWindow ? bookedIn("t.created_at", prevWindow) : null;
-    const cPrevFilter = prevWindow ? bookedIn("cs.created_at", prevWindow) : null;
+    const tPrevFilter = prevWindow
+      ? bookedIn("t.created_at", prevWindow)
+      : null;
+    const cPrevFilter = prevWindow
+      ? bookedIn("cs.created_at", prevWindow)
+      : null;
 
     // % change vs the previous window. null when there's no basis to compare.
     const pctChange = (now, before) => {
@@ -278,7 +284,10 @@ const getDashboard = async (req, res, next) => {
       // profit_total arrives with migration_v23. Before it, every shipment
       // was treated as pure margin — so that is exactly what the fallback
       // does, rather than failing the whole dashboard over one column.
-      const cargoProfitExpr = (await hasColumn("cargo_shipments", "profit_total"))
+      const cargoProfitExpr = (await hasColumn(
+        "cargo_shipments",
+        "profit_total",
+      ))
         ? `COALESCE(SUM(CASE WHEN cs.profit_total IS NOT NULL
                              THEN GREATEST(cs.profit_total, 0)
                              ELSE cs.total_price END), 0)`
@@ -414,7 +423,17 @@ const getDashboard = async (req, res, next) => {
                 WHERE v.business_id = $1 AND v.status <> 'cancelled'${vFilter}`,
               [businessId],
             )
-          : Promise.resolve({ rows: [{ total_visas: 0, visa_sales: 0, visa_profit: 0, visa_collected: 0, visa_unpaid: 0 }] }),
+          : Promise.resolve({
+              rows: [
+                {
+                  total_visas: 0,
+                  visa_sales: 0,
+                  visa_profit: 0,
+                  visa_collected: 0,
+                  visa_unpaid: 0,
+                },
+              ],
+            }),
         (await hasTable("packages"))
           ? query(
               `SELECT COUNT(*) AS total_packages,
@@ -427,7 +446,17 @@ const getDashboard = async (req, res, next) => {
                 WHERE pk.business_id = $1 AND pk.status <> 'cancelled'${pFilter}`,
               [businessId],
             )
-          : Promise.resolve({ rows: [{ total_packages: 0, package_sales: 0, package_profit: 0, package_collected: 0, package_unpaid: 0 }] }),
+          : Promise.resolve({
+              rows: [
+                {
+                  total_packages: 0,
+                  package_sales: 0,
+                  package_profit: 0,
+                  package_collected: 0,
+                  package_unpaid: 0,
+                },
+              ],
+            }),
       ]);
 
       const ts = ticketSummary.rows[0];
@@ -447,7 +476,9 @@ const getDashboard = async (req, res, next) => {
       const [money, moneyBySource, prevMoney] = await Promise.all([
         cashMovement(businessId, window),
         cashBySource(businessId, window),
-        prevWindow ? cashMovement(businessId, prevWindow) : Promise.resolve(null),
+        prevWindow
+          ? cashMovement(businessId, prevWindow)
+          : Promise.resolve(null),
       ]);
 
       // What is still owed is a balance, not a flow: it is what customers owe
@@ -463,21 +494,41 @@ const getDashboard = async (req, res, next) => {
            (SELECT COALESCE(SUM(GREATEST(total_price - amount_paid, 0)), 0)
               FROM cargo_shipments
              WHERE business_id = $1 AND cargo_status <> 'cancelled')      AS cargo,
-           ${(await hasTable("visa_applications"))
-             ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
+           ${
+             (await hasTable("visa_applications"))
+               ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
                    FROM visa_applications
                   WHERE business_id = $1 AND status <> 'cancelled')`
-             : "0"}                                                       AS visas,
-           ${(await hasTable("packages"))
-             ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
+               : "0"
+           }                                                       AS visas,
+           ${
+             (await hasTable("packages"))
+               ? `(SELECT COALESCE(SUM(GREATEST(selling_price - amount_paid, 0)), 0)
                    FROM packages
                   WHERE business_id = $1 AND status <> 'cancelled')`
-             : "0"}                                                       AS packages`,
+               : "0"
+           }                                                       AS packages,
+           ${
+             (await hasTable("opening_balance_items"))
+               ? `(SELECT COALESCE(SUM(GREATEST(o.amount - COALESCE(p.paid, 0), 0)), 0)
+                   FROM opening_balance_items o
+                   LEFT JOIN (
+                     SELECT opening_item_id, SUM(amount) AS paid
+                       FROM opening_balance_payments
+                      GROUP BY opening_item_id
+                   ) p ON p.opening_item_id = o.id
+                  WHERE o.business_id = $1 AND o.balance_type = 'receivable')`
+               : "0"
+           } AS opening_receivables`,
         [businessId],
       );
       const due = dueRes.rows[0];
       const outstandingAll =
-        n(due.tickets) + n(due.cargo) + n(due.visas) + n(due.packages);
+        n(due.tickets) +
+        n(due.cargo) +
+        n(due.visas) +
+        n(due.packages) +
+        n(due.opening_receivables);
 
       return response.success(res, {
         isSuperAdmin: false,
@@ -709,7 +760,11 @@ const getReportSummary = async (req, res, next) => {
     const ticketsOnly = Boolean(ticket_type || airline_name);
 
     const zero = (extra = {}) =>
-      Promise.resolve({ rows: [{ count: 0, sales: 0, cost: 0, collected: 0, balance: 0, ...extra }] });
+      Promise.resolve({
+        rows: [
+          { count: 0, sales: 0, cost: 0, collected: 0, balance: 0, ...extra },
+        ],
+      });
 
     const [summaryRes, airlinesRes, cargoRes, visaRes, packageRes] =
       await Promise.all([
@@ -815,7 +870,10 @@ const getReportSummary = async (req, res, next) => {
         // What the bookings in this window have been paid so far, which is
         // not the same thing and is kept for the per-service breakdown.
         booked_and_paid: r2(
-          n(s.total_collected) + n(cg.collected) + n(vs.collected) + n(pk.collected),
+          n(s.total_collected) +
+            n(cg.collected) +
+            n(vs.collected) +
+            n(pk.collected),
         ),
         total_balance: r2(
           n(s.total_balance) + n(cg.balance) + n(vs.balance) + n(pk.balance),
@@ -983,28 +1041,28 @@ const exportExcel = async (req, res, next) => {
              FROM tickets t WHERE ${where}`,
           params,
         ),
-      query(
-        `SELECT t.*, u.name AS agent_name FROM tickets t LEFT JOIN users u ON u.id = t.created_by WHERE ${where} ORDER BY t.created_at DESC`,
-        params,
-      ),
-      query(
-        `SELECT u.name AS agent_name, COUNT(*) AS total_tickets, SUM(t.revenue) AS total_revenue
+        query(
+          `SELECT t.*, u.name AS agent_name FROM tickets t LEFT JOIN users u ON u.id = t.created_by WHERE ${where} ORDER BY t.created_at DESC`,
+          params,
+        ),
+        query(
+          `SELECT u.name AS agent_name, COUNT(*) AS total_tickets, SUM(t.revenue) AS total_revenue
              FROM tickets t JOIN users u ON u.id = t.created_by WHERE ${where} GROUP BY u.id, u.name ORDER BY total_revenue DESC`,
-        params,
-      ),
-      query(
-        `SELECT * FROM cargo_shipments WHERE business_id = $1 ORDER BY created_at DESC`,
-        [businessId],
-      ),
-      query(
-        `SELECT t.airline_name, COUNT(*) AS tickets,
+          params,
+        ),
+        query(
+          `SELECT * FROM cargo_shipments WHERE business_id = $1 ORDER BY created_at DESC`,
+          [businessId],
+        ),
+        query(
+          `SELECT t.airline_name, COUNT(*) AS tickets,
                 COALESCE(SUM(t.selling_price), 0) AS total_sales,
                 COALESCE(SUM(t.revenue), 0) AS total_revenue
          FROM tickets t WHERE ${where} AND t.status != 'cancelled'
          GROUP BY t.airline_name ORDER BY tickets DESC`,
-        params,
-      ),
-    ]);
+          params,
+        ),
+      ]);
 
     await generateExcelReport(
       res,

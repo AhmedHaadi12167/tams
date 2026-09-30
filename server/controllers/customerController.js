@@ -199,20 +199,24 @@ const fetchStatementData = async (
 
   const paymentsResult = await query(
     `SELECT * FROM (
-      SELECT p.amount, p.method, p.note, p.created_at, p.ticket_id,
+      SELECT p.id, p.amount, p.method, p.note, p.created_at, p.ticket_id,
           NULL::UUID AS opening_item_id,
             u.name AS collected_by_name, t.passenger_name,
+            COALESCE(payer.name, t.passenger_name) AS payer_name,
             a.name AS account_name
      FROM ticket_payments p
      JOIN users u ON u.id = p.collected_by
      JOIN tickets t ON t.id = p.ticket_id
+     LEFT JOIN customers payer
+       ON payer.id = COALESCE(t.booked_by_customer_id, t.customer_id)
      LEFT JOIN payment_accounts a ON a.id = p.account_id
      WHERE p.business_id = $2
        AND (t.customer_id = $1 OR t.booked_by_customer_id = $1)
     UNION ALL
-    SELECT p.amount, p.method, p.note, p.created_at,
+        SELECT p.id, p.amount, p.method, p.note, p.created_at,
            NULL::UUID AS ticket_id, p.opening_item_id,
-           u.name AS collected_by_name, c.name AS passenger_name,
+          u.name AS collected_by_name, c.name AS passenger_name,
+          c.name AS payer_name,
            a.name AS account_name
       FROM opening_balance_payments p
       JOIN opening_balance_items oi ON oi.id = p.opening_item_id

@@ -1080,6 +1080,7 @@ CREATE TABLE IF NOT EXISTS opening_balance_items (
     business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     balance_type TEXT NOT NULL CHECK (balance_type IN ('receivable', 'payable')),
     customer_id UUID REFERENCES customers(id) ON DELETE RESTRICT,
+    airline_id UUID REFERENCES airlines(id) ON DELETE RESTRICT,
     service_type TEXT,
     reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
     amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
@@ -1087,7 +1088,8 @@ CREATE TABLE IF NOT EXISTS opening_balance_items (
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_opening_balance_party CHECK (
-        (balance_type = 'receivable' AND customer_id IS NOT NULL
+                (balance_type = 'receivable' AND customer_id IS NOT NULL
+                    AND airline_id IS NULL
           AND service_type IN ('ticket', 'visa', 'cargo', 'package', 'other'))
         OR
         (balance_type = 'payable' AND customer_id IS NULL AND service_type IS NULL)
@@ -1098,6 +1100,9 @@ CREATE INDEX IF NOT EXISTS idx_opening_balance_business_type
 CREATE INDEX IF NOT EXISTS idx_opening_balance_customer
     ON opening_balance_items(customer_id, entry_date)
     WHERE balance_type = 'receivable';
+CREATE INDEX IF NOT EXISTS idx_opening_balance_airline
+    ON opening_balance_items(airline_id)
+    WHERE airline_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS opening_balance_payments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
@@ -1111,6 +1116,11 @@ CREATE TABLE IF NOT EXISTS opening_balance_payments (
 );
 CREATE INDEX IF NOT EXISTS idx_opening_balance_payments_item
     ON opening_balance_payments(opening_item_id, created_at);
+ALTER TABLE airline_payments
+    ADD COLUMN IF NOT EXISTS opening_item_id UUID REFERENCES opening_balance_items(id) ON DELETE RESTRICT;
+CREATE INDEX IF NOT EXISTS idx_airline_payments_opening_item
+    ON airline_payments(opening_item_id)
+    WHERE opening_item_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS opening_balance_deletion_audit (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -1118,6 +1128,7 @@ CREATE TABLE IF NOT EXISTS opening_balance_deletion_audit (
     opening_item_id UUID NOT NULL,
     balance_type TEXT NOT NULL CHECK (balance_type IN ('receivable', 'payable')),
     customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+    airline_id UUID REFERENCES airlines(id) ON DELETE SET NULL,
     reason TEXT NOT NULL,
     amount NUMERIC(14,2) NOT NULL,
     entry_date DATE NOT NULL,
@@ -1694,10 +1705,11 @@ SELECT
     a.business_id,
     a.name                                   AS airline_name,
     COALESCE(t.ticket_count, 0)              AS ticket_count,
-    COALESCE(t.total_cost, 0)                AS total_cost,
+    COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0) AS total_cost,
     COALESCE(t.total_tax, 0)                 AS total_tax,
-    COALESCE(p.total_paid, 0)                AS total_paid,
-    COALESCE(t.total_cost, 0) - COALESCE(p.total_paid, 0) AS balance,
+    COALESCE(p.ticket_paid, 0) + COALESCE(p.opening_paid, 0) AS total_paid,
+        COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0)
+            - COALESCE(p.ticket_paid, 0) - COALESCE(p.opening_paid, 0) AS balance,
     COALESCE(t.unsettled_tickets, 0)         AS unsettled_tickets,
     p.last_payment_at
 FROM airlines a
@@ -1723,8 +1735,15 @@ LEFT JOIN (
     GROUP BY airline_id, business_id
 ) t ON t.airline_id = a.id AND t.business_id = a.business_id
 LEFT JOIN (
-    SELECT airline_id, business_id,
-           COALESCE(SUM(amount), 0) AS total_paid,
+    SELECT airline_id, business_id, COALESCE(SUM(amount), 0) AS total_cost
+    FROM opening_balance_items
+    WHERE balance_type = 'payable' AND airline_id IS NOT NULL
+    GROUP BY airline_id, business_id
+) o ON o.airline_id = a.id AND o.business_id = a.business_id
+LEFT JOIN (
+        SELECT airline_id, business_id,
+            COALESCE(SUM(amount) FILTER (WHERE opening_item_id IS NULL), 0) AS ticket_paid,
+            COALESCE(SUM(amount) FILTER (WHERE opening_item_id IS NOT NULL), 0) AS opening_paid,
            MAX(created_at)          AS last_payment_at
     FROM airline_payments
     GROUP BY airline_id, business_id
@@ -2108,10 +2127,11 @@ SELECT
     a.business_id,
     a.name                                   AS airline_name,
     COALESCE(t.ticket_count, 0)              AS ticket_count,
-    COALESCE(t.total_cost, 0)                AS total_cost,
+        COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0) AS total_cost,
     COALESCE(t.total_tax, 0)                 AS total_tax,
     COALESCE(p.total_paid, 0)                AS total_paid,
-    COALESCE(t.total_cost, 0) - COALESCE(p.total_paid, 0) AS balance,
+        COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0)
+            - COALESCE(p.total_paid, 0) AS balance,
     COALESCE(t.unsettled_tickets, 0)         AS unsettled_tickets,
     p.last_payment_at
 FROM airlines a
@@ -2137,6 +2157,12 @@ LEFT JOIN (
     WHERE airline_id IS NOT NULL
     GROUP BY airline_id, business_id
 ) t ON t.airline_id = a.id AND t.business_id = a.business_id
+LEFT JOIN (
+    SELECT airline_id, business_id, COALESCE(SUM(amount), 0) AS total_cost
+    FROM opening_balance_items
+    WHERE balance_type = 'payable' AND airline_id IS NOT NULL
+    GROUP BY airline_id, business_id
+) o ON o.airline_id = a.id AND o.business_id = a.business_id
 LEFT JOIN (
     SELECT airline_id, business_id,
            COALESCE(SUM(amount), 0) AS total_paid,
@@ -2282,10 +2308,11 @@ SELECT
     a.business_id,
     a.name                                   AS airline_name,
     COALESCE(t.ticket_count, 0)              AS ticket_count,
-    COALESCE(t.total_cost, 0)                AS total_cost,
+    COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0) AS total_cost,
     COALESCE(t.total_tax, 0)                 AS total_tax,
     COALESCE(p.total_paid, 0)                AS total_paid,
-    COALESCE(t.total_cost, 0) - COALESCE(p.total_paid, 0) AS balance,
+        COALESCE(t.total_cost, 0) + COALESCE(o.total_cost, 0)
+            - COALESCE(p.total_paid, 0) AS balance,
     COALESCE(t.unsettled_tickets, 0)         AS unsettled_tickets,
     p.last_payment_at
 FROM airlines a
@@ -2311,6 +2338,12 @@ LEFT JOIN (
     WHERE airline_id IS NOT NULL
     GROUP BY airline_id, business_id
 ) t ON t.airline_id = a.id AND t.business_id = a.business_id
+LEFT JOIN (
+    SELECT airline_id, business_id, COALESCE(SUM(amount), 0) AS total_cost
+    FROM opening_balance_items
+    WHERE balance_type = 'payable' AND airline_id IS NOT NULL
+    GROUP BY airline_id, business_id
+) o ON o.airline_id = a.id AND o.business_id = a.business_id
 LEFT JOIN (
     SELECT airline_id, business_id,
            COALESCE(SUM(amount), 0) AS total_paid,

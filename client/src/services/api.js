@@ -86,6 +86,8 @@ export const ticketsAPI = {
   update: (id, data) => api.put(`/tickets/${id}`, data),
   delete: (id, data) => api.delete(`/tickets/${id}`, { data }),
   cancel: (id, data) => api.post(`/tickets/${id}/cancel`, data),
+  recordAirlineRefund: (id, data) =>
+    api.post(`/tickets/${id}/airline-refunds`, data),
   addPayment: (id, data) => api.post(`/tickets/${id}/payments`, data),
   payments: (id) => api.get(`/tickets/${id}/payments`),
 };
@@ -197,6 +199,7 @@ export const airlinesAPI = {
     }),
   // master list
   master: () => api.get("/airlines-list"),
+  create: (data) => api.post("/airlines-list", data),
   duplicates: () => api.get("/airlines-list/duplicates"),
   lookup: (name) => api.get("/airlines-list/lookup", { params: { name } }),
   rename: (id, data) => api.put(`/airlines-list/${id}`, data),

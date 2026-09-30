@@ -1063,6 +1063,33 @@ const cancelTicket = async (req, res, next) => {
         `The airline can't return more than you paid them ($${airlinePaid.toFixed(2)})`,
         400,
       );
+    if (airlineRefund > 0.001 && !ticket.airline_id)
+      return response.error(
+        res,
+        "Link this ticket to a registered airline before recording an airline refund, so the money can be credited to an account.",
+        409,
+      );
+
+    // A refund must be funded by this ticket's remaining cash: the customer
+    // money still held after airline payments, plus the airline's return.
+    // Keep any government tax that was not returned out of that pool. This
+    // lets earned ticket margin absorb a smaller airline refund, but never
+    // lets this cancellation send more cash back than it actually produced.
+    const taxStillOwed = round2(tax - taxRefunded);
+    const refundFundingLimit = round2(
+      Math.max(paid - airlinePaid + airlineRefund - taxStillOwed, 0),
+    );
+    const maxRefund = round2(Math.min(refundable, refundFundingLimit));
+    if (refund > maxRefund + 0.001) {
+      return response.error(
+        res,
+        `Refund exceeds the $${maxRefund.toFixed(2)} available from this ticket. ` +
+          `The airline returned $${airlineRefund.toFixed(2)}; after airline ` +
+          `payments and $${taxStillOwed.toFixed(2)} tax still owed, the ticket ` +
+          `cannot fund a larger refund.`,
+        400,
+      );
+    }
 
     // What the customer's payments now net to, after the refund.
     const kept = round2(paid - refund);
@@ -1189,6 +1216,12 @@ const cancelTicket = async (req, res, next) => {
     const parts = [];
     if (refund > 0) parts.push(`$${refund.toFixed(2)} refunded`);
     if (fee > 0) parts.push(`$${fee.toFixed(2)} kept as a fee`);
+    const airlineShortfall = round2(Math.max(airlinePaid - airlineRefund, 0));
+    if (airlineShortfall > 0)
+      parts.push(
+        `$${airlineRefund.toFixed(2)} returned by the airline; ` +
+          `$${airlineShortfall.toFixed(2)} of the amount paid was not returned`,
+      );
     if (tax > 0)
       parts.push(
         taxRefunded > 0
@@ -1210,6 +1243,105 @@ const cancelTicket = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/tickets/:id/airline-refunds
+ * Record money returned by an airline after an earlier cancellation.
+ */
+const recordAirlineRefund = async (req, res, next) => {
+  try {
+    if (
+      !(await hasTable("airline_payments")) ||
+      !(await hasColumn("tickets", "airline_paid")) ||
+      !(await hasColumn("tickets", "airline_refund"))
+    ) {
+      return response.error(
+        res,
+        "Recording airline refunds needs the latest ticket and airline migrations.",
+        503,
+      );
+    }
+
+    const amount = round2(req.body.amount);
+    if (amount <= 0)
+      return response.error(
+        res,
+        "Refund amount must be greater than zero",
+        400,
+      );
+
+    const result = await withTransaction(async (client) => {
+      const selected = await client.query(
+        `SELECT id, passenger_name, status, airline_id, airline_paid
+           FROM tickets
+          WHERE id = $1 AND business_id = $2
+          FOR UPDATE`,
+        [uuidOrThrow(req.params.id, "ticket id"), req.businessId],
+      );
+      const ticket = selected.rows[0];
+      if (!ticket) return { notFound: true };
+      if (ticket.status !== "cancelled")
+        return {
+          error: "Cancel the ticket before recording an airline refund",
+          status: 409,
+        };
+      if (!ticket.airline_id)
+        return {
+          error: "This ticket is not linked to a registered airline",
+          status: 409,
+        };
+
+      const remaining = round2(ticket.airline_paid);
+      if (amount > remaining + 0.001)
+        return {
+          error: `Refund exceeds the airline amount still paid ($${remaining.toFixed(2)})`,
+          status: 400,
+        };
+
+      const accountId = await requireAccount(
+        req.body,
+        req.businessId,
+        client,
+        "airline refund",
+      );
+      const payment = await client.query(
+        `INSERT INTO airline_payments
+           (business_id, airline_id, ticket_id, paid_by, amount, method, note, account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          req.businessId,
+          ticket.airline_id,
+          ticket.id,
+          req.user.id,
+          -amount,
+          (req.body.method || "cash").trim() || "cash",
+          `Airline refund after cancellation — ${ticket.passenger_name}`,
+          accountId,
+        ],
+      );
+      const updated = await client.query(
+        `UPDATE tickets
+            SET airline_paid = airline_paid - $1,
+                airline_refund = COALESCE(airline_refund, 0) + $1
+          WHERE id = $2 AND business_id = $3
+          RETURNING airline_paid, airline_refund`,
+        [amount, ticket.id, req.businessId],
+      );
+      return { payment: payment.rows[0], ticket: updated.rows[0] };
+    });
+
+    if (result.notFound) return response.notFound(res, "Ticket not found");
+    if (result.error) return response.error(res, result.error, result.status);
+    return response.created(
+      res,
+      result,
+      `$${amount.toFixed(2)} airline refund recorded`,
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   extractFromFile,
   createTicket,
@@ -1220,6 +1352,7 @@ module.exports = {
   updateTicket,
   deleteTicket,
   cancelTicket,
+  recordAirlineRefund,
   addPayment,
   getPayments,
 };

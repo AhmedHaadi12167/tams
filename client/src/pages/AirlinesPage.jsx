@@ -40,11 +40,19 @@ import {
   Banknote,
   Wallet,
   Search,
+  Plus,
 } from "lucide-react";
 import { fmtDate } from "../utils/date";
 import AccountSelect from "../components/AccountSelect";
 
-const COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#06b6d4"];
+const COLORS = [
+  "#3b82f6",
+  "#8b5cf6",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#06b6d4",
+];
 
 const money = (v) =>
   `$${Number(v || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -100,7 +108,9 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
 
   // A new search or page size makes the current page number meaningless —
   // staying on page 4 of a result set with one page shows an empty table.
-  useEffect(() => { setPage(1); }, [query, limit]);
+  useEffect(() => {
+    setPage(1);
+  }, [query, limit]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -111,12 +121,17 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
         limit,
         search: query || undefined,
       })
-      .then((res) => { setData(res.data.data); setSelected([]); })
+      .then((res) => {
+        setData(res.data.data);
+        setSelected([]);
+      })
       .catch(() => toast.error("Failed to load airline detail"))
       .finally(() => setLoading(false));
   }, [airline, filters, page, limit, query]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   // Settling passengers moves money out, so it has to say which account it
   // leaves. This used to fire straight off the button with no account at all,
@@ -177,7 +192,9 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
   const routes = data?.routes || [];
   const total = data?.meta?.total ?? passengers.length;
   const owed = Number(account?.balance) || 0;
-  const owingIds = passengers.filter((p) => Number(p.airline_balance) > 0).map((p) => p.id);
+  const owingIds = passengers
+    .filter((p) => Number(p.airline_balance) > 0)
+    .map((p) => p.id);
   const selectedOwed = passengers
     .filter((p) => selected.includes(p.id))
     .reduce((a, p) => a + (Number(p.airline_balance) || 0), 0);
@@ -201,7 +218,15 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
         </div>
         <div className="flex gap-2">
           {canPay && owed > 0 && (
-            <Button onClick={() => onPay({ airline_id: account.airline_id, airline_name: airline, balance: owed })}>
+            <Button
+              onClick={() =>
+                onPay({
+                  airline_id: account.airline_id,
+                  airline_name: airline,
+                  balance: owed,
+                })
+              }
+            >
               <Banknote className="w-4 h-4" /> Pay {money(owed)}
             </Button>
           )}
@@ -215,9 +240,17 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Tile label="Tickets" value={s.tickets ?? 0} tone="blue" />
         <Tile label="Passengers" value={s.passengers ?? 0} />
-        <Tile label="Airline cost (period)" value={money(s.total_cost)} tone="orange" />
+        <Tile
+          label="Airline cost (period)"
+          value={money(s.total_cost)}
+          tone="orange"
+        />
         <Tile label="Owed all time" value={money(account?.total_cost)} />
-        <Tile label="Paid to airline" value={money(account?.total_paid)} tone="green" />
+        <Tile
+          label="Paid to airline"
+          value={money(account?.total_paid)}
+          tone="green"
+        />
         <Tile
           label="Balance owed"
           value={money(account?.balance)}
@@ -234,20 +267,56 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
               Where they fly
             </h2>
           </div>
-          <ResponsiveContainer width="100%" height={Math.max(180, routes.length * 32)}>
+          <ResponsiveContainer
+            width="100%"
+            height={Math.max(180, routes.length * 32)}
+          >
             <BarChart
-              data={routes.map((r) => ({ name: r.route, tickets: r.tickets, cost: r.cost }))}
+              data={routes.map((r) => ({
+                name: r.route,
+                tickets: r.tickets,
+                cost: r.cost,
+              }))}
               layout="vertical"
               margin={{ left: 10, right: 20 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} allowDecimals={false} />
-              <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-              <Tooltip
-                contentStyle={{ borderRadius: "10px", border: "none", fontSize: "12px", boxShadow: "0 4px 20px rgba(0,0,0,0.12)" }}
-                formatter={(v, n) => (n === "cost" ? [money(v), "Cost"] : [v, "Tickets"])}
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="rgba(128,128,128,0.15)"
+                horizontal={false}
               />
-              <Bar dataKey="tickets" name="tickets" radius={[0, 6, 6, 0]} barSize={16}>
+              <XAxis
+                type="number"
+                tick={{ fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+                allowDecimals={false}
+              />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={150}
+                tick={{ fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+              />
+              <Tooltip
+                contentStyle={{
+                  borderRadius: "10px",
+                  border: "none",
+                  fontSize: "12px",
+                  boxShadow: "0 4px 20px rgba(0,0,0,0.12)",
+                }}
+                formatter={(v, n) =>
+                  n === "cost" ? [money(v), "Cost"] : [v, "Tickets"]
+                }
+              />
+              <Bar
+                dataKey="tickets"
+                name="tickets"
+                radius={[0, 6, 6, 0]}
+                barSize={16}
+              >
                 {routes.map((_, i) => (
                   <Cell key={i} fill={COLORS[i % COLORS.length]} />
                 ))}
@@ -335,11 +404,19 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
                     <th className="px-4 py-3 w-8">
                       <input
                         type="checkbox"
-                        checked={owingIds.length > 0 && selected.length === owingIds.length}
+                        checked={
+                          owingIds.length > 0 &&
+                          selected.length === owingIds.length
+                        }
                         ref={(el) => {
-                          if (el) el.indeterminate = selected.length > 0 && selected.length < owingIds.length;
+                          if (el)
+                            el.indeterminate =
+                              selected.length > 0 &&
+                              selected.length < owingIds.length;
                         }}
-                        onChange={(e) => setSelected(e.target.checked ? owingIds : [])}
+                        onChange={(e) =>
+                          setSelected(e.target.checked ? owingIds : [])
+                        }
                         disabled={owingIds.length === 0}
                         className="rounded cursor-pointer"
                         title="Select unsettled passengers"
@@ -372,67 +449,82 @@ function AirlineDetail({ airline, filters, onBack, canPay, onPay }) {
                 {passengers.map((p) => {
                   const owed = Number(p.airline_balance) || 0;
                   return (
-                  <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                    {canPay && (
-                      <td className="px-4 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selected.includes(p.id)}
-                          disabled={owed <= 0}
-                          onChange={() =>
-                            setSelected((prev) =>
-                              prev.includes(p.id)
-                                ? prev.filter((x) => x !== p.id)
-                                : [...prev, p.id],
-                            )
-                          }
-                          className="rounded cursor-pointer disabled:opacity-30"
-                        />
+                    <tr
+                      key={p.id}
+                      className="hover:bg-gray-50 dark:hover:bg-gray-700/30"
+                    >
+                      {canPay && (
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={selected.includes(p.id)}
+                            disabled={owed <= 0}
+                            onChange={() =>
+                              setSelected((prev) =>
+                                prev.includes(p.id)
+                                  ? prev.filter((x) => x !== p.id)
+                                  : [...prev, p.id],
+                              )
+                            }
+                            className="rounded cursor-pointer disabled:opacity-30"
+                          />
+                        </td>
+                      )}
+                      <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                        {p.passenger_name}
                       </td>
-                    )}
-                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
-                      {p.passenger_name}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                      {p.contact_number || p.customer_phone || "—"}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                      {p.from_city} → {p.to_city}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                      {fmtDate(p.flight_date)}
-                      {p.trip_type === "round_trip" && p.return_date && (
-                        <p className="text-xs text-gray-400">⇄ {fmtDate(p.return_date)}</p>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <Badge variant={p.ticket_type === "LOCAL" ? "info" : "purple"}>
-                        {p.ticket_type}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
-                      {p.ticket_reference || "—"}
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-orange-600 dark:text-orange-400">
-                      {money(p.cost_price)}
-                    </td>
-                    <td className="px-4 py-3 text-green-600 dark:text-green-400">
-                      {money(p.airline_paid)}
-                    </td>
-                    <td className={`px-4 py-3 font-semibold ${owed > 0 ? "text-red-600" : "text-gray-400"}`}>
-                      {owed > 0 ? money(owed) : "Settled"}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                      {p.agent_name || "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      {canPay && owed > 0 && (
-                        <Button size="sm" loading={paying} onClick={() => settleTickets([p.id])}>
-                          <Banknote className="w-3.5 h-3.5" /> Pay
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {p.contact_number || p.customer_phone || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {p.from_city} → {p.to_city}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {fmtDate(p.flight_date)}
+                        {p.trip_type === "round_trip" && p.return_date && (
+                          <p className="text-xs text-gray-400">
+                            ⇄ {fmtDate(p.return_date)}
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge
+                          variant={
+                            p.ticket_type === "LOCAL" ? "info" : "purple"
+                          }
+                        >
+                          {p.ticket_type}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                        {p.ticket_reference || "—"}
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-orange-600 dark:text-orange-400">
+                        {money(p.cost_price)}
+                      </td>
+                      <td className="px-4 py-3 text-green-600 dark:text-green-400">
+                        {money(p.airline_paid)}
+                      </td>
+                      <td
+                        className={`px-4 py-3 font-semibold ${owed > 0 ? "text-red-600" : "text-gray-400"}`}
+                      >
+                        {owed > 0 ? money(owed) : "Settled"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {p.agent_name || "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        {canPay && owed > 0 && (
+                          <Button
+                            size="sm"
+                            loading={paying}
+                            onClick={() => settleTickets([p.id])}
+                          >
+                            <Banknote className="w-3.5 h-3.5" /> Pay
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
@@ -525,6 +617,7 @@ function ManageModal({ open, onClose, onChanged }) {
   const [aliasFor, setAliasFor] = useState(null);
   const [aliasList, setAliasList] = useState([]);
   const [newAlias, setNewAlias] = useState("");
+  const [airlineName, setAirlineName] = useState("");
 
   const load = useCallback(() => {
     Promise.all([airlinesAPI.master(), airlinesAPI.duplicates()])
@@ -557,7 +650,9 @@ function ManageModal({ open, onClose, onChanged }) {
       setNewAlias("");
       openAliases(aliasFor);
       setAliasFor(aliasFor);
-      airlinesAPI.aliases(aliasFor).then((x) => setAliasList(x.data.data || []));
+      airlinesAPI
+        .aliases(aliasFor)
+        .then((x) => setAliasList(x.data.data || []));
     } catch (err) {
       toast.error(err.response?.data?.message || "Failed to add alias");
     } finally {
@@ -614,11 +709,45 @@ function ManageModal({ open, onClose, onChanged }) {
     }
   };
 
+  const registerAirline = async (event) => {
+    event.preventDefault();
+    if (!airlineName.trim()) return;
+    setBusy(true);
+    try {
+      await airlinesAPI.create({ name: airlineName.trim() });
+      toast.success("Airline registered");
+      setAirlineName("");
+      load();
+      onChanged();
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Airline registration failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const nameOf = (id) => master.find((m) => m.id === id)?.name || "";
 
   return (
     <Modal open={open} onClose={onClose} title="Manage airlines" size="lg">
       <div className="space-y-6">
+        <form
+          onSubmit={registerAirline}
+          className="flex flex-wrap items-end gap-3"
+        >
+          <Input
+            label="Register airline"
+            value={airlineName}
+            onChange={(event) => setAirlineName(event.target.value)}
+            placeholder="Airline name"
+            className="min-w-56 flex-1"
+            required
+          />
+          <Button type="submit" loading={busy}>
+            <Plus className="w-4 h-4" /> Register
+          </Button>
+        </form>
+
         {/* Suggested duplicates */}
         {dupes.length > 0 && (
           <div>
@@ -641,7 +770,8 @@ function ManageModal({ open, onClose, onChanged }) {
                       <span className="font-semibold">{p.b.name}</span>
                     </p>
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                      {p.reason} · {p.a.ticket_count} and {p.b.ticket_count} tickets
+                      {p.reason} · {p.a.ticket_count} and {p.b.ticket_count}{" "}
+                      tickets
                     </p>
                   </div>
                   <Button
@@ -651,8 +781,12 @@ function ManageModal({ open, onClose, onChanged }) {
                     onClick={() =>
                       doMerge(
                         // keep the one with more tickets
-                        Number(p.a.ticket_count) < Number(p.b.ticket_count) ? p.a.id : p.b.id,
-                        Number(p.a.ticket_count) < Number(p.b.ticket_count) ? p.b.id : p.a.id,
+                        Number(p.a.ticket_count) < Number(p.b.ticket_count)
+                          ? p.a.id
+                          : p.b.id,
+                        Number(p.a.ticket_count) < Number(p.b.ticket_count)
+                          ? p.b.id
+                          : p.a.id,
                       )
                     }
                   >
@@ -703,8 +837,9 @@ function ManageModal({ open, onClose, onChanged }) {
           {from && into && from !== into && (
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
               Every ticket on <strong>{nameOf(from)}</strong> will move to{" "}
-              <strong>{nameOf(into)}</strong>, and <strong>{nameOf(from)}</strong>{" "}
-              will be removed. Ticket history is kept.
+              <strong>{nameOf(into)}</strong>, and{" "}
+              <strong>{nameOf(from)}</strong> will be removed. Ticket history is
+              kept.
             </p>
           )}
         </div>
@@ -726,10 +861,18 @@ function ManageModal({ open, onClose, onChanged }) {
                         className="flex-1"
                         autoFocus
                       />
-                      <Button size="sm" loading={busy} onClick={() => doRename(a.id)}>
+                      <Button
+                        size="sm"
+                        loading={busy}
+                        onClick={() => doRename(a.id)}
+                      >
                         Save
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setEditing(null)}
+                      >
                         Cancel
                       </Button>
                     </>
@@ -767,8 +910,8 @@ function ManageModal({ open, onClose, onChanged }) {
                 {aliasFor === a.id && (
                   <div className="px-4 pb-3 bg-gray-50 dark:bg-gray-700/30">
                     <p className="text-xs text-gray-500 dark:text-gray-400 py-2">
-                      Other names for {a.name} — an IATA code or abbreviation on a
-                      ticket resolves to this airline.
+                      Other names for {a.name} — an IATA code or abbreviation on
+                      a ticket resolves to this airline.
                     </p>
                     <div className="flex flex-wrap gap-1.5 mb-2">
                       {aliasList.map((al) => (
@@ -838,7 +981,7 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
     if (!open || !airlineId) return;
     setAmount(balance > 0 ? balance.toFixed(2) : "");
     setMethod("cash");
-      setAccountId("");
+    setAccountId("");
     setReference("");
     airlinesAPI
       .payments(airlineId)
@@ -879,8 +1022,12 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
           <p className="text-sm text-gray-600 dark:text-gray-300">
             {target.airline_name}
           </p>
-          <p className="text-2xl font-bold text-red-600 mt-1">{money(balance)}</p>
-          <p className="text-xs text-gray-400 mt-0.5">outstanding ticket cost</p>
+          <p className="text-2xl font-bold text-red-600 mt-1">
+            {money(balance)}
+          </p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            outstanding ticket cost
+          </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -893,7 +1040,11 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
-          <AccountSelect direction="out" value={accountId} onChange={(e) => setAccountId(e.target.value)} />
+          <AccountSelect
+            direction="out"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+          />
         </div>
         <Input
           label="Reference (optional)"
@@ -902,7 +1053,8 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
           placeholder="Invoice or transfer number"
         />
         <p className="text-xs text-gray-400">
-          Defaults to the full balance — change it to settle part of the account.
+          Defaults to the full balance — change it to settle part of the
+          account.
         </p>
 
         {history.length > 0 && (
@@ -912,7 +1064,10 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
             </p>
             <div className="border border-gray-200 dark:border-gray-700 rounded-xl divide-y divide-gray-100 dark:divide-gray-700 max-h-40 overflow-y-auto">
               {history.slice(0, 8).map((h) => (
-                <div key={h.id} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm">
+                <div
+                  key={h.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm"
+                >
                   <span className="text-gray-500 dark:text-gray-400">
                     {fmtDate(h.created_at)} · {h.account_name || h.method}
                   </span>
@@ -926,7 +1081,9 @@ function PayAirlineModal({ open, onClose, target, onPaid }) {
         )}
 
         <div className="flex justify-end gap-2 pt-2">
-          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
           <Button type="submit" loading={saving}>
             <Banknote className="w-4 h-4" /> Pay {amount ? money(amount) : ""}
           </Button>
@@ -989,14 +1146,23 @@ export default function AirlinesPage() {
           open={Boolean(payTarget)}
           target={payTarget}
           onClose={() => setPayTarget(null)}
-          onPaid={() => { setPayTarget(null); setSelected(null); load(); }}
+          onPaid={() => {
+            setPayTarget(null);
+            setSelected(null);
+            load();
+          }}
         />
       </>
     );
 
   const airlines = data?.airlines || [];
   const totals = data?.totals || {};
-  const account = data?.account || { total_cost: 0, total_paid: 0, total_balance: 0, airlines_owing: 0 };
+  const account = data?.account || {
+    total_cost: 0,
+    total_paid: 0,
+    total_balance: 0,
+    airlines_owing: 0,
+  };
   const names = data?.airline_names || [];
   const maxTickets = airlines.length ? airlines[0].tickets : 1;
 
@@ -1009,7 +1175,8 @@ export default function AirlinesPage() {
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
             {totals.airlines || 0} airline{totals.airlines === 1 ? "" : "s"} ·{" "}
-            {totals.tickets || 0} tickets · {money(account.total_balance)} owed to carriers
+            {totals.tickets || 0} tickets · {money(account.total_balance)} owed
+            to carriers
           </p>
         </div>
         {canManage && (
@@ -1029,7 +1196,10 @@ export default function AirlinesPage() {
         open={Boolean(payTarget)}
         target={payTarget}
         onClose={() => setPayTarget(null)}
-        onPaid={() => { setPayTarget(null); load(); }}
+        onPaid={() => {
+          setPayTarget(null);
+          load();
+        }}
       />
 
       {account.total_balance > 0 && (
@@ -1037,9 +1207,13 @@ export default function AirlinesPage() {
           <div className="flex items-center gap-3 flex-wrap">
             <Wallet className="w-5 h-5 text-red-500 shrink-0" />
             <p className="text-sm text-gray-600 dark:text-gray-400 flex-1 min-w-48">
-              You owe <strong className="text-red-600 dark:text-red-400">{money(account.total_balance)}</strong>{" "}
-              across {account.airlines_owing} airline{account.airlines_owing === 1 ? "" : "s"}.
-              {" "}Settled so far: {money(account.total_paid)} of {money(account.total_cost)}.
+              You owe{" "}
+              <strong className="text-red-600 dark:text-red-400">
+                {money(account.total_balance)}
+              </strong>{" "}
+              across {account.airlines_owing} airline
+              {account.airlines_owing === 1 ? "" : "s"}. Settled so far:{" "}
+              {money(account.total_paid)} of {money(account.total_cost)}.
             </p>
           </div>
         </Card>
@@ -1069,24 +1243,40 @@ export default function AirlinesPage() {
             <label className="text-xs font-medium text-gray-500 uppercase">
               From date
             </label>
-            <Input type="date" value={filters.from_date} onChange={setFilter("from_date")} />
+            <Input
+              type="date"
+              value={filters.from_date}
+              onChange={setFilter("from_date")}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-gray-500 uppercase">
               To date
             </label>
-            <Input type="date" value={filters.to_date} onChange={setFilter("to_date")} />
+            <Input
+              type="date"
+              value={filters.to_date}
+              onChange={setFilter("to_date")}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-gray-500 uppercase">
               Date basis
             </label>
-            <Select value={filters.date_basis} onChange={setFilter("date_basis")} className="w-36">
+            <Select
+              value={filters.date_basis}
+              onChange={setFilter("date_basis")}
+              className="w-36"
+            >
               <option value="booked">Booking date</option>
               <option value="flight">Flight date</option>
             </Select>
           </div>
-          <Select value={filters.ticket_type} onChange={setFilter("ticket_type")} className="w-36">
+          <Select
+            value={filters.ticket_type}
+            onChange={setFilter("ticket_type")}
+            className="w-36"
+          >
             <option value="">All types</option>
             <option value="LOCAL">Local</option>
             <option value="INTERNATIONAL">International</option>
@@ -1108,7 +1298,12 @@ export default function AirlinesPage() {
               <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                 {loadError}
               </p>
-              <Button variant="outline" size="sm" className="mt-3" onClick={load}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={load}
+              >
                 Try again
               </Button>
             </div>
@@ -1167,7 +1362,10 @@ export default function AirlinesPage() {
                 Tickets by airline
               </h2>
             </div>
-            <ResponsiveContainer width="100%" height={Math.max(200, airlines.length * 34)}>
+            <ResponsiveContainer
+              width="100%"
+              height={Math.max(200, airlines.length * 34)}
+            >
               <BarChart
                 data={airlines.map((a) => ({
                   name: a.airline_name,
@@ -1177,14 +1375,43 @@ export default function AirlinesPage() {
                 layout="vertical"
                 margin={{ left: 10, right: 20 }}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{ borderRadius: "10px", border: "none", fontSize: "12px", boxShadow: "0 4px 20px rgba(0,0,0,0.12)" }}
-                  formatter={(v, n) => (n === "cost" ? [money(v), "Cost"] : [v, "Tickets"])}
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="rgba(128,128,128,0.15)"
+                  horizontal={false}
                 />
-                <Bar dataKey="tickets" name="tickets" radius={[0, 6, 6, 0]} barSize={18}>
+                <XAxis
+                  type="number"
+                  tick={{ fontSize: 11 }}
+                  tickLine={false}
+                  axisLine={false}
+                  allowDecimals={false}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="name"
+                  width={150}
+                  tick={{ fontSize: 11 }}
+                  tickLine={false}
+                  axisLine={false}
+                />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: "10px",
+                    border: "none",
+                    fontSize: "12px",
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.12)",
+                  }}
+                  formatter={(v, n) =>
+                    n === "cost" ? [money(v), "Cost"] : [v, "Tickets"]
+                  }
+                />
+                <Bar
+                  dataKey="tickets"
+                  name="tickets"
+                  radius={[0, 6, 6, 0]}
+                  barSize={18}
+                >
                   {airlines.map((_, i) => (
                     <Cell key={i} fill={COLORS[i % COLORS.length]} />
                   ))}
@@ -1247,7 +1474,9 @@ export default function AirlinesPage() {
                         <div className="h-1.5 w-28 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden mt-1.5">
                           <div
                             className={`h-full rounded-full ${i === 0 ? "bg-yellow-400" : "bg-blue-500"}`}
-                            style={{ width: `${(a.tickets / maxTickets) * 100}%` }}
+                            style={{
+                              width: `${(a.tickets / maxTickets) * 100}%`,
+                            }}
                           />
                         </div>
                       </td>
@@ -1275,14 +1504,21 @@ export default function AirlinesPage() {
                       <td
                         className={`px-4 py-3 font-semibold ${Number(a.account_balance) > 0 ? "text-red-600" : "text-gray-400"}`}
                       >
-                        {a.account_balance === null ? "—" : money(a.account_balance)}
+                        {a.account_balance === null
+                          ? "—"
+                          : money(a.account_balance)}
                       </td>
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                        {canPay && Number(a.account_balance) > 0 && a.airline_id && (
-                          <Button size="sm" onClick={() => setPayTarget(a)}>
-                            <Banknote className="w-3.5 h-3.5" /> Pay
-                          </Button>
-                        )}
+                      <td
+                        className="px-4 py-3"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {canPay &&
+                          Number(a.account_balance) > 0 &&
+                          a.airline_id && (
+                            <Button size="sm" onClick={() => setPayTarget(a)}>
+                              <Banknote className="w-3.5 h-3.5" /> Pay
+                            </Button>
+                          )}
                       </td>
                       <td className="px-4 py-3 text-gray-400">
                         <ChevronRight className="w-4 h-4" />

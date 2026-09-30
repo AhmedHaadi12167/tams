@@ -356,12 +356,15 @@ const getBalanceSheet = async (req, res, next) => {
       ),
       query(
         `SELECT
-           COALESCE(SUM(selling_price), 0)     AS gross_sales,
-           COALESCE(SUM(cost_price), 0)        AS cost_of_sales,
-           COALESCE(SUM(agent_commission), 0)  AS commission,
-           COALESCE(SUM(amount_paid), 0)       AS collected
+           COALESCE(SUM(selling_price) FILTER (WHERE status <> 'cancelled'), 0) AS gross_sales,
+           COALESCE(SUM(cost_price) FILTER (WHERE status <> 'cancelled'), 0) AS cost_of_sales,
+           COALESCE(SUM(agent_commission) FILTER (WHERE status <> 'cancelled'), 0) AS commission,
+           COALESCE(SUM(amount_paid) FILTER (WHERE status <> 'cancelled'), 0) AS collected,
+             COALESCE(SUM(cancellation_fee) FILTER (WHERE status = 'cancelled'), 0) AS cancellation_fees,
+             COALESCE(SUM(GREATEST(COALESCE(airline_paid, 0), 0))
+                      FILTER (WHERE status = 'cancelled'), 0) AS unrecovered_cost
          FROM tickets
-         WHERE business_id = $1 AND status <> 'cancelled'${asOfClause}`,
+         WHERE business_id = $1${asOfClause}`,
         p,
       ),
       query(
@@ -406,7 +409,15 @@ const getBalanceSheet = async (req, res, next) => {
       optional(
         "airline_payments",
         `SELECT COALESCE(SUM(amount), 0) AS total
-         FROM airline_payments WHERE business_id = $1${asOfClause}`,
+         FROM airline_payments ap
+        WHERE ap.business_id = $1
+          AND ap.opening_item_id IS NULL
+          AND (ap.ticket_id IS NULL OR EXISTS (
+            SELECT 1 FROM tickets t
+             WHERE t.id = ap.ticket_id
+               AND t.business_id = ap.business_id
+               AND t.status <> 'cancelled'
+          ))${asOfClause.replace(/created_at/g, "ap.created_at")}`,
         p,
         { total: 0 },
       ),
@@ -441,11 +452,18 @@ const getBalanceSheet = async (req, res, next) => {
       query(
         `SELECT
            COALESCE(SUM(amount - COALESCE(paid, 0)) FILTER (WHERE balance_type = 'receivable'), 0) AS receivables,
-           COALESCE(SUM(amount) FILTER (WHERE balance_type = 'payable'), 0) AS payables
+           COALESCE(SUM(amount) FILTER (WHERE balance_type = 'receivable'), 0) AS receivables_gross,
+           COALESCE(SUM(amount - COALESCE(paid, 0)) FILTER (WHERE balance_type = 'payable'), 0) AS payables,
+           COALESCE(SUM(amount) FILTER (WHERE balance_type = 'payable'), 0) AS payables_gross
          FROM (
            SELECT o.*, COALESCE(SUM(p.amount), 0) AS paid
              FROM opening_balance_items o
-             LEFT JOIN opening_balance_payments p ON p.opening_item_id = o.id${as_of ? " AND p.created_at::DATE <= $2::DATE" : ""}
+             LEFT JOIN (
+               SELECT opening_item_id, amount, created_at FROM opening_balance_payments
+               UNION ALL
+               SELECT opening_item_id, amount, created_at FROM airline_payments
+                WHERE opening_item_id IS NOT NULL
+             ) p ON p.opening_item_id = o.id${as_of ? " AND p.created_at::DATE <= $2::DATE" : ""}
             WHERE o.business_id = $1${as_of ? " AND o.entry_date <= $2::DATE" : ""}
             GROUP BY o.id
          ) opening
@@ -485,8 +503,10 @@ const getBalanceSheet = async (req, res, next) => {
     // to "how much money do we have" and it is the one you can check against
     // a bank statement.
     const held = await query(
-      `SELECT COALESCE(SUM(balance), 0) AS total
-         FROM v_account_balance WHERE business_id = $1`,
+      `SELECT account_id, name, kind, opening_balance, balance
+         FROM v_account_balance
+        WHERE business_id = $1
+        ORDER BY sort_order, name`,
       [businessId],
     );
     // Money received but not yet filed against an account is still money the
@@ -501,10 +521,20 @@ const getBalanceSheet = async (req, res, next) => {
     );
 
     const openingCash = round2(biz.opening_cash);
+    const accountOpeningCash = round2(
+      held.rows.reduce(
+        (total, account) => total + n(account.opening_balance),
+        0,
+      ),
+    );
     const fixedAssets = round2(biz.fixed_assets);
     const manualLiabilities = round2(biz.liabilities);
     const openingReceivables = round2(openingItemsRes.rows[0].receivables);
     const openingPayables = round2(openingItemsRes.rows[0].payables);
+    const openingReceivablesGross = round2(
+      openingItemsRes.rows[0].receivables_gross,
+    );
+    const openingPayablesGross = round2(openingItemsRes.rows[0].payables_gross);
 
     const grossSales = round2(
       n(t.gross_sales) +
@@ -522,6 +552,9 @@ const getBalanceSheet = async (req, res, next) => {
     const costOfSales = round2(airlineCost + directPaidCost);
     const commission = round2(t.commission);
     const expensesPaid = round2(expenseRes.rows[0].total);
+    const cancellationNet = round2(
+      n(t.cancellation_fees) - n(t.unrecovered_cost),
+    );
 
     // ── Assets ──────────────────────────────────────────────
     //
@@ -533,14 +566,22 @@ const getBalanceSheet = async (req, res, next) => {
     // the bank. Cash & bank read 130 where the Accounts page read 2,030.
     //
     // Cash is not a derivation. It is a fact, and the ledger holds it.
-    const cash = round2(n(held.rows[0].total) + n(loose.rows[0].net));
+    const cash = round2(
+      held.rows.reduce((total, account) => total + n(account.balance), 0) +
+        n(loose.rows[0].net) +
+        openingCash,
+    );
     const receivables = round2(grossSales - collected + openingReceivables);
-    const totalAssets = round2(cash + receivables + fixedAssets);
+    const airlineNetPayable = round2(airlineCost - airlinePaid);
+    const airlineReceivable = round2(Math.max(-airlineNetPayable, 0));
+    const airlinePayable = round2(Math.max(airlineNetPayable, 0));
+    const totalAssets = round2(
+      cash + receivables + airlineReceivable + fixedAssets,
+    );
 
     // ── Liabilities ─────────────────────────────────────────
     // Only what is genuinely still owed: airline cost not yet settled and
     // commission not yet paid out.
-    const airlinePayable = round2(airlineCost - airlinePaid);
     // An embassy fee or a tour operator's bill is owed until someone pays
     // it, exactly like an airline fare. Recording it as a cost while
     // pretending the cash had already gone was what unbalanced the sheet.
@@ -556,20 +597,35 @@ const getBalanceSheet = async (req, res, next) => {
     );
 
     // ── Equity ──────────────────────────────────────────────
-    const retainedEarnings = round2(
-      grossSales - costOfSales - commission - expensesPaid,
-    );
-    // If the owner never entered a capital figure, derive it from the
-    // opening balances so the sheet balances (Assets = Liabilities + Equity).
     const ownerCapital = n(biz.owner_capital)
       ? round2(biz.owner_capital)
       : round2(
           openingCash +
+            accountOpeningCash +
             fixedAssets +
-            openingReceivables -
+            openingReceivablesGross -
             manualLiabilities -
-            openingPayables,
+            openingPayablesGross,
         );
+    const openingRetainedEarnings = round2(
+      openingCash +
+        accountOpeningCash +
+        fixedAssets +
+        openingReceivablesGross -
+        manualLiabilities -
+        openingPayablesGross -
+        ownerCapital,
+    );
+    const retainedEarnings = round2(
+      openingRetainedEarnings +
+        grossSales -
+        costOfSales -
+        commission -
+        expensesPaid +
+        cancellationNet,
+    );
+    // If the owner never entered a capital figure, derive it from the
+    // opening balances so the sheet balances (Assets = Liabilities + Equity).
     const totalEquity = round2(ownerCapital + retainedEarnings);
 
     const difference = round2(totalAssets - (totalLiabilities + totalEquity));
@@ -579,7 +635,15 @@ const getBalanceSheet = async (req, res, next) => {
       as_of: as_of || new Date().toISOString().slice(0, 10),
       assets: {
         cash_and_bank: cash,
+        cash_in_hand: openingCash,
+        accounts: held.rows.map((account) => ({
+          account_id: account.account_id,
+          name: account.name,
+          kind: account.kind,
+          balance: round2(account.balance),
+        })),
         accounts_receivable: receivables,
+        airline_receivable: airlineReceivable,
         opening_receivables: openingReceivables,
         fixed_assets: fixedAssets,
         total: totalAssets,
@@ -607,8 +671,8 @@ const getBalanceSheet = async (req, res, next) => {
       balanced: Math.abs(difference) < 0.01,
       difference,
       notes: [
-        "Cash = opening cash + money collected − expenses − airline settlements − agent payouts − visa and package supplier costs.",
-        "Payable to airlines is the ticket cost you have not settled yet. Pay it from the Airlines page.",
+        "Cash & bank combines cash in hand, each payment account, and unassigned cash movements; each is shown separately.",
+        "An airline credit is shown as an airline receivable; amounts still owed are shown as payable to airlines.",
         "Agent commission payable is what agents have earned but not been paid. Pay it from the Agents page.",
         "Visa fees and package supplier costs are treated as paid when the work is done, since TAMS keeps no account for those suppliers.",
         "Set opening cash, fixed assets, liabilities and owner capital on the business record for an accurate opening position.",
@@ -899,15 +963,22 @@ const getOpeningItems = async (req, res, next) => {
     if (!requireBusiness(req, res)) return;
     const result = await query(
       `SELECT o.*, c.name AS customer_name, c.phone AS customer_phone,
+              a.name AS airline_name,
               COALESCE(p.paid, 0) AS paid_amount,
               o.amount - COALESCE(p.paid, 0) AS balance,
               u.name AS created_by_name
          FROM opening_balance_items o
          LEFT JOIN customers c ON c.id = o.customer_id
+         LEFT JOIN airlines a ON a.id = o.airline_id
          LEFT JOIN users u ON u.id = o.created_by
          LEFT JOIN (
            SELECT opening_item_id, SUM(amount) AS paid
-             FROM opening_balance_payments GROUP BY opening_item_id
+             FROM (
+               SELECT opening_item_id, amount FROM opening_balance_payments
+               UNION ALL
+               SELECT opening_item_id, amount FROM airline_payments
+                WHERE opening_item_id IS NOT NULL
+             ) payments GROUP BY opening_item_id
          ) p ON p.opening_item_id = o.id
         WHERE o.business_id = $1
         ORDER BY o.entry_date DESC, o.created_at DESC`,
@@ -1004,6 +1075,7 @@ const createOpeningItem = async (req, res, next) => {
     const {
       balance_type,
       customer_id,
+      airline_id,
       service_type,
       reason,
       amount,
@@ -1038,18 +1110,26 @@ const createOpeningItem = async (req, res, next) => {
       );
       if (customer.rows.length === 0)
         return response.error(res, "Customer not found in this business", 404);
+    } else if (airline_id) {
+      const airline = await query(
+        `SELECT id FROM airlines WHERE id = $1 AND business_id = $2`,
+        [airline_id, req.businessId],
+      );
+      if (!airline.rows.length)
+        return response.error(res, "Airline not found in this business", 404);
     }
 
     const result = await query(
       `INSERT INTO opening_balance_items
-         (business_id, balance_type, customer_id, service_type, reason,
-          amount, entry_date, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::DATE, CURRENT_DATE), $8)
+         (business_id, balance_type, customer_id, airline_id, service_type,
+          reason, amount, entry_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::DATE, CURRENT_DATE), $9)
        RETURNING *`,
       [
         req.businessId,
         balance_type,
         balance_type === "receivable" ? customer_id : null,
+        balance_type === "payable" ? airline_id || null : null,
         balance_type === "receivable" ? service_type : null,
         description,
         round2(value),
@@ -1066,7 +1146,14 @@ const createOpeningItem = async (req, res, next) => {
 const updateOpeningItem = async (req, res, next) => {
   try {
     if (!requireBusiness(req, res)) return;
-    const { customer_id, service_type, reason, amount, entry_date } = req.body;
+    const {
+      customer_id,
+      airline_id,
+      service_type,
+      reason,
+      amount,
+      entry_date,
+    } = req.body;
     const value = Number(amount);
     const description = String(reason || "").trim();
 
@@ -1120,19 +1207,48 @@ const updateOpeningItem = async (req, res, next) => {
         );
         if (!customer.rows.length)
           return { error: "Customer not found in this business", status: 404 };
+      } else if (airline_id) {
+        const airline = await client.query(
+          `SELECT id FROM airlines WHERE id = $1 AND business_id = $2`,
+          [airline_id, req.businessId],
+        );
+        if (!airline.rows.length)
+          return { error: "Airline not found in this business", status: 404 };
+      }
+
+      if (item.balance_type === "payable") {
+        const payments = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS paid
+             FROM airline_payments WHERE opening_item_id = $1`,
+          [item.id],
+        );
+        paid = round2(payments.rows[0].paid);
+        if (value + 0.001 < paid)
+          return {
+            error: `Amount cannot be less than the $${paid.toFixed(2)} already paid`,
+            status: 400,
+          };
+        if (paid > 0.001 && airline_id !== item.airline_id)
+          return {
+            error:
+              "The airline cannot be changed after a payment has been made",
+            status: 409,
+          };
       }
 
       const updated = await client.query(
         `UPDATE opening_balance_items
             SET customer_id = $1,
-                service_type = $2,
-                reason = $3,
-                amount = $4,
-                entry_date = COALESCE($5::DATE, entry_date)
-          WHERE id = $6 AND business_id = $7
+                airline_id = $2,
+                service_type = $3,
+                reason = $4,
+                amount = $5,
+                entry_date = COALESCE($6::DATE, entry_date)
+          WHERE id = $7 AND business_id = $8
           RETURNING *`,
         [
           item.balance_type === "receivable" ? customer_id : null,
+          item.balance_type === "payable" ? airline_id || null : null,
           item.balance_type === "receivable" ? service_type : null,
           description,
           round2(value),
@@ -1181,18 +1297,31 @@ const deleteOpeningItem = async (req, res, next) => {
             error: `This receivable has $${paid.toFixed(2)} in collected payments and cannot be deleted`,
             status: 409,
           };
+      } else if (item.balance_type === "payable") {
+        const payments = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS paid
+             FROM airline_payments WHERE opening_item_id = $1`,
+          [item.id],
+        );
+        paid = round2(payments.rows[0].paid);
+        if (paid > 0.001)
+          return {
+            error: `This payable has $${paid.toFixed(2)} in settled payments and cannot be deleted`,
+            status: 409,
+          };
       }
 
       await client.query(
         `INSERT INTO opening_balance_deletion_audit
-           (business_id, opening_item_id, balance_type, customer_id,
+            (business_id, opening_item_id, balance_type, customer_id, airline_id,
             reason, amount, entry_date, deletion_reason, deleted_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           req.businessId,
           item.id,
           item.balance_type,
           item.customer_id,
+          item.airline_id,
           item.reason,
           item.amount,
           item.entry_date,

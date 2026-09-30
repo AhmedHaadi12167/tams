@@ -5,6 +5,7 @@ import {
   downloadBlob,
   visasAPI,
   packagesAPI,
+  financialsAPI,
   fileUrl,
 } from "../services/api";
 import { useAuth } from "../context/AuthContext";
@@ -225,7 +226,7 @@ const printStatement = (data, preparedBy, paper = "A4") => {
          .map(
            (p) => `<tr>
              <td style="width:62px">${esc(fmtDate(p.created_at))}</td>
-             <td>${esc(p.passenger_name || "—")}</td>
+             <td>${esc(p.payer_name || customer.name || "—")}</td>
              <td style="width:74px;color:#64748B">${esc(p.account_name || p.method || "—")}</td>
              <td style="width:56px;text-align:right;font-weight:bold;color:${
                Number(p.amount) < 0 ? "var(--red)" : "var(--green)"
@@ -433,6 +434,29 @@ const printStatement = (data, preparedBy, paper = "A4") => {
   wirePrintWindow(win, paper);
 };
 
+const printPaymentReceipt = (payment, customer) => {
+  const win = window.open("", "_blank");
+  if (!win) return toast.error("Allow pop-ups to print the receipt");
+  const html = `<!doctype html><html><head><meta charset="utf-8" />
+    <title>Payment receipt</title><style>${INV_CSS}${PAPER_CSS}
+    body{padding:36px}.payment-receipt{max-width:620px;margin:24px auto;border:1px solid #cbd5e1;border-radius:8px;padding:28px}
+    .payment-receipt h1{font-size:22px;color:#134E4A;margin:0 0 20px}.payment-receipt dl{display:grid;grid-template-columns:150px 1fr;gap:12px;margin:0}
+    .payment-receipt dt{color:#64748B}.payment-receipt dd{margin:0;color:#0F172A;font-weight:bold;overflow-wrap:anywhere}
+    .payment-amount{font-size:26px;color:#15803D;margin:8px 0 22px;font-weight:bold}
+    </style></head><body><main class="payment-receipt">
+    <h1>Payment receipt</h1><p class="payment-amount">${money(payment.amount)}</p>
+    <dl><dt>Paid by</dt><dd>${esc(payment.payer_name || customer.name)}</dd>
+    <dt>Passenger / service</dt><dd>${esc(payment.passenger_name || "Opening balance")}</dd>
+    <dt>Received into</dt><dd>${esc(payment.account_name || payment.method || "—")}</dd>
+    <dt>Received by</dt><dd>${esc(payment.collected_by_name || "—")}</dd>
+    <dt>Date</dt><dd>${esc(fmtDate(payment.created_at, "dd MMM yyyy HH:mm"))}</dd>
+    <dt>Receipt reference</dt><dd>${esc(payment.id || "—")}</dd></dl>
+    </main></body></html>`;
+  win.document.write(html);
+  win.document.close();
+  wirePrintWindow(win, "A5");
+};
+
 /**
  * Narrow a statement to the ticked passengers, recomputing the totals so the
  * printed page never shows figures that disagree with its own rows.
@@ -534,6 +558,11 @@ const COLLECT = {
     api: (id, body) => packagesAPI.addPayment(id, body),
     title: (r) => r.label,
     subtitle: (r) => `${r.package_type} package`,
+  },
+  opening: {
+    api: (id, body) => financialsAPI.collectOpeningReceivable(id, body),
+    title: (r) => r.reason,
+    subtitle: () => "Opening receivable",
   },
 };
 
@@ -759,6 +788,40 @@ function StatementModal({
           </div>
         ))}
       </div>
+
+      {openingBalances.length > 0 && (
+        <div>
+          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
+            Opening receivables
+          </h4>
+          <div className="divide-y divide-gray-100 dark:divide-gray-700 border-y border-gray-200 dark:border-gray-700">
+            {openingBalances.map((item) => (
+              <div
+                key={item.id}
+                className="flex flex-wrap items-center gap-3 py-2 text-sm"
+              >
+                <span className="min-w-0 flex-1 text-gray-700 dark:text-gray-300">
+                  {item.reason} · {fmtDate(item.entry_date, "dd MMM yyyy")}
+                </span>
+                <span className="font-semibold text-red-600">
+                  {money(item.balance)} due
+                </span>
+                {Number(item.balance) > 0.001 && onCollect && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => onCollect(item, "opening")}
+                    title="Collect opening balance payment"
+                    className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
+                  >
+                    <Banknote className="w-4 h-4" /> Pay
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Tickets */}
       <div>
@@ -1098,13 +1161,23 @@ function StatementModal({
                     {money(p.amount)}
                   </span>
                   <span className="text-xs text-gray-500 ml-2">
-                    {p.passenger_name} · {p.account_name || p.method}
+                    Paid by {p.payer_name || customer.name} ·{" "}
+                    {p.account_name || p.method}
                   </span>
                 </div>
                 <div className="text-right text-xs text-gray-500">
                   <p>{p.collected_by_name}</p>
                   <p>{fmtDate(p.created_at, "dd MMM yyyy HH:mm")}</p>
                 </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => printPaymentReceipt(p, customer)}
+                  title="Print this payment receipt"
+                  aria-label="Print this payment receipt"
+                >
+                  <Printer className="w-4 h-4" />
+                </Button>
               </div>
             ))}
           </div>
@@ -1819,10 +1892,28 @@ export default function CustomersPage() {
                             {fmtDate(item.entry_date, "dd MMM yyyy")}
                           </p>
                         </div>
-                        <p className="text-sm font-semibold text-red-600">
-                          {money(item.balance)} due · {money(item.paid_amount)}{" "}
-                          paid
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-red-600">
+                            {money(item.balance)} due ·{" "}
+                            {money(item.paid_amount)} paid
+                          </p>
+                          {Number(item.balance) > 0.001 && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                setCollectTarget({
+                                  kind: "opening",
+                                  record: item,
+                                })
+                              }
+                              title="Collect opening balance payment"
+                              className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
+                            >
+                              <Banknote className="w-4 h-4" /> Pay
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2034,6 +2125,7 @@ export default function CustomersPage() {
             onDone={() => {
               setCollectTarget(null);
               if (stmtModal) openStatement(stmtModal); // refresh statement
+              if (viewModal) openView(viewModal); // refresh opening receivable detail
               load(); // refresh counts
             }}
             onCancel={() => setCollectTarget(null)}

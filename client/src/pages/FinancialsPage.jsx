@@ -4,6 +4,7 @@ import {
   expensesAPI,
   taxAPI,
   customersAPI,
+  airlinesAPI,
 } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -362,7 +363,7 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Input
-            label="Opening cash"
+            label="Cash in hand"
             type="number"
             step="0.01"
             value={form.opening_cash}
@@ -415,8 +416,10 @@ function OpeningBalancesModal({ open, onClose, onSaved }) {
 
 function OpeningItemModal({ open, balanceType, initial, onClose, onSaved }) {
   const [customers, setCustomers] = useState([]);
+  const [airlines, setAirlines] = useState([]);
   const [form, setForm] = useState({
     customer_id: "",
+    airline_id: "",
     service_type: "ticket",
     reason: "",
     amount: "",
@@ -452,9 +455,20 @@ function OpeningItemModal({ open, balanceType, initial, onClose, onSaved }) {
           ),
         );
     }
+    if (open && !isReceivable) {
+      airlinesAPI
+        .master()
+        .then((result) => setAirlines(result.data.data || []))
+        .catch((error) =>
+          toast.error(
+            error.response?.data?.message || "Could not load airlines",
+          ),
+        );
+    }
     if (open) {
       setForm({
         customer_id: initial?.customer_id || "",
+        airline_id: initial?.airline_id || "",
         service_type: initial?.service_type || "ticket",
         reason: initial?.reason || "",
         amount: initial?.amount ?? "",
@@ -536,6 +550,20 @@ function OpeningItemModal({ open, balanceType, initial, onClose, onSaved }) {
               ))}
             </Select>
           </div>
+        )}
+        {!isReceivable && (
+          <Select
+            label="Airline (optional)"
+            value={form.airline_id}
+            onChange={set("airline_id")}
+          >
+            <option value="">General payable</option>
+            {airlines.map((airline) => (
+              <option key={airline.id} value={airline.id}>
+                {airline.name}
+              </option>
+            ))}
+          </Select>
         )}
         <Input
           label={isReceivable ? "Reason / reference *" : "Reason for payable *"}
@@ -1246,8 +1274,26 @@ export default function FinancialsPage() {
                     indent
                   />
                   <Line
+                    label="Cash in hand"
+                    value={money(balance.assets.cash_in_hand)}
+                    indent
+                  />
+                  {(balance.assets.accounts || []).map((account) => (
+                    <Line
+                      key={account.account_id}
+                      label={account.name}
+                      value={money(account.balance)}
+                      indent
+                    />
+                  ))}
+                  <Line
                     label="Accounts receivable"
                     value={money(balance.assets.accounts_receivable)}
+                    indent
+                  />
+                  <Line
+                    label="Airline receivable"
+                    value={money(balance.assets.airline_receivable)}
                     indent
                   />
                   <Line
@@ -1369,10 +1415,13 @@ export default function FinancialsPage() {
                             {item.reason}{" "}
                             <span className="text-gray-400">
                               · {fmtDate(item.entry_date)}
+                              {item.airline_name
+                                ? ` · ${item.airline_name}`
+                                : ""}
                             </span>
                           </span>
                           <span className="font-semibold text-red-600 whitespace-nowrap">
-                            {money(item.amount)}
+                            {money(item.balance)} due
                           </span>
                           {canEditOpening && (
                             <div className="flex gap-1">
@@ -2240,6 +2289,7 @@ function TaxPanel() {
     );
 
   const { summary, payments, by_month } = data;
+  const taxBalanceNeedsReview = summary.tax_owed < -0.001;
 
   return (
     <div className="space-y-6">
@@ -2262,12 +2312,24 @@ function TaxPanel() {
           icon={CheckCircle2}
         />
         <Tile
-          label="Still owed"
+          label={
+            taxBalanceNeedsReview ? "Tax balance needs review" : "Still owed"
+          }
           value={money(summary.tax_owed)}
           sub={
-            summary.tax_owed > 0 ? "Due to the tax authority" : "Fully settled"
+            summary.tax_owed > 0
+              ? "Due to the tax authority"
+              : taxBalanceNeedsReview
+                ? "Tax paid exceeds current tax accrued"
+                : "Fully settled"
           }
-          tone={summary.tax_owed > 0 ? "red" : "green"}
+          tone={
+            summary.tax_owed > 0
+              ? "red"
+              : taxBalanceNeedsReview
+                ? "orange"
+                : "green"
+          }
           icon={AlertTriangle}
         />
       </div>

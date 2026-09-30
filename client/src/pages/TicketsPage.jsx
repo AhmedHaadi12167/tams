@@ -80,7 +80,13 @@ const settlementLines = (t) => {
   const refunded = parseFloat(t.refunded_amount) || 0;
   const kept = parseFloat(t.cancellation_fee) || 0;
   const written = parseFloat(t.written_off) || 0;
+  const airlineRefund = parseFloat(t.airline_refund) || 0;
+  const airlineUnreturned = parseFloat(t.airline_paid) || 0;
   if (refunded > 0) lines.push(`$${refunded.toFixed(2)} refunded`);
+  if (airlineRefund > 0)
+    lines.push(`$${airlineRefund.toFixed(2)} returned by airline`);
+  if (airlineUnreturned > 0)
+    lines.push(`$${airlineUnreturned.toFixed(2)} not returned by airline`);
   if (kept > 0) lines.push(`$${kept.toFixed(2)} kept as fee`);
   if (written > 0) lines.push(`$${written.toFixed(2)} written off`);
   return lines.length ? lines : ["Nothing owed either way"];
@@ -95,9 +101,10 @@ const settlementLines = (t) => {
 function CancelTicketForm({ ticket, onDone, onCancel }) {
   const paid = parseFloat(ticket.amount_paid) || 0;
   const airlinePaid = parseFloat(ticket.airline_paid) || 0;
+  const tax = Math.round((parseFloat(ticket.tax) || 0) * 100) / 100;
 
   const [refund, setRefund] = useState(
-    Math.max(paid - (parseFloat(ticket.tax) || 0), 0).toFixed(2),
+    Math.max(paid - airlinePaid - tax, 0).toFixed(2),
   );
   const [airlineRefund, setAirlineRefund] = useState("0.00");
   const [accountId, setAccountId] = useState("");
@@ -115,26 +122,37 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
       Math.max((parseFloat(ticket.selling_price) || 0) - paid, 0) * 100,
     ) / 100;
 
-  // The government's share of what the customer paid. It is owed whether or
-  // not anyone flies, so it is not the agency's to give back.
-  const tax = Math.round((parseFloat(ticket.tax) || 0) * 100) / 100;
-  const refundable =
-    Math.round(Math.max(paid - (refundTax ? 0 : tax), 0) * 100) / 100;
+  // Refunds can use only the money still available from this ticket: funds
+  // retained after paying the airline, plus the airline's actual return.
+  // Tax not returned by the airline remains protected for the government.
+  const refundLimitFor = (taxReturned, airlineReturn) => {
+    const protectedTax = taxReturned ? 0 : Math.min(tax, paid);
+    const customerRefundable = Math.max(paid - (taxReturned ? 0 : tax), 0);
+    const ticketFunds = paid - airlinePaid + airlineReturn - protectedTax;
+    return (
+      Math.round(Math.min(customerRefundable, Math.max(ticketFunds, 0)) * 100) /
+      100
+    );
+  };
 
   const refundVal = parseFloat(refund) || 0;
   const airlineVal = parseFloat(airlineRefund) || 0;
+  const refundLimit = refundLimitFor(refundTax, airlineVal);
+  const taxProtected = refundTax ? 0 : Math.min(tax, paid);
+  const ticketMarginAvailable = paid - airlinePaid - taxProtected;
+  const airlineShortfall = Math.max(airlinePaid - airlineVal, 0);
   const kept = Math.round((paid - refundVal) * 100) / 100;
   // The tax inside what's kept isn't earned — it's held for the government.
   const taxRetained = refundTax ? 0 : Math.min(tax, Math.max(kept, 0));
   const fee = Math.round((kept - taxRetained) * 100) / 100;
-  const tooMuch = refundVal > refundable + 0.001;
+  const tooMuch = refundVal > refundLimit + 0.001;
   const airlineTooMuch = airlineVal > airlinePaid + 0.001;
 
   const submit = async (e) => {
     e.preventDefault();
     if (tooMuch)
       return toast.error(
-        `You can't refund more than $${refundable.toFixed(2)}`,
+        `The maximum refund funded by this ticket is $${refundLimit.toFixed(2)}`,
       );
     if (airlineTooMuch)
       return toast.error(
@@ -202,18 +220,21 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
           type="number"
           min="0"
           step="0.01"
-          max={refundable}
+          max={refundLimit}
           value={refund}
           onChange={(e) => setRefund(e.target.value)}
           error={
             tooMuch
-              ? `More than the $${refundable.toFixed(2)} refundable`
+              ? `More than the $${refundLimit.toFixed(2)} available from this ticket`
               : undefined
           }
           hint={
-            tax > 0 && !refundTax
-              ? `$${paid.toFixed(2)} paid less $${tax.toFixed(2)} tax`
-              : undefined
+            `Refund cap: $${refundLimit.toFixed(2)}. Airline return ` +
+            `$${airlineVal.toFixed(2)} + ticket funds ` +
+            `$${Math.max(ticketMarginAvailable, 0).toFixed(2)}` +
+            (ticketMarginAvailable < 0
+              ? `; $${Math.abs(ticketMarginAvailable).toFixed(2)} remains unfunded`
+              : "")
           }
         />
         <AccountSelect
@@ -238,7 +259,7 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
               onChange={(e) => {
                 const on = e.target.checked;
                 setRefundTax(on);
-                setRefund(Math.max(paid - (on ? 0 : tax), 0).toFixed(2));
+                setRefund(refundLimitFor(on, airlineVal).toFixed(2));
               }}
               className="mt-0.5 rounded"
             />
@@ -247,7 +268,8 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
               <span className="block text-xs text-blue-700 dark:text-blue-300 mt-0.5">
                 Usually only when the airline cancelled the flight. Ticking this
                 clears the ${tax.toFixed(2)} from what you owe the government
-                and lets the whole ${paid.toFixed(2)} go back.
+                and may increase the refund limit, subject to the airline return
+                and funds remaining from this ticket.
               </span>
             </span>
           </label>
@@ -271,27 +293,44 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
 
       {/* Airline side */}
       {airlinePaid > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 border-t border-gray-200 dark:border-gray-700">
-          <Input
-            label="Airline refunds you"
-            type="number"
-            min="0"
-            step="0.01"
-            max={airlinePaid}
-            value={airlineRefund}
-            onChange={(e) => setAirlineRefund(e.target.value)}
-            error={
-              airlineTooMuch
-                ? `More than the $${airlinePaid.toFixed(2)} you paid`
-                : undefined
-            }
-          />
-          <AccountSelect
-            direction="in"
-            label="Refund into"
-            value={airlineAccountId}
-            onChange={(e) => setAirlineAccountId(e.target.value)}
-          />
+        <div className="space-y-3 pt-1 border-t border-gray-200 dark:border-gray-700">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Airline refunds you"
+              type="number"
+              min="0"
+              step="0.01"
+              max={airlinePaid}
+              value={airlineRefund}
+              onChange={(e) => {
+                const nextReturn = parseFloat(e.target.value) || 0;
+                const previousLimit = refundLimit;
+                const nextLimit = refundLimitFor(refundTax, nextReturn);
+                setAirlineRefund(e.target.value);
+                if (refundVal >= previousLimit - 0.001)
+                  setRefund(nextLimit.toFixed(2));
+              }}
+              error={
+                airlineTooMuch
+                  ? `More than the $${airlinePaid.toFixed(2)} you paid`
+                  : undefined
+              }
+            />
+            <AccountSelect
+              direction="in"
+              label="Refund into"
+              value={airlineAccountId}
+              onChange={(e) => setAirlineAccountId(e.target.value)}
+            />
+          </div>
+          {airlineShortfall > 0.001 && (
+            <p className="rounded-lg bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-900 dark:text-amber-100">
+              The airline is returning ${airlineVal.toFixed(2)} of the $
+              {airlinePaid.toFixed(2)} paid. The ${airlineShortfall.toFixed(2)}{" "}
+              shortfall reduces the refund this ticket can fund; remaining
+              ticket margin can cover it only while available.
+            </p>
+          )}
         </div>
       )}
 
@@ -336,67 +375,50 @@ function CancelTicketForm({ ticket, onDone, onCancel }) {
   );
 }
 
-function DeleteTicketModal({ ticket, canCancel, onClose, onDone }) {
-  const [reason, setReason] = useState("");
-  const [refundCustomer, setRefundCustomer] = useState(false);
-  const refundable = Math.max(
-    (Number(ticket?.amount_paid) || 0) - (Number(ticket?.tax) || 0),
-    0,
+function DeleteTicketModal({ ticket, onClose, onDone }) {
+  if (!ticket) return null;
+  return (
+    <Modal
+      open={Boolean(ticket)}
+      onClose={onClose}
+      title={`Cancel ticket — ${ticket.passenger_name}`}
+      size="lg"
+    >
+      <CancelTicketForm ticket={ticket} onDone={onDone} onCancel={onClose} />
+    </Modal>
   );
-  const [refundAmount, setRefundAmount] = useState(refundable.toFixed(2));
+}
+
+function AirlineRefundForm({ ticket, onDone, onCancel }) {
+  const [amount, setAmount] = useState("");
   const [accountId, setAccountId] = useState("");
   const [saving, setSaving] = useState(false);
-  const paid = Number(ticket?.amount_paid) > 0.001;
-  const airlinePaid = Number(ticket?.airline_paid) > 0.001;
-  const settlementRequired = paid || airlinePaid;
-  const alreadyCancelled = ticket?.status === "cancelled";
+  const remaining = Number(ticket.airline_paid) || 0;
 
   useEffect(() => {
-    if (!ticket) return;
-    const maxRefund = Math.max(
-      (Number(ticket.amount_paid) || 0) - (Number(ticket.tax) || 0),
-      0,
-    );
-    setReason("");
-    setRefundCustomer(false);
-    setRefundAmount(maxRefund.toFixed(2));
+    setAmount(remaining.toFixed(2));
     setAccountId("");
-  }, [ticket]);
-
-  if (!ticket) return null;
+  }, [ticket, remaining]);
 
   const submit = async (event) => {
     event.preventDefault();
-    if (!reason.trim()) return toast.error("Enter a reason before continuing");
-
-    const refund = refundCustomer ? Number(refundAmount) : 0;
-    if (refund < 0 || refund > refundable + 0.001) {
-      return toast.error(`Refund must not exceed $${refundable.toFixed(2)}`);
-    }
-    if (refund > 0.001 && !accountId) {
-      return toast.error("Choose which account the refund comes from");
-    }
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0 || value > remaining + 0.001)
+      return toast.error(`Enter an amount up to $${remaining.toFixed(2)}`);
+    if (!accountId)
+      return toast.error("Choose the account receiving the refund");
 
     setSaving(true);
     try {
-      if (settlementRequired) {
-        await ticketsAPI.cancel(ticket.id, {
-          reason: reason.trim(),
-          refund_amount: refund,
-          account_id: refund > 0.001 ? accountId : undefined,
-          write_off: balanceOf(ticket) > 0.001,
-        });
-        toast.success(
-          "Ticket cancelled and settled; payment history was preserved",
-        );
-      } else {
-        await ticketsAPI.delete(ticket.id, { reason: reason.trim() });
-        toast.success("Ticket deleted; reason recorded");
-      }
+      const response = await ticketsAPI.recordAirlineRefund(ticket.id, {
+        amount: value,
+        account_id: accountId,
+      });
+      toast.success(response.data.message);
       onDone();
     } catch (error) {
       toast.error(
-        error.response?.data?.message || "Could not complete this action",
+        error.response?.data?.message || "Could not record airline refund",
       );
     } finally {
       setSaving(false);
@@ -404,125 +426,40 @@ function DeleteTicketModal({ ticket, canCancel, onClose, onDone }) {
   };
 
   return (
-    <Modal
-      open={!!ticket}
-      onClose={onClose}
-      title={
-        settlementRequired ? "Settle ticket before removal" : "Delete ticket"
-      }
-    >
-      <form onSubmit={submit} className="space-y-4">
-        <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800 p-3">
-          <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
-            {ticket.passenger_name} · {ticket.from_city} to {ticket.to_city}
-          </p>
-          <p className="text-sm text-amber-800 dark:text-amber-200 mt-1">
-            {alreadyCancelled
-              ? "This ticket is already cancelled. Its settlement and payment history must remain in the books, so it cannot be permanently deleted."
-              : settlementRequired
-                ? `This ticket has ${paid ? "customer payment" : "no customer payment"}${airlinePaid ? ` and $${Number(ticket.airline_paid).toFixed(2)} paid to the airline` : ""}. It cannot be erased: continue to cancel it and preserve its financial history.`
-                : "This permanently removes the unpaid ticket. No account balance will be changed."}
-          </p>
-        </div>
-
-        {!alreadyCancelled && (!settlementRequired || canCancel) && (
-          <>
-            <Input
-              label="Reason *"
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-              placeholder="Explain why this ticket is being removed"
-              required
-            />
-
-            {settlementRequired && (
-              <>
-                <fieldset className="space-y-2">
-                  <legend className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Refund the customer from an account?
-                  </legend>
-                  <label
-                    className={`flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300 ${!paid || refundable <= 0.001 ? "opacity-50" : ""}`}
-                  >
-                    <input
-                      type="radio"
-                      name="delete-refund-choice"
-                      checked={refundCustomer}
-                      onChange={() => setRefundCustomer(true)}
-                      disabled={!paid || refundable <= 0.001}
-                    />
-                    Yes, record a refund and deduct it from an account
-                  </label>
-                  <label className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-                    <input
-                      type="radio"
-                      name="delete-refund-choice"
-                      checked={!refundCustomer}
-                      onChange={() => setRefundCustomer(false)}
-                    />
-                    No, keep the collected money and record it as retained
-                  </label>
-                </fieldset>
-                {refundCustomer && refundable > 0.001 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Input
-                      label="Refund amount"
-                      type="number"
-                      min="0"
-                      max={refundable}
-                      step="0.01"
-                      value={refundAmount}
-                      onChange={(event) => setRefundAmount(event.target.value)}
-                    />
-                    <AccountSelect
-                      direction="out"
-                      label="Deduct refund from"
-                      value={accountId}
-                      onChange={(event) => setAccountId(event.target.value)}
-                    />
-                  </div>
-                )}
-                {refundCustomer && refundable <= 0.001 && (
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    No customer refund is available because the collected amount
-                    is government tax.
-                  </p>
-                )}
-                {!paid && (
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    No customer money was collected, so there is no customer
-                    refund to deduct.
-                  </p>
-                )}
-              </>
-            )}
-
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={onClose}>
-                Go back
-              </Button>
-              <Button
-                type="submit"
-                loading={saving}
-                variant={settlementRequired ? "danger" : "primary"}
-              >
-                {settlementRequired
-                  ? "Cancel and settle"
-                  : "Delete permanently"}
-              </Button>
-            </div>
-          </>
-        )}
-
-        {(alreadyCancelled || (settlementRequired && !canCancel)) && (
-          <div className="flex justify-end">
-            <Button type="button" variant="outline" onClick={onClose}>
-              Close
-            </Button>
-          </div>
-        )}
-      </form>
-    </Modal>
+    <form onSubmit={submit} className="space-y-4">
+      <div className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-4">
+        <p className="text-sm font-medium text-gray-900 dark:text-white">
+          {ticket.passenger_name} · {ticket.airline_name}
+        </p>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+          Still recorded as paid to the airline: ${remaining.toFixed(2)}
+        </p>
+      </div>
+      <Input
+        label="Amount returned by airline *"
+        type="number"
+        min="0.01"
+        max={remaining}
+        step="0.01"
+        value={amount}
+        onChange={(event) => setAmount(event.target.value)}
+        required
+      />
+      <AccountSelect
+        direction="in"
+        label="Deposit refund into *"
+        value={accountId}
+        onChange={(event) => setAccountId(event.target.value)}
+      />
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" loading={saving}>
+          <Banknote className="w-4 h-4" /> Record refund
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -879,6 +816,7 @@ export default function TicketsPage() {
   const [payModal, setPayModal] = useState(null); // ticket being paid
   const [cancelModal, setCancelModal] = useState(null); // ticket being cancelled
   const [deleteModal, setDeleteModal] = useState(null);
+  const [airlineRefundModal, setAirlineRefundModal] = useState(null);
   const [payments, setPayments] = useState([]); // history in view modal
   const [manifestOpen, setManifestOpen] = useState(false);
 
@@ -1158,6 +1096,16 @@ export default function TicketsPage() {
                                 onClick: () => setCancelModal(ticket),
                               }
                             : null,
+                          ticket.status === "cancelled" &&
+                          canCancel &&
+                          ticket.airline_id &&
+                          Number(ticket.airline_paid) > 0.001
+                            ? {
+                                label: "Record airline refund",
+                                icon: Banknote,
+                                onClick: () => setAirlineRefundModal(ticket),
+                              }
+                            : null,
                           canWrite()
                             ? {
                                 label: "Edit",
@@ -1165,7 +1113,7 @@ export default function TicketsPage() {
                                 onClick: () => openEdit(ticket),
                               }
                             : null,
-                          canWrite()
+                          canWrite() && canCancel && ticket.status === "active"
                             ? {
                                 label: "Delete",
                                 icon: Trash2,
@@ -1414,13 +1362,33 @@ export default function TicketsPage() {
       />
       <DeleteTicketModal
         ticket={deleteModal}
-        canCancel={canCancel}
         onClose={() => setDeleteModal(null)}
         onDone={() => {
           setDeleteModal(null);
           load();
         }}
       />
+      <Modal
+        open={Boolean(airlineRefundModal)}
+        onClose={() => setAirlineRefundModal(null)}
+        title={
+          airlineRefundModal
+            ? `Airline refund — ${airlineRefundModal.passenger_name}`
+            : "Airline refund"
+        }
+        size="md"
+      >
+        {airlineRefundModal && (
+          <AirlineRefundForm
+            ticket={airlineRefundModal}
+            onCancel={() => setAirlineRefundModal(null)}
+            onDone={() => {
+              setAirlineRefundModal(null);
+              load();
+            }}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

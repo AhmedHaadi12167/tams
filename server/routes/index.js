@@ -212,6 +212,11 @@ router.post(
   authorize("super_admin", "admin", "accountant"),
   ticketController.cancelTicket,
 );
+router.post(
+  "/tickets/:id/airline-refunds",
+  authorize("super_admin", "admin", "accountant"),
+  ticketController.recordAirlineRefund,
+);
 
 // ── Ticket Payments (ALL users can collect money) ─────────
 router.post(
@@ -337,6 +342,11 @@ router.get(
   "/airlines-list",
   authorize("super_admin", "admin", "agent", "accountant"),
   airlineController.listAirlines,
+);
+router.post(
+  "/airlines-list",
+  authorize("super_admin", "admin"),
+  airlineController.createAirline,
 );
 router.get(
   "/airlines-list/duplicates",
