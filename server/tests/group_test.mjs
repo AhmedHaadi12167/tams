@@ -103,8 +103,8 @@ const booking = (await call(ticketC.createTicket, { body: {
   contact_number: "612225088",
   passengers: [
     { passenger_name: "MR ABDIFATAH MOHAMED MOHAMUD", ticket_reference: "KMUMGQ-16226-000011" },
-    { passenger_name: "MRS SAHRO IBRAHIM MAALIN",     ticket_reference: "KMUMGQ-16226-000010" },
-    { passenger_name: "AMINA ABDIFATAH MOHAMED",      ticket_reference: "KMUMGQ-16226-000012" },
+    { passenger_name: "MRS SAHRO IBRAHIM MAALIN",     ticket_reference: "KMUMGQ-16226-000010", passenger_type: "child" },
+    { passenger_name: "AMINA ABDIFATAH MOHAMED",      ticket_reference: "KMUMGQ-16226-000012", passenger_type: "infant" },
   ],
   from_city: "MGQ", to_city: "NBO", flight_date: "2027-05-01",
   airline_name: "Star Airline",
@@ -164,6 +164,9 @@ ck("but each ticket belongs to its own passenger",
 ck("each passenger keeps their own ticket number",
    new Set(T.map((t) => t.ticket_reference)).size === 3,
    T.map((t) => t.ticket_reference).join());
+ck("adult, child, and infant selections are saved on their tickets",
+   T.map((t) => t.passenger_type).join() === "adult,child,infant",
+   T.map((t) => t.passenger_type).join());
 
 // ── The money, from the other end ────────────────────────────────────────
 ck("$500 collected is $500 in the bank", m2(await cashTotal()) === "500.00", m2(await cashTotal()));

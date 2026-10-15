@@ -75,6 +75,9 @@ const normalisePassengers = (raw) => {
       // has read it. "MRS SAHRO IBRAHIM MAALIN" and "SAHRO IBRAHIM MAALIN"
       // must be one customer and one duplicate-check, not two.
       passenger_name: (cleanName(p.passenger_name) || "").toUpperCase().trim(),
+      passenger_type: ["adult", "child", "infant"].includes(p.passenger_type)
+        ? p.passenger_type
+        : "adult",
       ticket_reference: nullIfBlank(p.ticket_reference),
       passport_number: nullIfBlank(p.passport_number),
       nationality: nullIfBlank(p.nationality),
@@ -246,9 +249,9 @@ const createGroupedTickets = async (
          source_file_url, trip_type, return_date, agent_commission,
          amount_paid, payment_status, booked_by_customer_id,
          passport_number, nationality, date_of_birth,
-         passport_expiry_date, visa_type, visa_expiry_date
+         passport_expiry_date, visa_type, visa_expiry_date, passenger_type
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-                 $21,$22,$23,$24,$25,$26,$27,$28,$29)
+                 $21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
        RETURNING *`,
       [
         businessId,
@@ -283,6 +286,7 @@ const createGroupedTickets = async (
         p.passport_expiry_date,
         p.visa_type,
         p.visa_expiry_date,
+        p.passenger_type,
       ],
     );
     const ticket = res.rows[0];

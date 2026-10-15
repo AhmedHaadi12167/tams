@@ -1,4 +1,6 @@
-require("dotenv").config();
+// override: a stale ANTHROPIC_API_KEY set in the Windows environment would
+// otherwise silently win over the one in .env and fail with "invalid x-api-key".
+require("dotenv").config({ override: true });
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");

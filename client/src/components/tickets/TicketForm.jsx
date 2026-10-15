@@ -1,6 +1,20 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
+import {
+  addMonths,
+  format,
+  getDaysInMonth,
+  getDay,
+  parseISO,
+  startOfMonth,
+} from "date-fns";
 import { toDateInput } from "../../utils/date";
-import { ticketsAPI, customersAPI, airlinesAPI, agentsAPI } from "../../services/api";
+import {
+  ticketsAPI,
+  customersAPI,
+  airlinesAPI,
+  agentsAPI,
+  ticketCitiesAPI,
+} from "../../services/api";
 import { Button, Input, Select } from "../ui";
 import toast from "react-hot-toast";
 import AccountSelect from "../AccountSelect";
@@ -13,9 +27,15 @@ import {
   X,
   UserCheck,
   Plus,
+  Minus,
   Trash2,
   Users,
   AlertTriangle,
+  Plane,
+  ArrowLeftRight,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 // ─── Helpers (v3: round trip + commission-aware revenue) ─────────────────────
@@ -51,6 +71,7 @@ const STATUS_STYLES = {
 const INITIAL = {
   ticket_type: "LOCAL",
   trip_type: "one_way",
+  passenger_type: "adult",
   passenger_name: "",
   contact_number: "",
   from_city: "",
@@ -97,6 +118,7 @@ const blankPassenger = () => ({
   passenger_name: "",
   ticket_reference: "",
   passport_number: "",
+  passenger_type: "adult",
 });
 
 const money = (v) => `$${(Number(v) || 0).toFixed(2)}`;
@@ -117,6 +139,342 @@ const previewShares = (total, n) => {
   const rem = abs - base * n;
   return Array.from({ length: n }, (_, i) => (sign * (base + (i < rem ? 1 : 0))) / 100);
 };
+
+const dateFromInput = (value) =>
+  value ? parseISO(`${value.slice(0, 10)}T00:00:00`) : null;
+
+function CitySelect({ label, value, onChange }) {
+  const containerRef = useRef(null);
+  const [search, setSearch] = useState("");
+  const [options, setOptions] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!containerRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    let current = true;
+    const timer = setTimeout(() => {
+      ticketCitiesAPI
+        .list(search.trim())
+        .then((res) => {
+          if (current) {
+            setOptions(res.data.data || []);
+            setError("");
+          }
+        })
+        .catch((err) => {
+          if (current) {
+            setOptions([]);
+            setError(
+              err.response?.data?.message || "Could not load airport choices.",
+            );
+          }
+        });
+    }, 180);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [open, search]);
+
+  const selectAirport = async (airport) => {
+    try {
+      const result = await ticketCitiesAPI.save({
+        iata_code: airport.iata_code,
+      });
+      const savedAirport = result.data.data;
+      const location = `${savedAirport.city_name} | ${savedAirport.iata_code}`;
+      onChange(location);
+      setSearch("");
+      setOpen(false);
+    } catch (err) {
+      toast.error(
+        err.response?.data?.message || "Could not save this airport.",
+      );
+    }
+  };
+
+  const visibleValue = open ? search : value;
+
+  return (
+    <div ref={containerRef} className="relative min-w-0">
+      <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+        {label}
+      </label>
+      <input
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+        value={visibleValue}
+        onFocus={() => {
+          setSearch("");
+          setOpen(true);
+        }}
+        onChange={(event) => {
+          setSearch(event.target.value);
+          onChange(event.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (event.key === "Enter" && open && options[0]) {
+            event.preventDefault();
+            selectAirport(options[0]);
+          }
+        }}
+        placeholder="Search city or airport"
+        autoComplete="off"
+        required
+        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+      />
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-1 max-h-64 w-full min-w-64 overflow-y-auto rounded-lg border border-gray-200 bg-white p-1 shadow-xl dark:border-gray-700 dark:bg-gray-800">
+          {error ? (
+            <p className="px-3 py-2 text-xs text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          ) : options.length ? (
+            options.map((airport) => (
+              <button
+                key={`${airport.iata_code}-${airport.airport_name}`}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => selectAirport(airport)}
+                className="flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left hover:bg-blue-50 dark:hover:bg-blue-900/20"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-medium text-gray-900 dark:text-white">
+                    {airport.city_name}
+                    {airport.primary && (
+                      <span className="ml-1.5 text-[9px] font-normal uppercase tracking-wide text-green-700 dark:text-green-400">
+                        Primary
+                      </span>
+                    )}
+                  </span>
+                  <span className="block truncate text-[10px] text-gray-500 dark:text-gray-400">
+                    {airport.airport_name}
+                  </span>
+                </span>
+                <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+                  {airport.iata_code}
+                </span>
+              </button>
+            ))
+          ) : (
+            <p className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">
+              {search.trim()
+                ? "No matching airport. Search by city or airport name."
+                : "Type a city or airport name to search."}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BookingDates({
+  tripType,
+  departureDate,
+  returnDate,
+  onDepartureChange,
+  onReturnChange,
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeDate, setActiveDate] = useState("departure");
+  const [month, setMonth] = useState(() =>
+    startOfMonth(dateFromInput(departureDate) || new Date()),
+  );
+  const pickerRef = useRef(null);
+  const isRoundTrip = tripType === "round_trip";
+  const departure = dateFromInput(departureDate);
+  const returnFlight = dateFromInput(returnDate);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!pickerRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  const chooseDate = (date) => {
+    const value = format(date, "yyyy-MM-dd");
+    if (activeDate === "return" && departure && date >= departure) {
+      onReturnChange(value);
+      setOpen(false);
+      return;
+    }
+    onDepartureChange(value);
+    onReturnChange("");
+    if (isRoundTrip) {
+      setActiveDate("return");
+    } else {
+      setOpen(false);
+    }
+  };
+
+  const renderMonth = (monthDate) => {
+    const firstDay = startOfMonth(monthDate);
+    const offset = getDay(firstDay);
+    const days = getDaysInMonth(firstDay);
+    return (
+      <div key={format(firstDay, "yyyy-MM")} className="min-w-[228px] flex-1">
+        <h4 className="mb-3 text-center text-xs font-semibold uppercase tracking-wide text-gray-800 dark:text-gray-100">
+          {format(firstDay, "MMMM yyyy")}
+        </h4>
+        <div className="mb-1 grid grid-cols-7 text-center text-[10px] font-medium text-gray-400">
+          {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+            <span key={day}>{day}</span>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {Array.from({ length: offset }, (_, index) => (
+            <span key={`empty-${index}`} />
+          ))}
+          {Array.from({ length: days }, (_, index) => {
+            const date = new Date(
+              firstDay.getFullYear(),
+              firstDay.getMonth(),
+              index + 1,
+            );
+            const dateValue = format(date, "yyyy-MM-dd");
+            const selected =
+              dateValue === departureDate || dateValue === returnDate;
+            const inRange =
+              departure &&
+              returnFlight &&
+              date > departure &&
+              date < returnFlight;
+            return (
+              <button
+                key={dateValue}
+                type="button"
+                onClick={() => chooseDate(date)}
+                aria-label={format(date, "EEEE, MMMM d, yyyy")}
+                className={`h-7 rounded-md text-xs transition-colors ${
+                  selected
+                    ? "bg-blue-600 font-semibold text-white"
+                    : inRange
+                      ? "bg-blue-50 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
+                      : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                }`}
+              >
+                {index + 1}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const dateButton = (label, value, field) => (
+    <button
+      type="button"
+      onClick={() => {
+        setActiveDate(field);
+        setOpen(true);
+      }}
+      className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+    >
+      <CalendarDays className="h-4 w-4 shrink-0 text-gray-500" />
+      <span className="min-w-0">
+        <span className="block text-[10px] font-medium uppercase tracking-wide text-gray-400">
+          {label}
+        </span>
+        <span className="block truncate text-sm font-medium text-gray-900 dark:text-white">
+          {dateFromInput(value)
+            ? format(dateFromInput(value), "dd/MM/yyyy")
+            : "Select date"}
+        </span>
+      </span>
+    </button>
+  );
+
+  return (
+    <div ref={pickerRef} className="relative min-w-0">
+      <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+        {isRoundTrip ? "Travel dates" : "Travel date"}
+      </label>
+      <div className="flex min-h-[42px] divide-x divide-gray-200 rounded-lg border border-gray-300 bg-white dark:divide-gray-700 dark:border-gray-600 dark:bg-gray-800">
+        {dateButton(
+          isRoundTrip ? "Depart" : "Travel",
+          departureDate,
+          "departure",
+        )}
+        {isRoundTrip && (
+          dateButton("Return", returnDate, "return")
+        )}
+      </div>
+      {open && (
+        <div
+          className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-700 dark:bg-gray-800 sm:p-4"
+          style={{ width: "min(560px, calc(100vw - 2rem))" }}
+        >
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex gap-4 text-[10px] font-semibold uppercase tracking-wide">
+              <button
+                type="button"
+                onClick={() => setActiveDate("departure")}
+                className={activeDate === "departure" ? "text-blue-700 dark:text-blue-300" : "text-gray-400"}
+              >
+                Depart{" "}
+                <span className="ml-1 normal-case">
+                  {departure ? format(departure, "MMM d, yyyy") : "Select"}
+                </span>
+              </button>
+              {isRoundTrip && (
+                <button
+                  type="button"
+                  onClick={() => setActiveDate("return")}
+                  className={activeDate === "return" ? "text-blue-700 dark:text-blue-300" : "text-gray-400"}
+                >
+                  Return{" "}
+                  <span className="ml-1 normal-case">
+                    {returnFlight ? format(returnFlight, "MMM d, yyyy") : "Select"}
+                  </span>
+                </button>
+              )}
+            </div>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => setMonth((current) => addMonths(current, -1))}
+                aria-label="Previous month"
+                className="rounded-md p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setMonth((current) => addMonths(current, 1))}
+                aria-label="Next month"
+                className="rounded-md p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <div className={`grid gap-4 ${isRoundTrip ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1"}`}>
+            {renderMonth(month)}
+            {isRoundTrip && renderMonth(addMonths(month, 1))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── Booked By Search ─────────────────────────────────────────────────────────
 
@@ -261,6 +619,7 @@ export default function TicketForm({
     flight_date: toDateInput(initial.flight_date),
     return_date: toDateInput(initial.return_date),
     trip_type: initial.trip_type || "one_way",
+    passenger_type: initial.passenger_type || "adult",
     amount_paid: initial.amount_paid ?? "",
     payment_method: initial.payment_method || "cash",
     account_id: initial.account_id || "",
@@ -319,9 +678,34 @@ export default function TicketForm({
       list.map((p, idx) => (idx === i ? { ...p, [key]: val } : p)),
     );
   };
-  const addPassenger = () => setPassengers((l) => [...l, blankPassenger()]);
   const removePassenger = (i) =>
-    setPassengers((l) => (l.length === 1 ? l : l.filter((_, idx) => idx !== i)));
+    setPassengers((list) => {
+      const passenger = list[i];
+      if (!passenger || (passenger.passenger_type === "adult" &&
+        list.filter((item) => item.passenger_type === "adult").length <= 1)) {
+        return list;
+      }
+      return list.filter((_, index) => index !== i);
+    });
+  const changePassengerCount = (type, amount) => {
+    setPassengers((list) => {
+      if (amount > 0) return [...list, { ...blankPassenger(), passenger_type: type }];
+      const matching = list.reduce(
+        (indices, passenger, index) =>
+          passenger.passenger_type === type ? [...indices, index] : indices,
+        [],
+      );
+      if (matching.length <= (type === "adult" ? 1 : 0)) return list;
+      const lastIndex = matching[matching.length - 1];
+      return list.filter((_, index) => index !== lastIndex);
+    });
+  };
+  const swapCities = () =>
+    setForm((current) => ({
+      ...current,
+      from_city: current.to_city,
+      to_city: current.from_city,
+    }));
 
   // Commission is the exception, not the rule — keep it out of the way until
   // it's actually needed. Editing a ticket that already has one opens it.
@@ -460,6 +844,7 @@ export default function TicketForm({
             passenger_name: p.passenger_name || "",
             ticket_reference: p.ticket_reference || "",
             passport_number: p.passport_number || "",
+            passenger_type: "adult",
           })),
         );
       }
@@ -498,8 +883,26 @@ export default function TicketForm({
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    if (mode === "create" && !form.from_city?.trim()) {
+      return toast.error("Enter a departure city");
+    }
+    if (mode === "create" && !form.to_city?.trim()) {
+      return toast.error("Enter a destination city");
+    }
+    if (mode === "create" && !form.flight_date) {
+      return toast.error("Select a departure date");
+    }
+    if (mode === "create" && form.trip_type === "round_trip") {
+      if (!form.return_date) return toast.error("Select a return date");
+      if (form.return_date < form.flight_date) {
+        return toast.error("Return date must be after the departure date");
+      }
+    }
     if (mode === "create" && namedPassengers.length === 0) {
       return toast.error("Add at least one passenger");
+    }
+    if (mode === "create" && namedPassengers.length !== passengers.length) {
+      return toast.error("Enter a name for each selected passenger");
     }
 
     setLoading(true);
@@ -522,6 +925,7 @@ export default function TicketForm({
         // ordinary booking except that the contact is named explicitly.
         payload.passengers = namedPassengers.map((p) => ({
           passenger_name: p.passenger_name.trim(),
+          passenger_type: p.passenger_type,
           ticket_reference: p.ticket_reference.trim() || null,
           passport_number: p.passport_number.trim() || null,
         }));
@@ -548,7 +952,10 @@ export default function TicketForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
+    <form
+      onSubmit={handleSubmit}
+      className="space-y-4 text-sm [&_input]:text-xs [&_select]:text-xs [&_label]:text-xs"
+    >
       {/* ── AI Upload ── */}
       {mode === "create" && (
         <div
@@ -600,82 +1007,135 @@ export default function TicketForm({
       )}
 
       {/* ── Ticket Type / Trip / Status ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Select
-          label="Ticket type"
-          value={form.ticket_type}
-          onChange={set("ticket_type")}
-        >
-          <option value="LOCAL">Local (Domestic)</option>
-          <option value="INTERNATIONAL">International</option>
-        </Select>
-        <Select
-          label="Trip type"
-          value={form.trip_type || "one_way"}
-          onChange={set("trip_type")}
-        >
-          <option value="one_way">One way</option>
-          <option value="round_trip">Round trip (Go &amp; Back)</option>
-        </Select>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        {mode === "edit" ? (
+          <Select
+            label="Ticket type"
+            value={form.ticket_type}
+            onChange={set("ticket_type")}
+            className="text-xs"
+          >
+            <option value="LOCAL">Local (Domestic)</option>
+            <option value="INTERNATIONAL">International</option>
+          </Select>
+        ) : (
+          <fieldset>
+            <legend className="mb-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
+              Ticket type
+            </legend>
+            <div className="flex items-center gap-4">
+              {[
+                ["LOCAL", "Local"],
+                ["INTERNATIONAL", "International"],
+              ].map(([value, label]) => (
+                <label
+                  key={value}
+                  className="inline-flex cursor-pointer items-center gap-1.5 text-sm text-gray-800 dark:text-gray-200"
+                >
+                  <input
+                    type="radio"
+                    name="ticket_type"
+                    value={value}
+                    checked={form.ticket_type === value}
+                    onChange={set("ticket_type")}
+                    className="h-3.5 w-3.5 accent-green-700"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+        {mode === "edit" ? (
+          <Select
+            label="Trip type"
+            value={form.trip_type || "one_way"}
+            onChange={set("trip_type")}
+            className="text-xs"
+          >
+            <option value="one_way">One way</option>
+            <option value="round_trip">Round trip (Go &amp; Back)</option>
+          </Select>
+        ) : (
+          <fieldset>
+            <legend className="mb-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
+              Trip type
+            </legend>
+            <div className="flex items-center gap-4">
+              {[
+                ["round_trip", "Round trip"],
+                ["one_way", "One way"],
+              ].map(([value, label]) => (
+                <label
+                  key={value}
+                  className="inline-flex cursor-pointer items-center gap-1.5 text-sm text-gray-800 dark:text-gray-200"
+                >
+                  <input
+                    type="radio"
+                    name="trip_type"
+                    value={value}
+                    checked={form.trip_type === value}
+                    onChange={set("trip_type")}
+                    className="h-3.5 w-3.5 accent-green-700"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
         {/* No status here: cancelling moves money (refund, fee, tax,
             airline return), so it is done with Cancel & refund on the
             ticket, which records every movement. */}
       </div>
 
-      {/* ── Travel documents (international only) ──
-          Hidden for a group booking. Every field here belongs to one
-          person — a passport number, a date of birth, a visa expiry — and
-          copying one traveller's onto all of them would be worse than
-          leaving them blank. Group passports go on the passenger rows;
-          the rest is filled in per ticket afterwards. */}
-      {form.ticket_type === "INTERNATIONAL" && !isGroup && (
-        <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 p-4">
-          <h3 className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide mb-3">
-            Travel documents
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Input
-              label="Passport number"
-              value={form.passport_number}
-              onChange={set("passport_number")}
-              placeholder="A12345678"
+      {mode === "create" && (
+        <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-800 sm:p-5">
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+              Where are you going?
+            </h3>
+            <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+              Choose your route and travel dates.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.1fr_auto_1.1fr_1.5fr] lg:items-end">
+            <CitySelect
+              label="From"
+              value={form.from_city}
+              onChange={(value) =>
+                setForm((current) => ({ ...current, from_city: value }))
+              }
             />
-            <Input
-              label="Nationality"
-              value={form.nationality}
-              onChange={set("nationality")}
-              placeholder="Somali"
+            <button
+              type="button"
+              onClick={swapCities}
+              aria-label="Swap departure and destination"
+              title="Swap cities"
+              className="flex h-8 w-8 items-center justify-center justify-self-center rounded-full border border-gray-200 bg-white text-blue-700 transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-blue-300"
+            >
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+            </button>
+            <CitySelect
+              label="To"
+              value={form.to_city}
+              onChange={(value) =>
+                setForm((current) => ({ ...current, to_city: value }))
+              }
             />
-            <Input
-              label="Date of birth"
-              type="date"
-              value={form.date_of_birth}
-              onChange={set("date_of_birth")}
-            />
-            <Input
-              label="Passport expiry"
-              type="date"
-              value={form.passport_expiry_date}
-              onChange={set("passport_expiry_date")}
-            />
-            <Input
-              label="Visa type"
-              value={form.visa_type}
-              onChange={set("visa_type")}
-              placeholder="Tourist, work, transit…"
-            />
-            <Input
-              label="Visa expiry"
-              type="date"
-              value={form.visa_expiry_date}
-              onChange={set("visa_expiry_date")}
+            <BookingDates
+              tripType={form.trip_type}
+              departureDate={form.flight_date}
+              returnDate={form.return_date}
+              onDepartureChange={(flight_date) =>
+                setForm((current) => ({ ...current, flight_date }))
+              }
+              onReturnChange={(return_date) =>
+                setForm((current) => ({ ...current, return_date }))
+              }
             />
           </div>
-          <p className="text-xs text-blue-600 dark:text-blue-400 mt-3">
-            All optional — fill in what you have. Useful for the manifest and for
-            spotting a document that expires before the trip.
-          </p>
-        </div>
+        </section>
       )}
 
       {/* ── Passenger (editing one existing ticket) ── */}
@@ -692,6 +1152,15 @@ export default function TicketForm({
               placeholder="Full name"
               required
             />
+            <Select
+              label="Passenger type"
+              value={form.passenger_type}
+              onChange={set("passenger_type")}
+            >
+              <option value="adult">Adult</option>
+              <option value="child">Child</option>
+              <option value="infant">Infant</option>
+            </Select>
             <Input
               label="Contact number"
               value={form.contact_number}
@@ -738,23 +1207,71 @@ export default function TicketForm({
             </div>
           </div>
 
-          <div>
+          <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800 sm:p-6">
             <div className="flex items-center justify-between mb-1">
               <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
                 Passengers — who flies
               </h3>
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-gray-400">
                 <Users className="w-3.5 h-3.5" />
-                {namedPassengers.length || passengers.length}{" "}
-                {(namedPassengers.length || passengers.length) === 1
+                {passengers.length}{" "}
+                {passengers.length === 1
                   ? "passenger"
                   : "passengers"}
               </span>
             </div>
             <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
-              One ticket is created for each. They share the flight and the
-              price below.
+              Set the traveller count, then enter each passenger's details.
             </p>
+
+            <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {[
+                ["adult", "Adult", "12+ years"],
+                ["child", "Child", "2–11 years"],
+                ["infant", "Infant", "0–23 months"],
+              ].map(([type, label, age]) => {
+                const count = passengers.filter(
+                  (passenger) => passenger.passenger_type === type,
+                ).length;
+                return (
+                  <div
+                    key={type}
+                    className="flex items-center justify-between rounded-lg border border-gray-200 px-2.5 py-2 dark:border-gray-700"
+                  >
+                    <div>
+                      <p className="text-xs font-semibold text-gray-900 dark:text-white">
+                        {label}
+                      </p>
+                      <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                        {age}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => changePassengerCount(type, -1)}
+                        disabled={count <= (type === "adult" ? 1 : 0)}
+                        aria-label={`Remove one ${label.toLowerCase()}`}
+                        className="flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                      >
+                        <Minus className="h-3 w-3" />
+                      </button>
+                      <span className="w-4 text-center text-xs font-semibold tabular-nums text-gray-900 dark:text-white">
+                        {count}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => changePassengerCount(type, 1)}
+                        aria-label={`Add one ${label.toLowerCase()}`}
+                        className="flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
             {countWarning && (
               <div className="flex items-start gap-2 mb-3 p-3 rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-800">
@@ -769,64 +1286,55 @@ export default function TicketForm({
               {passengers.map((p, i) => (
                 <div
                   key={i}
-                  className="flex gap-2 items-start rounded-xl border border-gray-200 dark:border-gray-700 p-3"
+                  className="flex gap-2 items-start rounded-lg border border-gray-200 dark:border-gray-700 p-2"
                 >
-                  <span className="mt-2.5 w-6 h-6 shrink-0 rounded-full bg-gray-100 dark:bg-gray-700 text-xs font-semibold text-gray-600 dark:text-gray-300 flex items-center justify-center">
-                    {i + 1}
-                  </span>
-                  <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
+                    <Plane className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-2">
                     <Input
-                      label={i === 0 ? "Passenger name *" : "Passenger name"}
+                      label={`${p.passenger_type[0].toUpperCase()}${p.passenger_type.slice(1)} ${i + 1} name *`}
                       value={p.passenger_name}
                       onChange={setPassenger(i, "passenger_name")}
                       placeholder="Full name"
-                      required={i === 0}
+                      required
+                      className="py-1.5"
                     />
                     <Input
                       label="Ticket number"
                       value={p.ticket_reference}
                       onChange={setPassenger(i, "ticket_reference")}
                       placeholder="KMUMGQ-16226-000011"
+                      className="max-w-[200px] py-1.5"
                       hint={
                         i === 0
                           ? "Each passenger has their own on a group ticket"
                           : undefined
                       }
                     />
-                    {form.ticket_type === "INTERNATIONAL" &&
-                      passengers.length > 1 && (
-                        <Input
-                          label="Passport number"
-                          value={p.passport_number}
-                          onChange={setPassenger(i, "passport_number")}
-                          placeholder="A12345678"
-                        />
-                      )}
                   </div>
                   <button
                     type="button"
                     onClick={() => removePassenger(i)}
-                    disabled={passengers.length === 1}
+                    disabled={
+                      p.passenger_type === "adult"
+                        ? passengers.filter((item) => item.passenger_type === "adult").length <= 1
+                        : passengers.filter((item) => item.passenger_type === p.passenger_type).length === 0
+                    }
                     title={
-                      passengers.length === 1
-                        ? "A booking needs at least one passenger"
+                      p.passenger_type === "adult" &&
+                      passengers.filter((item) => item.passenger_type === "adult").length <= 1
+                        ? "A booking needs at least one adult"
                         : `Remove passenger ${i + 1}`
                     }
-                    className="mt-2 p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    className="mt-1 p-1 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                   >
-                    <Trash2 className="w-4 h-4" />
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ))}
             </div>
 
-            <button
-              type="button"
-              onClick={addPassenger}
-              className="mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-600 dark:text-gray-300 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors"
-            >
-              <Plus className="w-4 h-4" /> Add another passenger
-            </button>
           </div>
         </>
       )}
@@ -837,32 +1345,36 @@ export default function TicketForm({
           Flight Details
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Input
-            label="From *"
-            value={form.from_city}
-            onChange={set("from_city")}
-            placeholder="Mogadishu"
-            required
-          />
-          <Input
-            label="To *"
-            value={form.to_city}
-            onChange={set("to_city")}
-            placeholder="Dubai"
-            required
-          />
-          <Input
-            label={
-              form.trip_type === "round_trip"
-                ? "Departure flight date *"
-                : "Flight date *"
-            }
-            type="date"
-            value={form.flight_date}
-            onChange={set("flight_date")}
-            required
-          />
-          {form.trip_type === "round_trip" && (
+          {mode === "edit" && (
+            <>
+              <Input
+                label="From *"
+                value={form.from_city}
+                onChange={set("from_city")}
+                placeholder="Mogadishu"
+                required
+              />
+              <Input
+                label="To *"
+                value={form.to_city}
+                onChange={set("to_city")}
+                placeholder="Dubai"
+                required
+              />
+              <Input
+                label={
+                  form.trip_type === "round_trip"
+                    ? "Departure flight date *"
+                    : "Flight date *"
+                }
+                type="date"
+                value={form.flight_date}
+                onChange={set("flight_date")}
+                required
+              />
+            </>
+          )}
+          {mode === "edit" && form.trip_type === "round_trip" && (
             <Input
               label="Return flight date *"
               type="date"
@@ -940,6 +1452,7 @@ export default function TicketForm({
             value={form.ticket_reference}
             onChange={set("ticket_reference")}
             placeholder="AYJB07"
+            className="max-w-[220px]"
           />
         </div>
       </div>
@@ -1237,14 +1750,14 @@ export default function TicketForm({
 
       {/* ── Actions ── */}
       <div className="flex gap-3 pt-2">
-        <Button type="submit" loading={loading} size="lg">
+        <Button type="submit" loading={loading} size="sm">
           {mode === "create" ? "Create Ticket" : "Save Changes"}
         </Button>
         {onCancel && (
           <Button
             type="button"
             variant="secondary"
-            size="lg"
+            size="sm"
             onClick={onCancel}
           >
             Cancel

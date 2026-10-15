@@ -992,11 +992,16 @@ const serviceRows = (data) => {
  * and what it is, the services billed, what has been received against them,
  * where to send the rest, and who to ask about it.
  */
-const generateCustomerStatementPDF = (res, data) => {
-  const { customer, payments = [], summary } = data;
-  const business = data.business || null;
-  const methods = data.payment_methods || [];
-  const rows = serviceRows(data);
+const generateCustomerStatementPDF = (res, input) => {
+  // One invoice, or several in one file — one per service the customer was
+  // sent — each starting on its own sheet. Branding and paper come from the
+  // file, not from each part, so the parts cannot disagree about either.
+  const parts =
+    Array.isArray(input.invoices) && input.invoices.length
+      ? input.invoices
+      : [input];
+  const { customer } = parts[0];
+  const business = parts[0].business || null;
 
   // ── Paper size ─────────────────────────────────────────────────────────
   //
@@ -1008,7 +1013,7 @@ const generateCustomerStatementPDF = (res, data) => {
   // nothing left over. Two hand-written layouts would drift apart the first
   // time either was touched.
   const paper =
-    String(data.page_size || "A4").toUpperCase() === "A5"
+    String(input.page_size || "A4").toUpperCase() === "A5"
       ? { name: "A5", w: 420, h: 595 }
       : { name: "A4", w: PAGE_W, h: PAGE_H };
   const S = paper.w / PAGE_W;
@@ -1049,576 +1054,593 @@ const generateCustomerStatementPDF = (res, data) => {
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
-    `attachment; filename="invoice-${(customer.name || "customer")
+    `attachment; filename="${parts.length > 1 ? "invoices" : "invoice"}-${(
+      customer.name || "customer"
+    )
       .replace(/[^a-z0-9]/gi, "-")
       .toLowerCase()}-${paper.name.toLowerCase()}.pdf"`,
   );
   doc.pipe(res);
 
-  let y = drawInvoiceHeader(doc, business);
+  const drawInvoice = (data) => {
+    const { customer, payments = [], summary } = data;
+    const methods = data.payment_methods || [];
+    const rows = serviceRows(data);
 
-  // ── Invoice To / Invoice Information ───────────────────────────────────
-  const colW = (IW - 30) / 2;
-  const rightX = IM + colW + 30;
+    let y = drawInvoiceHeader(doc, business);
 
-  const leftTop = sectionHeading(doc, "Invoice To", y);
-  const rightTop = sectionHeading(doc, "Invoice Information", y, {
-    x: rightX,
-    width: colW,
-    align: "right",
-  });
+    // ── Invoice To / Invoice Information ───────────────────────────────────
+    const colW = (IW - 30) / 2;
+    const rightX = IM + colW + 30;
 
-  let ly = leftTop;
-  ly = labelled(
-    doc,
-    "Display Name:",
-    customer.company_name || customer.name,
-    IM,
-    ly,
-    colW,
-  );
-  ly = labelled(doc, "Full Name:", customer.name, IM, ly, colW);
-  if (customer.phone)
-    ly = labelled(doc, "Contact:", customer.phone, IM, ly, colW);
-  if (customer.email)
-    ly = labelled(doc, "Email:", trunc(customer.email, 40), IM, ly, colW);
-  if (customer.passport_number)
-    ly = labelled(doc, "Passport:", customer.passport_number, IM, ly, colW);
-
-  const balanceDue = Number(summary.total_balance) || 0;
-
-  // A deposit the agency is still holding. It is shown as its own line and
-  // subtracted at the bottom rather than folded into "received": the spent
-  // part of a deposit is already inside total_paid, and adding it twice
-  // would print an invoice claiming money that never arrived twice over.
-  const held = Number(summary.deposit_held ?? data.deposit?.held) || 0;
-  const netDue = Number(summary.net_due ?? balanceDue - held) || 0;
-  const settled = netDue <= 0.001;
-  const inCredit = netDue < -0.001;
-
-  let ry = rightTop;
-  ry = labelled(
-    doc,
-    "Invoice No:",
-    invoiceNumber(customer),
-    rightX,
-    ry,
-    colW,
-    "right",
-  );
-  ry = labelled(
-    doc,
-    "Issued:",
-    formatDate(new Date()),
-    rightX,
-    ry,
-    colW,
-    "right",
-  );
-  ry = labelled(
-    doc,
-    "Services:",
-    `${summary.item_count ?? rows.length} item${
-      (summary.item_count ?? rows.length) === 1 ? "" : "s"
-    }`,
-    rightX,
-    ry,
-    colW,
-    "right",
-  );
-
-  if (held > 0.001)
-    ry = labelled(doc, "On Deposit:", money(held), rightX, ry, colW, "right");
-
-  // The status is the one thing on this page a reader looks for first, so it
-  // is coloured rather than left to be found among the rest.
-  doc.font("Helvetica-Bold").fontSize(8).fillColor(INV.slate);
-  const bl = "Balance: ";
-  const blw = doc.widthOfString(bl);
-  const bv = `${money(Math.max(netDue, 0))}  ·  ${
-    inCredit ? "IN CREDIT" : settled ? "PAID" : "UNPAID"
-  }`;
-  doc.font("Helvetica-Bold").fontSize(8);
-  const bvw = doc.widthOfString(bv);
-  const bx = rightX + colW - (blw + bvw);
-  doc.fillColor(INV.slate).text(bl, bx, ry, { lineBreak: false });
-  doc
-    .fillColor(settled ? INV.green : INV.red)
-    .text(bv, bx + blw, ry, { lineBreak: false });
-  ry += 12;
-
-  y = Math.max(ly, ry) + 14;
-
-  // ── Service costs ──────────────────────────────────────────────────────
-  //
-  // The one block on the page a customer will actually read line by line, so
-  // it is given a tinted ground and a heavier border than anything else —
-  // enough that the eye lands on it first and stays inside it.
-  y = sectionHeading(doc, "Service Costs", y);
-
-  const cols = [
-    ["SN", IM, 28, "left"],
-    ["Customer", IM + 28, 100, "left"],
-    ["Service", IM + 128, 148, "left"],
-    ["Reference", IM + 276, 72, "left"],
-    ["Date", IM + 348, 64, "left"],
-    ["Total", IM + 412, 50, "right"],
-    ["Balance", IM + 462, 53, "right"],
-  ];
-
-  const HEAD_H = 20;
-  const ROW_H = 19;
-
-  /**
-   * Draw one page's worth of the table as a single bordered block.
-   *
-   * The tinted ground has to be painted before the rows and the border
-   * stroked after, which means the block's height must be known up front —
-   * hence counting the rows that fit first rather than drawing until
-   * something overflows.
-   */
-  const drawTableBlock = (top, slice, startIndex) => {
-    const h = HEAD_H + Math.max(slice.length, 1) * ROW_H;
-
-    doc.roundedRect(IM, top, IW, h, 7).fill(INV.tealPale);
-
-    doc.save();
-    doc.roundedRect(IM, top, IW, HEAD_H, 7).clip();
-    doc.rect(IM, top, IW, HEAD_H).fill(INV.teal);
-    doc.restore();
-    // Square off the header's lower corners so it reads as a band across the
-    // top of the block rather than a floating pill.
-    doc.rect(IM, top + HEAD_H - 7, IW, 7).fill(INV.teal);
-
-    doc.font("Helvetica-Bold").fontSize(7.5).fillColor(INV.white);
-    cols.forEach(([label, x, w, align]) => {
-      doc.text(label.toUpperCase(), x + 6, top + 7, {
-        width: w - 12,
-        align,
-        lineBreak: false,
-        characterSpacing: 0.4,
-        height: 11,
-      });
+    const leftTop = sectionHeading(doc, "Invoice To", y);
+    const rightTop = sectionHeading(doc, "Invoice Information", y, {
+      x: rightX,
+      width: colW,
+      align: "right",
     });
 
-    let ry = top + HEAD_H;
-    slice.forEach((r, i) => {
-      // Every other row lifted to white on the tint, which bands the table
-      // without needing rules between the rows.
-      if (i % 2 === 0) doc.rect(IM + 1, ry, IW - 2, ROW_H).fill(INV.white);
+    let ly = leftTop;
+    ly = labelled(
+      doc,
+      "Display Name:",
+      customer.company_name || customer.name,
+      IM,
+      ly,
+      colW,
+    );
+    ly = labelled(doc, "Full Name:", customer.name, IM, ly, colW);
+    if (customer.phone)
+      ly = labelled(doc, "Contact:", customer.phone, IM, ly, colW);
+    if (customer.email)
+      ly = labelled(doc, "Email:", trunc(customer.email, 40), IM, ly, colW);
+    if (customer.passport_number)
+      ly = labelled(doc, "Passport:", customer.passport_number, IM, ly, colW);
 
-      const values = [
-        String(startIndex + i + 1),
-        r.who,
-        r.service,
-        r.reference || "—",
-        formatDate(r.date),
-        money(r.total),
-        r.not_billed ? "—" : money(r.balance),
-      ];
-      values.forEach((v, ci) => {
-        const [, x, w, align] = cols[ci];
-        const owing = !r.not_billed && Number(r.balance) > 0.001;
+    const balanceDue = Number(summary.total_balance) || 0;
+
+    // A deposit the agency is still holding. It is shown as its own line and
+    // subtracted at the bottom rather than folded into "received": the spent
+    // part of a deposit is already inside total_paid, and adding it twice
+    // would print an invoice claiming money that never arrived twice over.
+    const held = Number(summary.deposit_held ?? data.deposit?.held) || 0;
+    const netDue = Number(summary.net_due ?? balanceDue - held) || 0;
+    const settled = netDue <= 0.001;
+    const inCredit = netDue < -0.001;
+
+    let ry = rightTop;
+    ry = labelled(
+      doc,
+      "Invoice No:",
+      data.invoice_no || invoiceNumber(customer),
+      rightX,
+      ry,
+      colW,
+      "right",
+    );
+    ry = labelled(
+      doc,
+      "Issued:",
+      formatDate(new Date()),
+      rightX,
+      ry,
+      colW,
+      "right",
+    );
+    ry = labelled(
+      doc,
+      "Services:",
+      `${summary.item_count ?? rows.length} item${
+        (summary.item_count ?? rows.length) === 1 ? "" : "s"
+      }`,
+      rightX,
+      ry,
+      colW,
+      "right",
+    );
+
+    if (held > 0.001)
+      ry = labelled(doc, "On Deposit:", money(held), rightX, ry, colW, "right");
+
+    // The status is the one thing on this page a reader looks for first, so it
+    // is coloured rather than left to be found among the rest.
+    doc.font("Helvetica-Bold").fontSize(8).fillColor(INV.slate);
+    const bl = "Balance: ";
+    const blw = doc.widthOfString(bl);
+    const bv = `${money(Math.max(netDue, 0))}  ·  ${
+      inCredit ? "IN CREDIT" : settled ? "PAID" : "UNPAID"
+    }`;
+    doc.font("Helvetica-Bold").fontSize(8);
+    const bvw = doc.widthOfString(bv);
+    const bx = rightX + colW - (blw + bvw);
+    doc.fillColor(INV.slate).text(bl, bx, ry, { lineBreak: false });
+    doc
+      .fillColor(settled ? INV.green : INV.red)
+      .text(bv, bx + blw, ry, { lineBreak: false });
+    ry += 12;
+
+    y = Math.max(ly, ry) + 14;
+
+    // ── Service costs ──────────────────────────────────────────────────────
+    //
+    // The one block on the page a customer will actually read line by line, so
+    // it is given a tinted ground and a heavier border than anything else —
+    // enough that the eye lands on it first and stays inside it.
+    y = sectionHeading(doc, "Service Costs", y);
+
+    const cols = [
+      ["SN", IM, 28, "left"],
+      ["Customer", IM + 28, 100, "left"],
+      ["Service", IM + 128, 148, "left"],
+      ["Reference", IM + 276, 72, "left"],
+      ["Date", IM + 348, 64, "left"],
+      ["Total", IM + 412, 50, "right"],
+      ["Balance", IM + 462, 53, "right"],
+    ];
+
+    const HEAD_H = 20;
+    const ROW_H = 19;
+
+    /**
+     * Draw one page's worth of the table as a single bordered block.
+     *
+     * The tinted ground has to be painted before the rows and the border
+     * stroked after, which means the block's height must be known up front —
+     * hence counting the rows that fit first rather than drawing until
+     * something overflows.
+     */
+    const drawTableBlock = (top, slice, startIndex) => {
+      const h = HEAD_H + Math.max(slice.length, 1) * ROW_H;
+
+      doc.roundedRect(IM, top, IW, h, 7).fill(INV.tealPale);
+
+      doc.save();
+      doc.roundedRect(IM, top, IW, HEAD_H, 7).clip();
+      doc.rect(IM, top, IW, HEAD_H).fill(INV.teal);
+      doc.restore();
+      // Square off the header's lower corners so it reads as a band across the
+      // top of the block rather than a floating pill.
+      doc.rect(IM, top + HEAD_H - 7, IW, 7).fill(INV.teal);
+
+      doc.font("Helvetica-Bold").fontSize(7.5).fillColor(INV.white);
+      cols.forEach(([label, x, w, align]) => {
+        doc.text(label.toUpperCase(), x + 6, top + 7, {
+          width: w - 12,
+          align,
+          lineBreak: false,
+          characterSpacing: 0.4,
+          height: 11,
+        });
+      });
+
+      let ry = top + HEAD_H;
+      slice.forEach((r, i) => {
+        // Every other row lifted to white on the tint, which bands the table
+        // without needing rules between the rows.
+        if (i % 2 === 0) doc.rect(IM + 1, ry, IW - 2, ROW_H).fill(INV.white);
+
+        const values = [
+          String(startIndex + i + 1),
+          r.who,
+          r.service,
+          r.reference || "—",
+          formatDate(r.date),
+          money(r.total),
+          r.not_billed ? "—" : money(r.balance),
+        ];
+        values.forEach((v, ci) => {
+          const [, x, w, align] = cols[ci];
+          const owing = !r.not_billed && Number(r.balance) > 0.001;
+          doc
+            .font(ci === 1 ? "Helvetica-Bold" : "Helvetica")
+            .fontSize(7.5)
+            .fillColor(
+              ci === 6
+                ? owing
+                  ? INV.red
+                  : INV.green
+                : ci === 1
+                  ? INV.slate
+                  : INV.body,
+            );
+          oneLine(doc, v, x + 6, ry + 6.5, w - 12, { align });
+        });
+        ry += ROW_H;
+      });
+
+      if (slice.length === 0) {
         doc
-          .font(ci === 1 ? "Helvetica-Bold" : "Helvetica")
-          .fontSize(7.5)
-          .fillColor(
-            ci === 6
-              ? owing
-                ? INV.red
-                : INV.green
-              : ci === 1
-                ? INV.slate
-                : INV.body,
-          );
-        oneLine(doc, v, x + 6, ry + 6.5, w - 12, { align });
-      });
-      ry += ROW_H;
-    });
+          .font("Helvetica")
+          .fontSize(8.5)
+          .fillColor(INV.muted)
+          .text("Nothing billed on this invoice.", IM, top + HEAD_H + 6, {
+            width: IW,
+            align: "center",
+            lineBreak: false,
+            height: 12,
+          });
+      }
 
-    if (slice.length === 0) {
+      doc.roundedRect(IM, top, IW, h, 7).lineWidth(1.6).stroke(INV.teal);
+
+      return top + h;
+    };
+
+    if (rows.length === 0) {
+      y = drawTableBlock(y, [], 0);
+    } else {
+      let i = 0;
+      while (i < rows.length) {
+        let fits = Math.floor((CONTENT_BOTTOM - y - HEAD_H) / ROW_H);
+        if (fits < 1) {
+          newPage();
+          y = drawInvoiceHeader(doc, business, { compact: true });
+          fits = Math.floor((CONTENT_BOTTOM - y - HEAD_H) / ROW_H);
+        }
+        const take = Math.min(fits, rows.length - i);
+        y = drawTableBlock(y, rows.slice(i, i + take), i);
+        i += take;
+        if (i < rows.length) {
+          newPage();
+          y = drawInvoiceHeader(doc, business, { compact: true });
+        }
+      }
+    }
+
+    y += 16;
+
+    // ── Receipts (left) and totals (right), side by side ───────────────────
+    //
+    // Two panels rather than two stacked tables. Side by side, the eye reads
+    // "here is what you paid, here is what that leaves" as one statement —
+    // which is the only question a customer opens this document to answer.
+    const panelGap = 14;
+    const totalsW = 210;
+    const receiptsW = IW - totalsW - panelGap;
+    const totalsX = IM + receiptsW + panelGap;
+
+    if (y + 130 > CONTENT_BOTTOM) {
+      newPage();
+      y = drawInvoiceHeader(doc, business, { compact: true });
+    }
+
+    // Three rows when there is no deposit — exactly what this panel has always
+    // been. With one, the balance stops being the last word: the held deposit
+    // is subtracted in front of the customer and the bottom row is what they
+    // actually have to hand over.
+    const totalRows =
+      held > 0.001
+        ? [
+            ["Sales", money(summary.total_amount), INV.slate, false, false],
+            ["Received", money(summary.total_paid), INV.green, false, false],
+            ["Balance", money(balanceDue), INV.slate, false, false],
+            ["On Deposit", `-${money(held)}`, INV.green, false, true],
+            [
+              inCredit ? "In Credit" : "Net Due",
+              money(Math.abs(netDue)),
+              INV.white,
+              true,
+              false,
+            ],
+          ]
+        : [
+            ["Sales", money(summary.total_amount), INV.slate, false, false],
+            ["Received", money(summary.total_paid), INV.green, false, false],
+            [
+              "Balance",
+              money(summary.total_balance),
+              settled ? INV.green : INV.red,
+              true,
+              false,
+            ],
+          ];
+    const TR_H = 26;
+    const totalsH = TR_H * totalRows.length;
+
+    // Receipts panel
+    const recentPayments = payments.slice(0, 6);
+    const receiptsH = Math.max(
+      totalsH,
+      recentPayments.length ? 26 + recentPayments.length * 17 + 8 : 74,
+    );
+
+    doc
+      .roundedRect(IM, y, receiptsW, receiptsH, 6)
+      .lineWidth(0.8)
+      .fillAndStroke(INV.tealPale, INV.line);
+
+    if (recentPayments.length === 0) {
       doc
-        .font("Helvetica")
-        .fontSize(8.5)
-        .fillColor(INV.muted)
-        .text("Nothing billed on this invoice.", IM, top + HEAD_H + 6, {
-          width: IW,
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .fillColor(INV.body)
+        .text("No receipts recorded yet", IM, y + receiptsH / 2 - 14, {
+          width: receiptsW,
           align: "center",
           lineBreak: false,
-          height: 12,
         });
+      doc
+        .font("Helvetica")
+        .fontSize(7.5)
+        .fillColor(INV.muted)
+        .text(
+          "Payments appear here as soon as they are collected.",
+          IM,
+          y + receiptsH / 2 + 1,
+          { width: receiptsW, align: "center", lineBreak: false },
+        );
+    } else {
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(8)
+        .fillColor(INV.tealDeep)
+        .text("RECEIPTS", IM + 12, y + 9, {
+          lineBreak: false,
+          characterSpacing: 0.6,
+        });
+      if (payments.length > recentPayments.length) {
+        doc
+          .font("Helvetica")
+          .fontSize(7)
+          .fillColor(INV.muted)
+          .text(
+            `showing ${recentPayments.length} of ${payments.length}`,
+            IM + 12,
+            y + 9,
+            { width: receiptsW - 24, align: "right", lineBreak: false },
+          );
+      }
+
+      let py = y + 26;
+      const whoW = receiptsW - 74 - 112;
+      recentPayments.forEach((p) => {
+        doc.font("Helvetica").fontSize(7.5).fillColor(INV.body);
+        oneLine(doc, formatDate(p.created_at), IM + 12, py, 58);
+        oneLine(doc, p.passenger_name || "—", IM + 74, py, whoW);
+        doc.fillColor(INV.muted);
+        oneLine(
+          doc,
+          p.account_name || p.method || "—",
+          receiptsW + IM - 110,
+          py,
+          50,
+        );
+        doc
+          .font("Helvetica-Bold")
+          .fillColor(Number(p.amount) < 0 ? INV.red : INV.green)
+          .text(money(p.amount), receiptsW + IM - 56, py, {
+            width: 44,
+            align: "right",
+            lineBreak: false,
+          });
+        py += 17;
+      });
     }
 
-    doc.roundedRect(IM, top, IW, h, 7).lineWidth(1.6).stroke(INV.teal);
-
-    return top + h;
-  };
-
-  if (rows.length === 0) {
-    y = drawTableBlock(y, [], 0);
-  } else {
-    let i = 0;
-    while (i < rows.length) {
-      let fits = Math.floor((CONTENT_BOTTOM - y - HEAD_H) / ROW_H);
-      if (fits < 1) {
-        newPage();
-        y = drawInvoiceHeader(doc, business, { compact: true });
-        fits = Math.floor((CONTENT_BOTTOM - y - HEAD_H) / ROW_H);
+    // Totals panel
+    totalRows.forEach(([label, value, color, strong, credit], i) => {
+      const ty = y + i * TR_H;
+      doc
+        .rect(totalsX, ty, totalsW, TR_H)
+        // Green for the row that counts in the customer's favour, so it cannot
+        // be mistaken for another charge in a column of teal.
+        .fill(credit ? INV.green : strong ? INV.tealDeep : INV.teal);
+      if (!strong && !credit && i % 2 === 1) {
+        doc.rect(totalsX, ty, totalsW, TR_H).fillOpacity(0.12).fill(INV.white);
+        doc.fillOpacity(1);
       }
-      const take = Math.min(fits, rows.length - i);
-      y = drawTableBlock(y, rows.slice(i, i + take), i);
-      i += take;
-      if (i < rows.length) {
-        newPage();
-        y = drawInvoiceHeader(doc, business, { compact: true });
-      }
-    }
-  }
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(8.5)
+        .fillColor(INV.white)
+        .text(label.toUpperCase(), totalsX + 14, ty + 8.5, {
+          width: 90,
+          lineBreak: false,
+          characterSpacing: 0.5,
+        });
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(strong ? 11 : 10)
+        .fillColor(INV.white)
+        .text(value, totalsX + 100, ty + (strong ? 7 : 8), {
+          width: totalsW - 114,
+          align: "right",
+          lineBreak: false,
+        });
+    });
 
-  y += 16;
+    y += Math.max(receiptsH, totalsH) + 8;
 
-  // ── Receipts (left) and totals (right), side by side ───────────────────
-  //
-  // Two panels rather than two stacked tables. Side by side, the eye reads
-  // "here is what you paid, here is what that leaves" as one statement —
-  // which is the only question a customer opens this document to answer.
-  const panelGap = 14;
-  const totalsW = 210;
-  const receiptsW = IW - totalsW - panelGap;
-  const totalsX = IM + receiptsW + panelGap;
-
-  if (y + 130 > CONTENT_BOTTOM) {
-    newPage();
-    y = drawInvoiceHeader(doc, business, { compact: true });
-  }
-
-  // Three rows when there is no deposit — exactly what this panel has always
-  // been. With one, the balance stops being the last word: the held deposit
-  // is subtracted in front of the customer and the bottom row is what they
-  // actually have to hand over.
-  const totalRows =
-    held > 0.001
-      ? [
-          ["Sales", money(summary.total_amount), INV.slate, false, false],
-          ["Received", money(summary.total_paid), INV.green, false, false],
-          ["Balance", money(balanceDue), INV.slate, false, false],
-          ["On Deposit", `-${money(held)}`, INV.green, false, true],
-          [
-            inCredit ? "In Credit" : "Net Due",
-            money(Math.abs(netDue)),
-            INV.white,
-            true,
-            false,
-          ],
-        ]
-      : [
-          ["Sales", money(summary.total_amount), INV.slate, false, false],
-          ["Received", money(summary.total_paid), INV.green, false, false],
-          [
-            "Balance",
-            money(summary.total_balance),
-            settled ? INV.green : INV.red,
-            true,
-            false,
-          ],
-        ];
-  const TR_H = 26;
-  const totalsH = TR_H * totalRows.length;
-
-  // Receipts panel
-  const recentPayments = payments.slice(0, 6);
-  const receiptsH = Math.max(
-    totalsH,
-    recentPayments.length ? 26 + recentPayments.length * 17 + 8 : 74,
-  );
-
-  doc
-    .roundedRect(IM, y, receiptsW, receiptsH, 6)
-    .lineWidth(0.8)
-    .fillAndStroke(INV.tealPale, INV.line);
-
-  if (recentPayments.length === 0) {
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(9)
-      .fillColor(INV.body)
-      .text("No receipts recorded yet", IM, y + receiptsH / 2 - 14, {
-        width: receiptsW,
-        align: "center",
-        lineBreak: false,
-      });
-    doc
-      .font("Helvetica")
-      .fontSize(7.5)
-      .fillColor(INV.muted)
-      .text(
-        "Payments appear here as soon as they are collected.",
-        IM,
-        y + receiptsH / 2 + 1,
-        { width: receiptsW, align: "center", lineBreak: false },
-      );
-  } else {
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(8)
-      .fillColor(INV.tealDeep)
-      .text("RECEIPTS", IM + 12, y + 9, {
-        lineBreak: false,
-        characterSpacing: 0.6,
-      });
-    if (payments.length > recentPayments.length) {
+    // Where the deposit came from and where it went, in one sentence. The
+    // panel shows what is left; a customer who handed over 400 wants to read
+    // the 400 back, not work it out from the 190 that remains.
+    if (
+      held > 0.001 ||
+      Number(summary.deposit_taken ?? data.deposit?.taken) > 0.001
+    ) {
+      const taken = Number(summary.deposit_taken ?? data.deposit?.taken) || 0;
+      const used = Number(summary.deposit_applied ?? data.deposit?.applied) || 0;
       doc
         .font("Helvetica")
         .fontSize(7)
         .fillColor(INV.muted)
         .text(
-          `showing ${recentPayments.length} of ${payments.length}`,
-          IM + 12,
-          y + 9,
-          { width: receiptsW - 24, align: "right", lineBreak: false },
+          `Deposit: ${money(taken)} received, ${money(used)} already used on the services above, ` +
+            `${money(held)} still held on this account.` +
+            (inCredit
+              ? ` ${money(Math.abs(netDue))} of it is over and above what is owed.`
+              : ""),
+          IM,
+          y,
+          { width: IW, lineBreak: false },
+        );
+      y += 15;
+    }
+
+    if (rows.some((r) => String(r.who).endsWith(" *"))) {
+      doc
+        .font("Helvetica")
+        .fontSize(6.5)
+        .fillColor(INV.muted)
+        .text("* booked by this customer for a family member or friend", IM, y, {
+          width: IW,
+          lineBreak: false,
+        });
+      y += 15;
+    }
+
+    // ── Payment methods ────────────────────────────────────────────────────
+    //
+    // Cash is never listed. This block exists to tell someone where to send
+    // money they are not standing in front of you with, and "pay cash"
+    // answers no question a person reading an invoice at home is asking.
+    //
+    // The bank's own mark leads each card and the number is the only text.
+    // A customer recognises the logo of their bank before they finish reading
+    // a word, so printing the name underneath as well said the same thing
+    // twice and cost a third line of height for it. Where no icon has been
+    // uploaded the name takes the mark's place instead, so a card is never
+    // blank — and the number stays the one line set large, because it is the
+    // only thing on the card that actually has to be read and copied.
+    if (methods.length > 0) {
+      const GAP = 9;
+      const CARD_W = (IW - GAP * 2) / 3;
+      const CARD_H = 40;
+      const PANEL_W = 42;
+      const rowsNeeded = Math.ceil(methods.length / 3);
+
+      if (y + 26 + rowsNeeded * (CARD_H + GAP) > CONTENT_BOTTOM) {
+        newPage();
+        y = drawInvoiceHeader(doc, business, { compact: true });
+      }
+
+      y = sectionHeading(doc, "Payment Methods", y);
+
+      methods.forEach((m, i) => {
+        const cx = IM + (i % 3) * (CARD_W + GAP);
+        const cy = y + Math.floor(i / 3) * (CARD_H + GAP);
+
+        // A pale copy offset behind the card. PDFKit has no shadows, and this
+        // is what gives the row depth instead of leaving flat outlines.
+        doc.roundedRect(cx + 2, cy + 2.5, CARD_W, CARD_H, 8).fill(INV.tealPale);
+
+        // White throughout, including behind the mark. A bank's logo is drawn
+        // to sit on white; putting it on a tint changes the colour it was
+        // designed against, and on the two-colour marks most Somali banks use
+        // it looks like a printing fault.
+        doc
+          .roundedRect(cx, cy, CARD_W, CARD_H, 8)
+          .lineWidth(1.1)
+          .fillAndStroke(INV.white, INV.tealSoft);
+
+        // A spine rather than a panel: it gives the card an edge to start
+        // from without putting any colour behind the mark.
+        doc.save();
+        doc.roundedRect(cx, cy, CARD_W, CARD_H, 8).clip();
+        doc.rect(cx, cy, 3.5, CARD_H).fill(INV.teal);
+        doc.restore();
+
+        const iconFile = logoPath(m.icon_url);
+        let iconDrawn = false;
+        if (iconFile) {
+          try {
+            doc.image(iconFile, cx + 9, cy + 7, {
+              fit: [PANEL_W - 15, CARD_H - 14],
+              align: "center",
+              valign: "center",
+            });
+            iconDrawn = true;
+          } catch {
+            iconDrawn = false;
+          }
+        }
+        if (!iconDrawn) {
+          // No icon: the account's initials, set the way the lettermark in the
+          // masthead is, so the fallback looks chosen rather than missed.
+          doc.font("Helvetica-Bold").fontSize(11).fillColor(INV.teal);
+          doc.text(initials(m.name), cx + 4, cy + CARD_H / 2 - 6, {
+            width: PANEL_W - 6,
+            align: "center",
+            lineBreak: false,
+            height: 14,
+          });
+        }
+
+        const tx = cx + PANEL_W + 8;
+        const tw = CARD_W - PANEL_W - 16;
+
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(m.account_number ? 9.5 : 8.5)
+          .fillColor(INV.slate);
+        oneLine(doc, m.account_number || m.name, tx, cy + 10, tw);
+
+        const sub = m.account_holder || (m.account_number ? "" : "");
+        if (sub) {
+          doc.font("Helvetica").fontSize(7).fillColor(INV.muted);
+          oneLine(doc, sub, tx, cy + 23, tw);
+        }
+      });
+
+      y += rowsNeeded * (CARD_H + GAP) + 2;
+    }
+
+    // ── Signature ──────────────────────────────────────────────────────────
+    if (data.prepared_by) {
+      // Two centred lines. Worth a few points of tightening elsewhere on the
+      // page to keep them off a sheet of their own — a second page carrying
+      // nothing but a signature reads as a printing fault.
+      if (y + 26 > CONTENT_BOTTOM) {
+        newPage();
+        y = drawInvoiceHeader(doc, business, { compact: true });
+      }
+      y += 3;
+      doc.font("Helvetica-Bold").fontSize(9.5).fillColor(INV.slate);
+      const nm = `${data.prepared_by}, `;
+      // Already a job title in almost every case — 'Operations Director' — so
+      // it is only tidied, not rewritten. The underscore rule is there for the
+      // fallback, where an access level like 'super_admin' comes through.
+      const role = String(data.prepared_by_role || "")
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+      const nw = doc.widthOfString(nm);
+      doc.font("Helvetica").fontSize(9);
+      const rw = doc.widthOfString(role);
+      const sx = IM + (IW - (nw + rw)) / 2;
+      doc
+        .font("Helvetica-Bold")
+        .fillColor(INV.slate)
+        .text(nm, sx, y, { lineBreak: false });
+      doc
+        .font("Helvetica")
+        .fillColor(INV.muted)
+        .text(role, sx + nw, y, { lineBreak: false });
+      doc
+        .font("Helvetica")
+        .fontSize(7.5)
+        .fillColor(INV.muted)
+        .text(
+          new Date().toLocaleDateString("en-GB", {
+            weekday: "long",
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+          }),
+          IM,
+          y + 14,
+          { width: IW, align: "center", lineBreak: false },
         );
     }
+  };
 
-    let py = y + 26;
-    const whoW = receiptsW - 74 - 112;
-    recentPayments.forEach((p) => {
-      doc.font("Helvetica").fontSize(7.5).fillColor(INV.body);
-      oneLine(doc, formatDate(p.created_at), IM + 12, py, 58);
-      oneLine(doc, p.passenger_name || "—", IM + 74, py, whoW);
-      doc.fillColor(INV.muted);
-      oneLine(
-        doc,
-        p.account_name || p.method || "—",
-        receiptsW + IM - 110,
-        py,
-        50,
-      );
-      doc
-        .font("Helvetica-Bold")
-        .fillColor(Number(p.amount) < 0 ? INV.red : INV.green)
-        .text(money(p.amount), receiptsW + IM - 56, py, {
-          width: 44,
-          align: "right",
-          lineBreak: false,
-        });
-      py += 17;
+  parts.forEach((part, i) => {
+    if (i > 0) newPage();
+    drawInvoice({
+      prepared_by: input.prepared_by,
+      prepared_by_role: input.prepared_by_role,
+      ...part,
     });
-  }
-
-  // Totals panel
-  totalRows.forEach(([label, value, color, strong, credit], i) => {
-    const ty = y + i * TR_H;
-    doc
-      .rect(totalsX, ty, totalsW, TR_H)
-      // Green for the row that counts in the customer's favour, so it cannot
-      // be mistaken for another charge in a column of teal.
-      .fill(credit ? INV.green : strong ? INV.tealDeep : INV.teal);
-    if (!strong && !credit && i % 2 === 1) {
-      doc.rect(totalsX, ty, totalsW, TR_H).fillOpacity(0.12).fill(INV.white);
-      doc.fillOpacity(1);
-    }
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(8.5)
-      .fillColor(INV.white)
-      .text(label.toUpperCase(), totalsX + 14, ty + 8.5, {
-        width: 90,
-        lineBreak: false,
-        characterSpacing: 0.5,
-      });
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(strong ? 11 : 10)
-      .fillColor(INV.white)
-      .text(value, totalsX + 100, ty + (strong ? 7 : 8), {
-        width: totalsW - 114,
-        align: "right",
-        lineBreak: false,
-      });
   });
-
-  y += Math.max(receiptsH, totalsH) + 8;
-
-  // Where the deposit came from and where it went, in one sentence. The
-  // panel shows what is left; a customer who handed over 400 wants to read
-  // the 400 back, not work it out from the 190 that remains.
-  if (
-    held > 0.001 ||
-    Number(summary.deposit_taken ?? data.deposit?.taken) > 0.001
-  ) {
-    const taken = Number(summary.deposit_taken ?? data.deposit?.taken) || 0;
-    const used = Number(summary.deposit_applied ?? data.deposit?.applied) || 0;
-    doc
-      .font("Helvetica")
-      .fontSize(7)
-      .fillColor(INV.muted)
-      .text(
-        `Deposit: ${money(taken)} received, ${money(used)} already used on the services above, ` +
-          `${money(held)} still held on this account.` +
-          (inCredit
-            ? ` ${money(Math.abs(netDue))} of it is over and above what is owed.`
-            : ""),
-        IM,
-        y,
-        { width: IW, lineBreak: false },
-      );
-    y += 15;
-  }
-
-  if (rows.some((r) => String(r.who).endsWith(" *"))) {
-    doc
-      .font("Helvetica")
-      .fontSize(6.5)
-      .fillColor(INV.muted)
-      .text("* booked by this customer for a family member or friend", IM, y, {
-        width: IW,
-        lineBreak: false,
-      });
-    y += 15;
-  }
-
-  // ── Payment methods ────────────────────────────────────────────────────
-  //
-  // Cash is never listed. This block exists to tell someone where to send
-  // money they are not standing in front of you with, and "pay cash"
-  // answers no question a person reading an invoice at home is asking.
-  //
-  // The bank's own mark leads each card and the number is the only text.
-  // A customer recognises the logo of their bank before they finish reading
-  // a word, so printing the name underneath as well said the same thing
-  // twice and cost a third line of height for it. Where no icon has been
-  // uploaded the name takes the mark's place instead, so a card is never
-  // blank — and the number stays the one line set large, because it is the
-  // only thing on the card that actually has to be read and copied.
-  if (methods.length > 0) {
-    const GAP = 9;
-    const CARD_W = (IW - GAP * 2) / 3;
-    const CARD_H = 40;
-    const PANEL_W = 42;
-    const rowsNeeded = Math.ceil(methods.length / 3);
-
-    if (y + 26 + rowsNeeded * (CARD_H + GAP) > CONTENT_BOTTOM) {
-      newPage();
-      y = drawInvoiceHeader(doc, business, { compact: true });
-    }
-
-    y = sectionHeading(doc, "Payment Methods", y);
-
-    methods.forEach((m, i) => {
-      const cx = IM + (i % 3) * (CARD_W + GAP);
-      const cy = y + Math.floor(i / 3) * (CARD_H + GAP);
-
-      // A pale copy offset behind the card. PDFKit has no shadows, and this
-      // is what gives the row depth instead of leaving flat outlines.
-      doc.roundedRect(cx + 2, cy + 2.5, CARD_W, CARD_H, 8).fill(INV.tealPale);
-
-      // White throughout, including behind the mark. A bank's logo is drawn
-      // to sit on white; putting it on a tint changes the colour it was
-      // designed against, and on the two-colour marks most Somali banks use
-      // it looks like a printing fault.
-      doc
-        .roundedRect(cx, cy, CARD_W, CARD_H, 8)
-        .lineWidth(1.1)
-        .fillAndStroke(INV.white, INV.tealSoft);
-
-      // A spine rather than a panel: it gives the card an edge to start
-      // from without putting any colour behind the mark.
-      doc.save();
-      doc.roundedRect(cx, cy, CARD_W, CARD_H, 8).clip();
-      doc.rect(cx, cy, 3.5, CARD_H).fill(INV.teal);
-      doc.restore();
-
-      const iconFile = logoPath(m.icon_url);
-      let iconDrawn = false;
-      if (iconFile) {
-        try {
-          doc.image(iconFile, cx + 9, cy + 7, {
-            fit: [PANEL_W - 15, CARD_H - 14],
-            align: "center",
-            valign: "center",
-          });
-          iconDrawn = true;
-        } catch {
-          iconDrawn = false;
-        }
-      }
-      if (!iconDrawn) {
-        // No icon: the account's initials, set the way the lettermark in the
-        // masthead is, so the fallback looks chosen rather than missed.
-        doc.font("Helvetica-Bold").fontSize(11).fillColor(INV.teal);
-        doc.text(initials(m.name), cx + 4, cy + CARD_H / 2 - 6, {
-          width: PANEL_W - 6,
-          align: "center",
-          lineBreak: false,
-          height: 14,
-        });
-      }
-
-      const tx = cx + PANEL_W + 8;
-      const tw = CARD_W - PANEL_W - 16;
-
-      doc
-        .font("Helvetica-Bold")
-        .fontSize(m.account_number ? 9.5 : 8.5)
-        .fillColor(INV.slate);
-      oneLine(doc, m.account_number || m.name, tx, cy + 10, tw);
-
-      const sub = m.account_holder || (m.account_number ? "" : "");
-      if (sub) {
-        doc.font("Helvetica").fontSize(7).fillColor(INV.muted);
-        oneLine(doc, sub, tx, cy + 23, tw);
-      }
-    });
-
-    y += rowsNeeded * (CARD_H + GAP) + 2;
-  }
-
-  // ── Signature ──────────────────────────────────────────────────────────
-  if (data.prepared_by) {
-    // Two centred lines. Worth a few points of tightening elsewhere on the
-    // page to keep them off a sheet of their own — a second page carrying
-    // nothing but a signature reads as a printing fault.
-    if (y + 26 > CONTENT_BOTTOM) {
-      newPage();
-      y = drawInvoiceHeader(doc, business, { compact: true });
-    }
-    y += 3;
-    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(INV.slate);
-    const nm = `${data.prepared_by}, `;
-    // Already a job title in almost every case — 'Operations Director' — so
-    // it is only tidied, not rewritten. The underscore rule is there for the
-    // fallback, where an access level like 'super_admin' comes through.
-    const role = String(data.prepared_by_role || "")
-      .replace(/_/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-    const nw = doc.widthOfString(nm);
-    doc.font("Helvetica").fontSize(9);
-    const rw = doc.widthOfString(role);
-    const sx = IM + (IW - (nw + rw)) / 2;
-    doc
-      .font("Helvetica-Bold")
-      .fillColor(INV.slate)
-      .text(nm, sx, y, { lineBreak: false });
-    doc
-      .font("Helvetica")
-      .fillColor(INV.muted)
-      .text(role, sx + nw, y, { lineBreak: false });
-    doc
-      .font("Helvetica")
-      .fontSize(7.5)
-      .fillColor(INV.muted)
-      .text(
-        new Date().toLocaleDateString("en-GB", {
-          weekday: "long",
-          day: "numeric",
-          month: "long",
-          year: "numeric",
-        }),
-        IM,
-        y + 14,
-        { width: IW, align: "center", lineBreak: false },
-      );
-  }
 
   // ── Footer, on every page ──────────────────────────────────────────────
   //

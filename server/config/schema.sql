@@ -174,6 +174,20 @@ CREATE UNIQUE INDEX idx_airlines_business_key ON airlines(business_id, match_key
 CREATE INDEX idx_airlines_business ON airlines(business_id);
 CREATE INDEX idx_airlines_name     ON airlines(business_id, name);
 
+-- Saved airports used by ticket route autocomplete.
+CREATE TABLE IF NOT EXISTS ticket_cities (
+    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    business_id  UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    city_name    VARCHAR(150) NOT NULL,
+    airport_name VARCHAR(255) NOT NULL,
+    iata_code    VARCHAR(3) NOT NULL,
+    country_code VARCHAR(2) NOT NULL,
+    airport_type VARCHAR(30) NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_ticket_cities_business_iata UNIQUE (business_id, iata_code)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_cities_business_name
+    ON ticket_cities (business_id, city_name);
 
 -- ============================================================
 -- airline_aliases — 'THY' / 'TK' resolve to Turkish Airlines
@@ -248,6 +262,8 @@ CREATE TABLE tickets (
     ticket_type          ticket_type NOT NULL,
     status               ticket_status NOT NULL DEFAULT 'active',
     passenger_name       VARCHAR(255) NOT NULL,
+    passenger_type       VARCHAR(10) NOT NULL DEFAULT 'adult'
+                         CHECK (passenger_type IN ('adult', 'child', 'infant')),
     contact_number       VARCHAR(50),
     from_city            VARCHAR(255) NOT NULL,
     to_city              VARCHAR(255) NOT NULL,

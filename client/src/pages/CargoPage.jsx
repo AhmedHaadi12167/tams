@@ -439,6 +439,7 @@ const CargoForm = ({ form, setForm, onSave, onCancel, saving }) => {
             type="number"
             min="0"
             step="0.01"
+            max={totalPrice}
             value={form.amount_paid}
             onChange={setField("amount_paid")}
             placeholder="0.00"
@@ -655,6 +656,12 @@ export default function CargoPage() {
 
   const handleSave = async (e) => {
     e.preventDefault();
+    const total =
+      form.pricing === "flat"
+        ? parseFloat(form.flat_price) || 0
+        : (parseFloat(form.weight_kg) || 0) * (parseFloat(form.price_per_kg) || 0);
+    if ((parseFloat(form.amount_paid) || 0) > total + 0.001)
+      return toast.error(`Amount paid cannot exceed the total price ($${total.toFixed(2)})`);
     setSaving(true);
     try {
       if (modal.mode === "create") {

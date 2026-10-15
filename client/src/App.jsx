@@ -10,9 +10,11 @@ import LoginPage from "./pages/LoginPage";
 import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import DashboardPage from "./pages/DashboardPage";
 import TicketsPage from "./pages/TicketsPage";
+import TicketBookingPage from "./pages/TicketBookingPage";
 import GroupBookingsPage from "./pages/GroupBookingsPage";
 import CargoPage from "./pages/CargoPage";
 import CustomersPage from "./pages/CustomersPage";
+import CustomerStatementPage from "./pages/CustomerStatementPage";
 import ReportsPage from "./pages/ReportsPage";
 import AirlinesPage from "./pages/AirlinesPage";
 import FinancialsPage from "./pages/FinancialsPage";
@@ -84,6 +86,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/tickets/new"
+        element={
+          <ProtectedRoute roles={["admin", "agent", "accountant"]}>
+            <TicketBookingPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/tickets"
         element={
           <ProtectedRoute roles={["admin", "agent", "accountant"]}>
@@ -113,6 +123,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute roles={["admin", "agent", "accountant"]}>
             <CustomersPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/customers/:id/statement"
+        element={
+          <ProtectedRoute roles={["admin", "agent", "accountant"]}>
+            <CustomerStatementPage />
           </ProtectedRoute>
         }
       />

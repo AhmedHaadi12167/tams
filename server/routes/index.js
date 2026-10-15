@@ -18,6 +18,7 @@ const profileController = require("../controllers/profileController");
 const expenseController = require("../controllers/expenseController");
 const financialsController = require("../controllers/financialsController");
 const airlineController = require("../controllers/airlineController");
+const cityController = require("../controllers/cityController");
 const supplierController = require("../controllers/supplierController");
 const agentController = require("../controllers/agentController");
 const visaController = require("../controllers/visaController");
@@ -170,6 +171,16 @@ router.delete(
 );
 
 // ── Tickets ───────────────────────────────────────────────
+router.get(
+  "/ticket-cities",
+  authorize("admin", "agent", "accountant"),
+  cityController.listCities,
+);
+router.post(
+  "/ticket-cities",
+  authorize("admin", "agent"),
+  cityController.saveCity,
+);
 router.post(
   "/tickets/extract",
   authorize("admin", "agent"),

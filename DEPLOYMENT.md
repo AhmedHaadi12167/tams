@@ -510,6 +510,14 @@ them off the server periodically.
 
 ## 13. Updating later
 
+The ticket booking airport autocomplete requires `migration_v30.sql` before
+the updated server is deployed:
+
+```bash
+cd /var/www/tams
+psql -U tams_user -d tams_db -h localhost -v ON_ERROR_STOP=1 -f server/config/migration_v30.sql
+```
+
 ```bash
 cd /var/www/tams && git pull
 cd server && npm install --omit=dev

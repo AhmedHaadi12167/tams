@@ -152,10 +152,38 @@ const fetchDeposit = async (customerId, businessId) => {
   }
 };
 
+/** 'YYYY-MM-DD' of a stored date or timestamp, in the server's calendar. */
+const dayOf = (v) => {
+  if (!v) return null;
+  const m = typeof v === "string" && v.match(/^\d{4}-\d{2}-\d{2}/);
+  if (m) return m[0];
+  const d = v instanceof Date ? v : new Date(v);
+  if (isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
+/** Keep rows whose `field` falls inside [from, to]; either end may be open. */
+const inRange = (rows, field, from, to) => {
+  if (!from && !to) return rows;
+  return rows.filter((r) => {
+    const d = dayOf(r[field]);
+    return d && (!from || d >= from) && (!to || d <= to);
+  });
+};
+
+/** A 'YYYY-MM-DD' query value, or null for anything else. */
+const parseDay = (raw) =>
+  /^\d{4}-\d{2}-\d{2}$/.test(String(raw || "")) ? String(raw) : null;
+
 /**
  * Shared query: everything a customer owes / has paid.
  * Includes tickets they are the passenger on AND tickets they
  * booked for family members / friends (booked_by_customer_id).
+ *
+ * `opts.from` / `opts.to` narrow every list to a date range — services by
+ * the day they were sold, payments by the day they were received — and the
+ * totals follow, so the figures always describe the rows shown.
  */
 const fetchStatementData = async (
   customerId,
@@ -163,7 +191,9 @@ const fetchStatementData = async (
   ticketIds = null,
   visaIds = null,
   packageIds = null,
+  opts = {},
 ) => {
+  const { cargoIds = null, openingIds = null, from = null, to = null } = opts;
   const customerResult = await query(
     `SELECT * FROM customers WHERE id = $1 AND business_id = $2`,
     [customerId, businessId],
@@ -293,20 +323,69 @@ const fetchStatementData = async (
         )
       : { rows: [] };
 
+  // Money collected on visas, packages and cargo. Each keeps its payments in
+  // its own table, and without them a line showed as paid on the statement
+  // with no payment anywhere to account for it.
+  const servicePayments = async (table, key, rows, label) => {
+    const ids = rows.map((r) => r.id);
+    if (!ids.length || !(await hasTable(table))) return [];
+    return (
+      await query(
+        `SELECT p.id, p.amount, p.method, p.note, p.created_at,
+                NULL::UUID AS ticket_id, NULL::UUID AS opening_item_id,
+                p.${key}, u.name AS collected_by_name,
+                $3::TEXT AS payer_name, a.name AS account_name
+           FROM ${table} p
+           LEFT JOIN users u ON u.id = p.collected_by
+           LEFT JOIN payment_accounts a ON a.id = p.account_id
+          WHERE p.business_id = $1 AND p.${key} = ANY($2::UUID[])`,
+        [businessId, ids, customerName],
+      )
+    ).rows.map((p) => ({
+      ...p,
+      passenger_name: label(rows.find((r) => String(r.id) === String(p[key]))),
+    }));
+  };
+  const otherPayments = (
+    await Promise.all([
+      servicePayments(
+        "visa_payments",
+        "visa_id",
+        visaResult.rows,
+        (v) => `Visa ${v?.destination_country || ""}`.trim(),
+      ),
+      servicePayments(
+        "package_payments",
+        "package_id",
+        packageResult.rows,
+        (k) => `Package ${k?.label || ""}`.trim(),
+      ),
+      servicePayments(
+        "cargo_payments",
+        "cargo_id",
+        cargoResult.rows,
+        (c) => `Cargo ${c?.tracking_number || ""}`.trim(),
+      ),
+    ])
+  ).flat();
+  const allPayments = [...paymentsResult.rows, ...otherPayments].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at),
+  );
+
   // A customer may want an invoice for only some passengers — say three of
   // the seven they booked. Everything below is scoped to that selection.
-  const allTickets = ticketsResult.rows;
-  const allVisas = visaResult.rows;
-  const allPackages = packageResult.rows;
-  // Cargo is not individually selectable the way passengers are — a
-  // shipment has no list to tick — so it is always included in full.
-  const cargo = cargoResult.rows.map((c) => ({
-    ...c,
-    // The totals below read selling_price; cargo calls the same number
-    // total_price. Aliasing here rather than special-casing the sum keeps
-    // one definition of "what this line is worth".
-    selling_price: c.total_price,
-  }));
+  const allTickets = inRange(ticketsResult.rows, "booked_date", from, to);
+  const allVisas = inRange(visaResult.rows, "issued_date", from, to);
+  const allPackages = inRange(packageResult.rows, "issued_date", from, to);
+  const allCargo = inRange(cargoResult.rows, "shipped_date", from, to).map(
+    (c) => ({
+      ...c,
+      // The totals below read selling_price; cargo calls the same number
+      // total_price. Aliasing here rather than special-casing the sum keeps
+      // one definition of "what this line is worth".
+      selling_price: c.total_price,
+    }),
+  );
 
   // A selection of [] means "none of this kind"; null means "all of them"
   const pick = (rows, ids) => {
@@ -318,18 +397,38 @@ const fetchStatementData = async (
   const tickets = pick(allTickets, ticketIds);
   const visas = pick(allVisas, visaIds);
   const packages = pick(allPackages, packageIds);
+  const cargo = pick(allCargo, cargoIds);
 
   const partial =
     Array.isArray(ticketIds) ||
     Array.isArray(visaIds) ||
-    Array.isArray(packageIds);
+    Array.isArray(packageIds) ||
+    Array.isArray(cargoIds) ||
+    Array.isArray(openingIds);
 
   const visibleIds = new Set(tickets.map((t) => String(t.id)));
-  const payments = Array.isArray(ticketIds)
-    ? paymentsResult.rows.filter(
-        (p) => p.opening_item_id || visibleIds.has(String(p.ticket_id)),
-      )
-    : paymentsResult.rows;
+  const datedPayments = inRange(allPayments, "created_at", from, to);
+  const listed = (ids, id) =>
+    !Array.isArray(ids) || ids.map(String).includes(String(id));
+  const payments =
+    Array.isArray(ticketIds) ||
+    Array.isArray(visaIds) ||
+    Array.isArray(packageIds) ||
+    Array.isArray(openingIds) ||
+    Array.isArray(cargoIds)
+      ? datedPayments.filter((p) =>
+          p.opening_item_id
+            ? listed(openingIds, p.opening_item_id)
+            : p.cargo_id
+              ? listed(cargoIds, p.cargo_id)
+              : p.visa_id
+                ? listed(visaIds, p.visa_id)
+                : p.package_id
+                  ? listed(packageIds, p.package_id)
+                  : !Array.isArray(ticketIds) ||
+                    visibleIds.has(String(p.ticket_id)),
+        )
+      : datedPayments;
 
   // Only what this customer is actually billed for is added up. Visas and
   // packages are always their own — a ticket is the only thing one person
@@ -389,7 +488,8 @@ const fetchStatementData = async (
         [businessId, customerId],
       ),
     ]);
-  const openingBalances = openingBalancesResult.rows;
+  const allOpening = inRange(openingBalancesResult.rows, "entry_date", from, to);
+  const openingBalances = pick(allOpening, openingIds);
   const openingTotal = openingBalances.reduce(
     (total, item) => total + Number(item.amount || 0),
     0,
@@ -425,6 +525,7 @@ const fetchStatementData = async (
     cargo,
     payments,
     opening_balances: openingBalances,
+    range: { from, to },
     selection: {
       partial,
       selected_count:
@@ -437,8 +538,8 @@ const fetchStatementData = async (
         allTickets.length +
         allVisas.length +
         allPackages.length +
-        cargo.length +
-        openingBalances.length,
+        allCargo.length +
+        allOpening.length,
     },
     breakdown: {
       tickets: {
@@ -505,6 +606,90 @@ const parseTicketIds = (raw) => {
   return list.map((s) => String(s).trim()).filter(Boolean);
 };
 
+/** The optional extras a statement request can carry. */
+const statementOptions = (q) => ({
+  cargoIds: parseTicketIds(q.cargo_ids),
+  openingIds: parseTicketIds(q.opening_ids),
+  from: parseDay(q.from),
+  to: parseDay(q.to),
+});
+
+// Short codes so an invoice number says what was sold. The id tail keeps it
+// unique and stable: the same service always prints the same number.
+const INVOICE_KINDS = [
+  ["tickets", "TK"],
+  ["visas", "VS"],
+  ["packages", "PK"],
+  ["cargo", "CG"],
+  ["opening_balances", "OB"],
+];
+
+const serviceInvoiceNo = (code, id) =>
+  `INV-${code}-${String(id || "")
+    .replace(/-/g, "")
+    .slice(-6)
+    .toUpperCase()}`;
+
+/**
+ * Split a statement into one invoice per service.
+ *
+ * Each invoice carries its own line, its own payments and its own totals.
+ * The deposit is left off: it belongs to the customer's account as a whole,
+ * and subtracting all of it on every invoice would show it several times.
+ */
+const splitIntoInvoices = (data) => {
+  const out = [];
+  INVOICE_KINDS.forEach(([key, code]) => {
+    (data[key] || []).forEach((row) => {
+      const opening = key === "opening_balances";
+      const billed = row.billed_to_me !== false;
+      const total = billed
+        ? Number(opening ? row.amount : row.selling_price) || 0
+        : 0;
+      const paid = billed
+        ? Number(opening ? row.paid_amount : row.amount_paid) || 0
+        : 0;
+      const balance = billed ? Number(row.balance) || 0 : 0;
+      const payments = (data.payments || []).filter((p) =>
+        String(
+          {
+            tickets: p.ticket_id,
+            visas: p.visa_id,
+            packages: p.package_id,
+            cargo: p.cargo_id,
+            opening_balances: p.opening_item_id,
+          }[key],
+        ) === String(row.id),
+      );
+      const part = {
+        ...data,
+        tickets: [],
+        visas: [],
+        packages: [],
+        cargo: [],
+        opening_balances: [],
+        [key]: [row],
+        payments,
+        deposit: { taken: 0, applied: 0, held: 0 },
+        invoice_no: serviceInvoiceNo(code, row.id),
+      };
+      part.summary = {
+        ...data.summary,
+        item_count: 1,
+        total_amount: total.toFixed(2),
+        total_paid: paid.toFixed(2),
+        total_balance: balance.toFixed(2),
+        deposit_taken: "0.00",
+        deposit_applied: "0.00",
+        deposit_held: "0.00",
+        net_due: balance.toFixed(2),
+      };
+      out.push(part);
+    });
+  });
+  return out;
+};
+
 /**
  * GET /api/customers/:id/statement
  */
@@ -516,6 +701,7 @@ const getCustomerStatement = async (req, res, next) => {
       parseTicketIds(req.query.ticket_ids),
       parseTicketIds(req.query.visa_ids),
       parseTicketIds(req.query.package_ids),
+      statementOptions(req.query),
     );
     if (!data) return response.notFound(res, "Customer not found");
     return response.success(res, data);
@@ -535,12 +721,22 @@ const exportCustomerStatementPDF = async (req, res, next) => {
       parseTicketIds(req.query.ticket_ids),
       parseTicketIds(req.query.visa_ids),
       parseTicketIds(req.query.package_ids),
+      statementOptions(req.query),
     );
     if (!data) return response.notFound(res, "Customer not found");
+    // ?separate=1 sends each selected service as its own invoice, all in
+    // one file, so several can be shared with the customer in one go.
+    const invoices =
+      String(req.query.separate || "") === "1"
+        ? splitIntoInvoices(data)
+        : null;
+    if (invoices && invoices.length === 0)
+      return response.error(res, "Select at least one invoice", 400);
     // Who produced the document. It signs the invoice, which is what turns
     // a printout into something a customer can query with a named person.
     generateCustomerStatementPDF(res, {
       ...data,
+      invoices,
       // A4 by default, A5 on request. Anything else is treated as A4 rather
       // than refused: a mistyped paper size should not stop someone getting
       // their invoice.

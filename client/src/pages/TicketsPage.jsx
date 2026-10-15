@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { ticketsAPI } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -798,6 +799,7 @@ function ManifestModal({ open, onClose }) {
 }
 
 export default function TicketsPage() {
+  const navigate = useNavigate();
   const { canWrite, hasRole } = useAuth();
   // Cancelling pays money back out, so it needs more than write access.
   const canCancel = hasRole("super_admin", "admin", "accountant");
@@ -848,8 +850,7 @@ export default function TicketsPage() {
       .catch(() => {});
   };
   const openEdit = (ticket) => setModal({ open: true, mode: "edit", ticket });
-  const openCreate = () =>
-    setModal({ open: true, mode: "create", ticket: null });
+  const openCreate = () => navigate("/tickets/new");
   const closeModal = () => setModal({ open: false, mode: null, ticket: null });
 
   const handleSave = () => {
@@ -1001,6 +1002,9 @@ export default function TicketsPage() {
                         <p className="font-medium text-gray-900 dark:text-white">
                           {ticket.passenger_name}
                         </p>
+                        <span className="text-[10px] capitalize text-gray-500 dark:text-gray-400">
+                          {ticket.passenger_type || "adult"}
+                        </span>
                         {ticket.ticket_reference && (
                           <p className="text-xs text-gray-400 font-mono">
                             {ticket.ticket_reference}
@@ -1139,16 +1143,16 @@ export default function TicketsPage() {
         </div>
       </Card>
 
-      {/* Create/Edit Modal */}
+      {/* Edit Modal */}
       <Modal
-        open={modal.open && modal.mode !== "view"}
+        open={modal.open && modal.mode === "edit"}
         onClose={closeModal}
-        title={modal.mode === "create" ? "New Ticket" : "Edit Ticket"}
+        title="Edit Ticket"
         size="lg"
       >
         <TicketForm
           initial={modal.ticket || {}}
-          mode={modal.mode}
+          mode="edit"
           onSave={handleSave}
           onCancel={closeModal}
         />
@@ -1284,13 +1288,6 @@ export default function TicketsPage() {
                 "Payment Status",
                 (modal.ticket.payment_status || "unpaid").toUpperCase(),
               ],
-              ...(modal.ticket.ticket_type === "INTERNATIONAL"
-                ? [
-                    ["Passport", modal.ticket.passport_number || "—"],
-                    ["Nationality", modal.ticket.nationality || "—"],
-                    ["Visa Type", modal.ticket.visa_type || "—"],
-                  ]
-                : []),
               ["Agent", modal.ticket.agent_name || "—"],
             ].map(([label, value]) => (
               <div

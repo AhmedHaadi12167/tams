@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import {
   customersAPI,
   ticketsAPI,
-  downloadBlob,
   visasAPI,
   packagesAPI,
   financialsAPI,
@@ -30,8 +30,6 @@ import {
   Trash2,
   Ticket,
   FileText,
-  Printer,
-  Download,
   Banknote,
   Wallet,
   Stamp,
@@ -54,7 +52,6 @@ import {
 import ActionsMenu from "../components/ActionsMenu";
 
 const money = (v) => `$${Number(v || 0).toFixed(2)}`;
-const payBadge = { paid: "success", partial: "warning", unpaid: "danger" };
 
 // ─── Printable invoice ───────────────────────────────────────────────────────
 //
@@ -168,7 +165,7 @@ const invoiceLines = (data) => {
   return out;
 };
 
-const printStatement = (data, preparedBy, paper = "A4") => {
+export const printStatement = (data, preparedBy, paper = "A4") => {
   const { customer, payments = [], summary } = data;
   const business = data.business || {};
   const methods = data.payment_methods || [];
@@ -434,7 +431,7 @@ const printStatement = (data, preparedBy, paper = "A4") => {
   wirePrintWindow(win, paper);
 };
 
-const printPaymentReceipt = (payment, customer) => {
+export const printPaymentReceipt = (payment, customer) => {
   const win = window.open("", "_blank");
   if (!win) return toast.error("Allow pop-ups to print the receipt");
   const html = `<!doctype html><html><head><meta charset="utf-8" />
@@ -455,86 +452,6 @@ const printPaymentReceipt = (payment, customer) => {
   win.document.write(html);
   win.document.close();
   wirePrintWindow(win, "A5");
-};
-
-/**
- * Narrow a statement to the ticked passengers, recomputing the totals so the
- * printed page never shows figures that disagree with its own rows.
- */
-const filterStatement = (data, ticketIds, visaIds, packageIds) => {
-  if (!data) return data;
-  const allT = (data.tickets || []).length === ticketIds.length;
-  const allV = (data.visas || []).length === (visaIds || []).length;
-  const allP = (data.packages || []).length === (packageIds || []).length;
-  if (allT && allV && allP) return data;
-
-  const kT = new Set(ticketIds);
-  const kV = new Set(visaIds || []);
-  const kP = new Set(packageIds || []);
-
-  const tickets = (data.tickets || []).filter((t) => kT.has(t.id));
-  const visas = (data.visas || []).filter((v) => kV.has(v.id));
-  const packages = (data.packages || []).filter((p) => kP.has(p.id));
-  const openingBalances = data.opening_balances || [];
-  const payments = (data.payments || []).filter(
-    (p) => p.opening_item_id || kT.has(p.ticket_id),
-  );
-
-  const sum = (rows) =>
-    rows.reduce(
-      (a, r) => ({
-        amount: a.amount + (parseFloat(r.selling_price) || 0),
-        paid: a.paid + (parseFloat(r.amount_paid) || 0),
-        balance: a.balance + (parseFloat(r.balance) || 0),
-      }),
-      { amount: 0, paid: 0, balance: 0 },
-    );
-  const t = sum(tickets),
-    v = sum(visas),
-    p = sum(packages);
-
-  // The deposit is a fact about the customer, not about the rows that were
-  // ticked, so it survives the filter untouched — but the net due has to be
-  // recomputed, or a three-passenger invoice would carry the net figure for
-  // all seven.
-  const openingTotal = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.amount) || 0),
-    0,
-  );
-  const openingPaid = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.paid_amount) || 0),
-    0,
-  );
-  const openingDue = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.balance) || 0),
-    0,
-  );
-  const balance = t.balance + v.balance + p.balance + openingDue;
-  const held = Number(data.summary?.deposit_held ?? data.deposit?.held) || 0;
-
-  return {
-    ...data,
-    tickets,
-    visas,
-    packages,
-    opening_balances: openingBalances,
-    payments,
-    summary: {
-      ...data.summary,
-      ticket_count: tickets.length,
-      visa_count: visas.length,
-      package_count: packages.length,
-      item_count:
-        tickets.length +
-        visas.length +
-        packages.length +
-        openingBalances.length,
-      total_amount: (t.amount + v.amount + p.amount + openingTotal).toFixed(2),
-      total_paid: (t.paid + v.paid + p.paid + openingPaid).toFixed(2),
-      total_balance: balance.toFixed(2),
-      net_due: (balance - held).toFixed(2),
-    },
-  };
 };
 
 // ─── Collect Payment (from statement) ────────────────────────────────────────
@@ -566,7 +483,7 @@ const COLLECT = {
   },
 };
 
-function CollectForm({ target, onDone, onCancel }) {
+export function CollectForm({ target, onDone, onCancel }) {
   const [amount, setAmount] = useState("");
   const [accountId, setAccountId] = useState("");
   const [saving, setSaving] = useState(false);
@@ -632,558 +549,6 @@ function CollectForm({ target, onDone, onCancel }) {
         </Button>
       </div>
     </form>
-  );
-}
-
-// ─── Statement Modal ─────────────────────────────────────────────────────────
-function StatementModal({
-  data,
-  downloading,
-  paper,
-  setPaper,
-  onPrint,
-  onDownload,
-  onCollect,
-  selectedIds,
-  selectedVisaIds,
-  selectedPackageIds,
-  onToggle,
-  onToggleVisa,
-  onTogglePackage,
-  onSelectAll,
-  onClearAll,
-}) {
-  const { customer, tickets, payments, summary } = data;
-  const visas = data.visas || [];
-  const packages = data.packages || [];
-  const openingBalances = data.opening_balances || [];
-
-  const totalItems =
-    tickets.length + visas.length + packages.length + openingBalances.length;
-  const totalSelected =
-    selectedIds.length +
-    selectedVisaIds.length +
-    selectedPackageIds.length +
-    openingBalances.length;
-  const allSelected = totalItems > 0 && totalSelected === totalItems;
-  const partial = totalSelected > 0 && !allSelected;
-
-  // Totals follow the ticks, so the figures always match what will be sent
-  const addUp = (rows, ids) =>
-    rows
-      .filter((r) => ids.includes(r.id))
-      .reduce(
-        (a, r) => ({
-          total: a.total + (parseFloat(r.selling_price) || 0),
-          paid: a.paid + (parseFloat(r.amount_paid) || 0),
-          balance: a.balance + (parseFloat(r.balance) || 0),
-        }),
-        { total: 0, paid: 0, balance: 0 },
-      );
-  const st = addUp(tickets, selectedIds);
-  const sv = addUp(visas, selectedVisaIds);
-  const sp = addUp(packages, selectedPackageIds);
-  const openingTotal = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.amount) || 0),
-    0,
-  );
-  const openingPaid = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.paid_amount) || 0),
-    0,
-  );
-  const openingDue = openingBalances.reduce(
-    (total, item) => total + (parseFloat(item.balance) || 0),
-    0,
-  );
-  const sel = {
-    total: st.total + sv.total + sp.total + openingTotal,
-    paid: st.paid + sv.paid + sp.paid + openingPaid,
-    balance: st.balance + sv.balance + sp.balance + openingDue,
-  };
-
-  // What the agency is holding for this customer. Shown here so the tiles
-  // say the same thing the printed invoice will — a member of staff reading
-  // "Balance 190" on screen and "Net due 0" on paper would rightly assume
-  // one of them is lying.
-  const held = Number(summary?.deposit_held ?? data.deposit?.held) || 0;
-  const netDue = sel.balance - held;
-
-  const tiles = [
-    ["Items", totalSelected, ""],
-    ["Total", money(sel.total), ""],
-    ["Paid", money(sel.paid), "text-green-600"],
-    ["Balance", money(sel.balance), "text-red-600"],
-    ...(held > 0.001
-      ? [
-          ["On deposit", money(held), "text-green-600"],
-          [
-            netDue < -0.001 ? "In credit" : "Net due",
-            money(Math.abs(netDue)),
-            netDue > 0.001 ? "text-red-600" : "text-green-600",
-          ],
-        ]
-      : []),
-  ];
-
-  return (
-    <div className="space-y-5">
-      {/* Actions */}
-      <div className="flex gap-2 justify-end items-center flex-wrap">
-        {partial && (
-          <span className="text-xs font-medium text-blue-600 dark:text-blue-400 mr-auto">
-            Invoicing {totalSelected} of {totalItems} items
-          </span>
-        )}
-        {/* One choice, applied to both buttons. The printed page and the
-            downloaded file are the same document, so asking twice which
-            paper it is on would be asking the same question twice. */}
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-          Paper
-          <select
-            value={paper}
-            onChange={(e) => setPaper(e.target.value)}
-            className="px-2 py-1 rounded-lg border text-xs bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="A4">A4</option>
-            <option value="A5">A5</option>
-          </select>
-        </label>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onPrint}
-          disabled={totalSelected === 0}
-        >
-          <Printer className="w-4 h-4" /> Print
-        </Button>
-        <Button
-          size="sm"
-          onClick={onDownload}
-          disabled={downloading || totalSelected === 0}
-        >
-          <Download className="w-4 h-4" />
-          {downloading ? "Preparing..." : "Download PDF"}
-        </Button>
-      </div>
-
-      {/* Summary */}
-      <div
-        className={`grid gap-3 text-center ${
-          tiles.length > 4 ? "grid-cols-3 sm:grid-cols-6" : "grid-cols-4"
-        }`}
-      >
-        {tiles.map(([label, val, cls]) => (
-          <div
-            key={label}
-            className="rounded-xl bg-gray-50 dark:bg-gray-800/60 p-3"
-          >
-            <p className="text-xs text-gray-500 uppercase tracking-wide">
-              {label}
-            </p>
-            <p
-              className={`text-lg font-bold text-gray-900 dark:text-white ${cls}`}
-            >
-              {val}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      {openingBalances.length > 0 && (
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
-            Opening receivables
-          </h4>
-          <div className="divide-y divide-gray-100 dark:divide-gray-700 border-y border-gray-200 dark:border-gray-700">
-            {openingBalances.map((item) => (
-              <div
-                key={item.id}
-                className="flex flex-wrap items-center gap-3 py-2 text-sm"
-              >
-                <span className="min-w-0 flex-1 text-gray-700 dark:text-gray-300">
-                  {item.reason} · {fmtDate(item.entry_date, "dd MMM yyyy")}
-                </span>
-                <span className="font-semibold text-red-600">
-                  {money(item.balance)} due
-                </span>
-                {Number(item.balance) > 0.001 && onCollect && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onCollect(item, "opening")}
-                    title="Collect opening balance payment"
-                    className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                  >
-                    <Banknote className="w-4 h-4" /> Pay
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Tickets */}
-      <div>
-        <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-          <Ticket className="w-4 h-4" /> Flight tickets ({tickets.length})
-        </h4>
-        <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="bg-gray-50 dark:bg-gray-800">
-                <th className="px-3 py-2 w-8">
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    ref={(el) => {
-                      if (el) el.indeterminate = partial;
-                    }}
-                    onChange={(e) =>
-                      e.target.checked ? onSelectAll() : onClearAll()
-                    }
-                    className="rounded cursor-pointer"
-                    title="Select everything"
-                  />
-                </th>
-                {[
-                  "Passenger",
-                  "Route",
-                  "Flight",
-                  "Booked",
-                  "Total",
-                  "Paid",
-                  "Balance",
-                  "Status",
-                  "",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
-              {tickets.map((t) => (
-                <tr
-                  key={t.id}
-                  className={selectedIds.includes(t.id) ? "" : "opacity-45"}
-                >
-                  <td className="px-3 py-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(t.id)}
-                      onChange={() => onToggle(t.id)}
-                      className="rounded cursor-pointer"
-                    />
-                  </td>
-                  <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
-                    {t.passenger_name}
-                    {!t.is_self && (
-                      <span
-                        className="text-blue-500"
-                        title="Booked for someone else"
-                      >
-                        {" "}
-                        *
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500">
-                    {t.from_city} → {t.to_city}
-                    {t.trip_type === "round_trip" ? " ⇄" : ""}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500">
-                    {fmtDate(t.flight_date, "dd MMM yy")}
-                    {t.return_date && (
-                      <p className="text-gray-400">
-                        ⇄ {fmtDate(t.return_date, "dd MMM yy")}
-                      </p>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-gray-500">
-                    {fmtDate(t.booked_date, "dd MMM yy")}
-                  </td>
-                  <td className="px-3 py-2">{money(t.selling_price)}</td>
-                  <td className="px-3 py-2 text-green-600">
-                    {money(t.amount_paid)}
-                  </td>
-                  <td className="px-3 py-2 font-semibold text-red-600">
-                    {money(t.balance)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <Badge variant={payBadge[t.payment_status] || "danger"}>
-                      {t.payment_status}
-                    </Badge>
-                  </td>
-                  <td className="px-3 py-2">
-                    {Number(t.balance) > 0 && t.status === "active" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => onCollect(t)}
-                        title="Collect payment"
-                        className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                      >
-                        <Banknote className="w-4 h-4" />
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {tickets.some((t) => !t.is_self) && (
-          <p className="text-xs text-gray-400 mt-1">
-            * booked by {customer.name} for a family member / friend
-          </p>
-        )}
-      </div>
-
-      {/* Visa services */}
-      {visas.length > 0 && (
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-            <Stamp className="w-4 h-4" /> Visa services ({visas.length})
-          </h4>
-          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-gray-50 dark:bg-gray-800">
-                  <th className="px-3 py-2 w-8"></th>
-                  {[
-                    "Applicant",
-                    "Country",
-                    "Type",
-                    "Applied",
-                    "Status",
-                    "Total",
-                    "Paid",
-                    "Balance",
-                    "",
-                  ].map((h, hi) => (
-                    <th
-                      key={h || hi}
-                      className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide"
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
-                {visas.map((v) => (
-                  <tr
-                    key={v.id}
-                    className={
-                      selectedVisaIds.includes(v.id) ? "" : "opacity-45"
-                    }
-                  >
-                    <td className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedVisaIds.includes(v.id)}
-                        onChange={() => onToggleVisa(v.id)}
-                        className="rounded cursor-pointer"
-                      />
-                    </td>
-                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
-                      {v.applicant_name}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">
-                      {v.destination_country}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">
-                      {v.visa_type || "—"}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">
-                      {fmtDate(v.applied_date, "dd MMM yy")}
-                    </td>
-                    <td className="px-3 py-2">
-                      <Badge
-                        variant={
-                          v.status === "collected"
-                            ? "purple"
-                            : v.status === "approved"
-                              ? "success"
-                              : "info"
-                        }
-                      >
-                        {v.status}
-                      </Badge>
-                    </td>
-                    <td className="px-3 py-2">{money(v.selling_price)}</td>
-                    <td className="px-3 py-2 text-green-600">
-                      {money(v.amount_paid)}
-                    </td>
-                    <td
-                      className={`px-3 py-2 font-semibold ${Number(v.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
-                    >
-                      {money(v.balance)}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {Number(v.balance) > 0 && onCollect && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onCollect(v, "visa")}
-                          title="Collect payment"
-                          className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                        >
-                          <Banknote className="w-4 h-4" />
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Hajj & Umrah packages */}
-      {packages.length > 0 && (
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-            <Luggage className="w-4 h-4" /> Hajj &amp; Umrah packages (
-            {packages.length})
-          </h4>
-          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-gray-50 dark:bg-gray-800">
-                  <th className="px-3 py-2 w-8"></th>
-                  {[
-                    "Package",
-                    "Type",
-                    "Pax",
-                    "Departs",
-                    "Status",
-                    "Total",
-                    "Paid",
-                    "Balance",
-                    "",
-                  ].map((h, hi) => (
-                    <th
-                      key={h || hi}
-                      className="text-left px-3 py-2 text-gray-500 font-semibold uppercase tracking-wide"
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/40">
-                {packages.map((p) => (
-                  <tr
-                    key={p.id}
-                    className={
-                      selectedPackageIds.includes(p.id) ? "" : "opacity-45"
-                    }
-                  >
-                    <td className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedPackageIds.includes(p.id)}
-                        onChange={() => onTogglePackage(p.id)}
-                        className="rounded cursor-pointer"
-                      />
-                    </td>
-                    <td className="px-3 py-2 font-medium text-gray-900 dark:text-white">
-                      {p.label}
-                    </td>
-                    <td className="px-3 py-2">
-                      <Badge
-                        variant={
-                          p.package_type === "hajj" ? "purple" : "success"
-                        }
-                      >
-                        {p.package_type}
-                      </Badge>
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">
-                      {p.pilgrim_count}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">
-                      {fmtDate(p.departure_date, "dd MMM yy")}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">{p.status}</td>
-                    <td className="px-3 py-2">{money(p.selling_price)}</td>
-                    <td className="px-3 py-2 text-green-600">
-                      {money(p.amount_paid)}
-                    </td>
-                    <td
-                      className={`px-3 py-2 font-semibold ${Number(p.balance) > 0 ? "text-red-600" : "text-gray-400"}`}
-                    >
-                      {money(p.balance)}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {Number(p.balance) > 0 && onCollect && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onCollect(p, "package")}
-                          title="Collect payment"
-                          className="text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-900/20"
-                        >
-                          <Banknote className="w-4 h-4" />
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Payments */}
-      {payments.length > 0 && (
-        <div>
-          <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-            <Banknote className="w-4 h-4 text-green-600" /> Payment History (
-            {payments.length})
-          </h4>
-          <div className="space-y-1.5 max-h-48 overflow-y-auto">
-            {payments.map((p, i) => (
-              <div
-                key={i}
-                className="flex flex-wrap items-center justify-between gap-3 text-sm py-1.5 px-3 bg-green-50 dark:bg-green-900/10 rounded-lg"
-              >
-                <div>
-                  <span className="font-semibold text-green-700 dark:text-green-400">
-                    {money(p.amount)}
-                  </span>
-                  <span className="text-xs text-gray-500 ml-2">
-                    Paid by {p.payer_name || customer.name} ·{" "}
-                    {p.account_name || p.method}
-                  </span>
-                </div>
-                <div className="text-right text-xs text-gray-500">
-                  <p>{p.collected_by_name}</p>
-                  <p>{fmtDate(p.created_at, "dd MMM yyyy HH:mm")}</p>
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => printPaymentReceipt(p, customer)}
-                  title="Print this payment receipt"
-                  aria-label="Print this payment receipt"
-                >
-                  <Printer className="w-4 h-4" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -1403,7 +768,8 @@ function DepositModal({ customer, onClose, onDone }) {
 }
 
 export default function CustomersPage() {
-  const { isAdmin, canWrite, user } = useAuth();
+  const { isAdmin, canWrite } = useAuth();
+  const navigate = useNavigate();
   const [addOpen, setAddOpen] = useState(false);
   // Which customer we're taking money from with nothing booked yet.
   const [depositFor, setDepositFor] = useState(null);
@@ -1446,69 +812,8 @@ export default function CustomersPage() {
     }
   };
   const [viewLoading, setViewLoading] = useState(false);
-  const [stmtModal, setStmtModal] = useState(null);
-  const [stmtData, setStmtData] = useState(null);
-  const [stmtLoading, setStmtLoading] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  // A4 or A5, shared by the Print button and the PDF download.
-  const [paper, setPaper] = useState("A4");
   // What the user clicked Collect on: { kind: 'ticket'|'visa'|'package', record }
   const [collectTarget, setCollectTarget] = useState(null);
-  // What goes on the statement. Everything is selected by default.
-  const [selectedTicketIds, setSelectedTicketIds] = useState([]);
-  const [selectedVisaIds, setSelectedVisaIds] = useState([]);
-  const [selectedPackageIds, setSelectedPackageIds] = useState([]);
-
-  const openStatement = async (customer) => {
-    setStmtModal(customer);
-    setStmtData(null);
-    setStmtLoading(true);
-    try {
-      const res = await customersAPI.statement(customer.id);
-      const d = res.data.data;
-      setStmtData(d);
-      setSelectedTicketIds((d.tickets || []).map((t) => t.id));
-      setSelectedVisaIds((d.visas || []).map((v) => v.id));
-      setSelectedPackageIds((d.packages || []).map((p) => p.id));
-    } catch {
-      toast.error("Failed to load statement");
-      setStmtModal(null);
-    } finally {
-      setStmtLoading(false);
-    }
-  };
-
-  const downloadStatementPDF = async (customer) => {
-    setDownloading(true);
-    try {
-      const all =
-        !stmtData ||
-        (selectedTicketIds.length === (stmtData.tickets || []).length &&
-          selectedVisaIds.length === (stmtData.visas || []).length &&
-          selectedPackageIds.length === (stmtData.packages || []).length);
-      const res = await customersAPI.statementPDF(
-        customer.id,
-        all
-          ? undefined
-          : {
-              ticket_ids: selectedTicketIds,
-              visa_ids: selectedVisaIds,
-              package_ids: selectedPackageIds,
-            },
-        paper,
-      );
-      downloadBlob(
-        res.data,
-        `invoice-${customer.name.replace(/\s+/g, "-").toLowerCase()}${
-          all ? "" : "-partial"
-        }-${paper.toLowerCase()}.pdf`,
-      );
-    } catch {
-      toast.error("Failed to download PDF");
-    } finally {
-      setDownloading(false);
-    }
-  };
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1689,8 +994,13 @@ export default function CustomersPage() {
                     key={c.id}
                     className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors"
                   >
-                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">
-                      {c.name}
+                    <td className="px-4 py-3 font-medium">
+                      <Link
+                        to={`/customers/${c.id}/statement`}
+                        className="text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        {c.name}
+                      </Link>
                     </td>
                     <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
                       {c.phone || "—"}
@@ -1766,7 +1076,8 @@ export default function CustomersPage() {
                           {
                             label: "Statement",
                             icon: FileText,
-                            onClick: () => openStatement(c),
+                            onClick: () =>
+                              navigate(`/customers/${c.id}/statement`),
                           },
                           isAdmin()
                             ? {
@@ -2032,86 +1343,6 @@ export default function CustomersPage() {
         )}
       </Modal>
 
-      {/* Statement Modal */}
-      <Modal
-        open={!!stmtModal}
-        onClose={() => {
-          setStmtModal(null);
-          setStmtData(null);
-        }}
-        title={stmtModal ? `Statement — ${stmtModal.name}` : "Statement"}
-        size="xl"
-      >
-        {stmtLoading || !stmtData ? (
-          <div className="flex justify-center py-8">
-            <Spinner size="lg" />
-          </div>
-        ) : (
-          <StatementModal
-            data={stmtData}
-            downloading={downloading}
-            paper={paper}
-            setPaper={setPaper}
-            selectedIds={selectedTicketIds}
-            selectedVisaIds={selectedVisaIds}
-            selectedPackageIds={selectedPackageIds}
-            onToggle={(id) =>
-              setSelectedTicketIds((prev) =>
-                prev.includes(id)
-                  ? prev.filter((x) => x !== id)
-                  : [...prev, id],
-              )
-            }
-            onToggleVisa={(id) =>
-              setSelectedVisaIds((prev) =>
-                prev.includes(id)
-                  ? prev.filter((x) => x !== id)
-                  : [...prev, id],
-              )
-            }
-            onTogglePackage={(id) =>
-              setSelectedPackageIds((prev) =>
-                prev.includes(id)
-                  ? prev.filter((x) => x !== id)
-                  : [...prev, id],
-              )
-            }
-            onSelectAll={() => {
-              setSelectedTicketIds((stmtData.tickets || []).map((t) => t.id));
-              setSelectedVisaIds((stmtData.visas || []).map((v) => v.id));
-              setSelectedPackageIds((stmtData.packages || []).map((p) => p.id));
-            }}
-            onClearAll={() => {
-              setSelectedTicketIds([]);
-              setSelectedVisaIds([]);
-              setSelectedPackageIds([]);
-            }}
-            onPrint={() =>
-              printStatement(
-                filterStatement(
-                  stmtData,
-                  selectedTicketIds,
-                  selectedVisaIds,
-                  selectedPackageIds,
-                ),
-                // The job title if they have one — a customer reading
-                // "Operations Director" learns who signed their invoice;
-                // "admin" tells them only what the software lets that person
-                // click.
-                user
-                  ? { name: user.name, role: user.title || user.role }
-                  : null,
-                paper,
-              )
-            }
-            onDownload={() => downloadStatementPDF(stmtModal)}
-            onCollect={(record, kind = "ticket") =>
-              setCollectTarget({ kind, record })
-            }
-          />
-        )}
-      </Modal>
-
       {/* Collect Payment Modal */}
       <Modal
         open={!!collectTarget}
@@ -2124,7 +1355,6 @@ export default function CustomersPage() {
             target={collectTarget}
             onDone={() => {
               setCollectTarget(null);
-              if (stmtModal) openStatement(stmtModal); // refresh statement
               if (viewModal) openView(viewModal); // refresh opening receivable detail
               load(); // refresh counts
             }}

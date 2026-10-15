@@ -92,6 +92,11 @@ export const ticketsAPI = {
   payments: (id) => api.get(`/tickets/${id}/payments`),
 };
 
+export const ticketCitiesAPI = {
+  list: (search) => api.get("/ticket-cities", { params: { search } }),
+  save: (data) => api.post("/ticket-cities", data),
+};
+
 export const cargoAPI = {
   list: (params) => api.get("/cargo", { params }),
   get: (id) => api.get(`/cargo/${id}`),
@@ -119,6 +124,9 @@ const selectionParams = (sel) => {
     ticket_ids: (sel.ticket_ids || []).join(","),
     visa_ids: (sel.visa_ids || []).join(","),
     package_ids: (sel.package_ids || []).join(","),
+    // Optional: absent still means "all of them" on the server.
+    ...(sel.cargo_ids ? { cargo_ids: sel.cargo_ids.join(",") } : {}),
+    ...(sel.opening_ids ? { opening_ids: sel.opening_ids.join(",") } : {}),
   };
 };
 
@@ -136,13 +144,22 @@ export const customersAPI = {
   delete: (id) => api.delete(`/customers/${id}`),
   // sel: optional { ticket_ids, visa_ids, package_ids } to invoice a subset.
   // Omit it entirely for the full statement.
-  statement: (id, sel) =>
-    api.get(`/customers/${id}/statement`, { params: selectionParams(sel) }),
+  // range: optional { from, to } as 'YYYY-MM-DD'.
+  statement: (id, sel, range) =>
+    api.get(`/customers/${id}/statement`, {
+      params: { ...selectionParams(sel), ...range },
+    }),
   // size: "A4" (default) or "A5". The server lays the invoice out once and
   // scales it, so the two are the same document on different paper.
-  statementPDF: (id, sel, size) =>
+  statementPDF: (id, sel, size, range) =>
     api.get(`/customers/${id}/statement/pdf`, {
-      params: { ...selectionParams(sel), size: size || undefined },
+      params: { ...selectionParams(sel), ...range, size: size || undefined },
+      responseType: "blob",
+    }),
+  // One invoice per selected service, all in one PDF.
+  invoicesPDF: (id, sel, size) =>
+    api.get(`/customers/${id}/statement/pdf`, {
+      params: { ...selectionParams(sel), size: size || undefined, separate: 1 },
       responseType: "blob",
     }),
 };

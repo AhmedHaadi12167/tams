@@ -218,6 +218,15 @@ const createCargo = async (req, res, next) => {
         ? flat
         : (num(weight_kg) || 0) * (num(price_per_kg) || 0);
     const paid = parseFloat(amount_paid || 0);
+    // Taking more than the shipment costs leaves a negative balance that
+    // belongs to nobody. Visas and packages already refuse it.
+    if (paid > total + 0.001) {
+      return response.error(
+        res,
+        `Amount paid cannot exceed the total price ($${total.toFixed(2)})`,
+        400,
+      );
+    }
     let paymentStatus = "unpaid";
     if (paid >= total) paymentStatus = "paid";
     else if (paid > 0) paymentStatus = "partial";
@@ -363,6 +372,15 @@ const updateCargo = async (req, res, next) => {
         ? flat
         : (num(weight_kg) || 0) * (num(price_per_kg) || 0);
     const paid = parseFloat(amount_paid || 0);
+    // Taking more than the shipment costs leaves a negative balance that
+    // belongs to nobody. Visas and packages already refuse it.
+    if (paid > total + 0.001) {
+      return response.error(
+        res,
+        `Amount paid cannot exceed the total price ($${total.toFixed(2)})`,
+        400,
+      );
+    }
     let paymentStatus = "unpaid";
     if (paid >= total) paymentStatus = "paid";
     else if (paid > 0) paymentStatus = "partial";

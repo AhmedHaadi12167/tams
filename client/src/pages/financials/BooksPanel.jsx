@@ -37,6 +37,11 @@ const TYPE_ORDER = ["asset", "liability", "equity", "income", "expense"];
 const when = (d) => (new Date(d).getFullYear() < 1971 ? "Opening" : fmtDate(d));
 const TYPE_LABEL = { asset: "Assets", liability: "Liabilities", equity: "Equity", income: "Income", expense: "Expenses" };
 
+// Spreadsheet-style grid: every cell ruled, compact rows.
+const TH = "border border-gray-300 dark:border-gray-600 px-2.5 py-1.5 text-xs font-semibold text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-800";
+const TD = "border border-gray-200 dark:border-gray-700 px-2.5 py-1";
+const NUM = `${TD} text-right tabular-nums whitespace-nowrap`;
+
 export default function BooksPanel({ range }) {
   const [view, setView] = useState("tb");
   const [ledger, setLedger] = useState({ code: "1000", party_id: "" });
@@ -136,20 +141,20 @@ function TrialBalance({ asOf, onOpen }) {
           )}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm border-collapse">
             <thead>
-              <tr className="text-left text-xs uppercase tracking-wide text-gray-500 bg-gray-50 dark:bg-gray-800/60">
-                <th className="px-5 py-2.5 w-20">Code</th>
-                <th className="px-3 py-2.5">Account</th>
-                <th className="px-3 py-2.5 text-right">Debit</th>
-                <th className="px-5 py-2.5 text-right">Credit</th>
+              <tr>
+                <th className={`${TH} text-left w-20`}>Code</th>
+                <th className={`${TH} text-left`}>Account</th>
+                <th className={`${TH} text-right w-40`}>Debit</th>
+                <th className={`${TH} text-right w-40`}>Credit</th>
               </tr>
             </thead>
             <tbody>
               {groups.map((g) => (
                 <React.Fragment key={g.type}>
-                  <tr>
-                    <td colSpan={4} className="px-5 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                  <tr className="bg-gray-50 dark:bg-gray-800/60">
+                    <td colSpan={4} className={`${TD} text-xs font-bold uppercase text-gray-800 dark:text-gray-100`}>
                       {TYPE_LABEL[g.type]}
                     </td>
                   </tr>
@@ -158,9 +163,9 @@ function TrialBalance({ asOf, onOpen }) {
                     const isOpen = open[r.code];
                     return (
                       <React.Fragment key={r.code}>
-                        <tr className="border-t border-gray-100 dark:border-gray-700/50 hover:bg-gray-50/70 dark:hover:bg-gray-800/40">
-                          <td className="px-5 py-2 text-gray-400 tabular-nums">{r.code}</td>
-                          <td className="px-3 py-2">
+                        <tr className="hover:bg-blue-50/60 dark:hover:bg-gray-800/40">
+                          <td className={`${TD} text-gray-500 tabular-nums`}>{r.code}</td>
+                          <td className={TD}>
                             <div className="flex items-center gap-1.5">
                               {expandable ? (
                                 <button onClick={() => setOpen((o) => ({ ...o, [r.code]: !o[r.code] }))} className="text-gray-400 hover:text-gray-700">
@@ -172,19 +177,19 @@ function TrialBalance({ asOf, onOpen }) {
                               </button>
                             </div>
                           </td>
-                          <td className="px-3 py-2 text-right tabular-nums">{r.debit ? money(r.debit) : ""}</td>
-                          <td className="px-5 py-2 text-right tabular-nums">{r.credit ? money(r.credit) : ""}</td>
+                          <td className={NUM}>{r.debit ? money(r.debit) : ""}</td>
+                          <td className={NUM}>{r.credit ? money(r.credit) : ""}</td>
                         </tr>
                         {expandable && isOpen && r.detail.map((d) => (
                           <tr key={r.code + d.label} className="text-xs text-gray-500">
-                            <td />
-                            <td className="px-3 py-1 pl-12">
+                            <td className={TD} />
+                            <td className={`${TD} pl-10`}>
                               {r.code === "1000" ? (
                                 <button onClick={() => onOpen("1000", d.party_id || "none")} className="hover:text-blue-600">{d.label}</button>
                               ) : d.label}
                             </td>
-                            <td className="px-3 py-1 text-right tabular-nums">{d.balance >= 0 && (r.type === "asset" || r.type === "expense") ? money(d.balance) : ""}</td>
-                            <td className="px-5 py-1 text-right tabular-nums">{d.balance < 0 || !(r.type === "asset" || r.type === "expense") ? money(Math.abs(d.balance)) : ""}</td>
+                            <td className={NUM}>{d.balance >= 0 && (r.type === "asset" || r.type === "expense") ? money(d.balance) : ""}</td>
+                            <td className={NUM}>{d.balance < 0 || !(r.type === "asset" || r.type === "expense") ? money(Math.abs(d.balance)) : ""}</td>
                           </tr>
                         ))}
                       </React.Fragment>
@@ -194,11 +199,11 @@ function TrialBalance({ asOf, onOpen }) {
               ))}
             </tbody>
             <tfoot>
-              <tr className="border-t-2 border-gray-300 dark:border-gray-600 font-bold text-gray-900 dark:text-white">
-                <td className="px-5 py-3" />
-                <td className="px-3 py-3">Total</td>
-                <td className="px-3 py-3 text-right tabular-nums">{money(data.totals.debit)}</td>
-                <td className="px-5 py-3 text-right tabular-nums">{money(data.totals.credit)}</td>
+              <tr className="font-bold text-gray-900 dark:text-white bg-gray-100 dark:bg-gray-800 [&>td]:border-t-4 [&>td]:border-double [&>td]:border-t-gray-500">
+                <td className={TD} />
+                <td className={`${TD} uppercase`}>Total</td>
+                <td className={NUM}>{money(data.totals.debit)}</td>
+                <td className={NUM}>{money(data.totals.credit)}</td>
               </tr>
             </tfoot>
           </table>
@@ -393,35 +398,48 @@ function Journal({ range }) {
         <Card className="p-10 text-center text-sm text-gray-400">No transactions match.</Card>
       ) : (
         <div className="space-y-3">
-          {data.entries.map((e) => (
-            <Card key={`${e.source}-${e.source_id}-${e.entry_at}`} className="overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gray-50/80 dark:bg-gray-800/60">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-xs text-gray-500 whitespace-nowrap">{when(e.entry_at)}</span>
-                  <Badge variant="info">{sourceLabel(e.source)}</Badge>
-                  <span className="text-sm font-medium text-gray-900 dark:text-white truncate">{e.memo}</span>
-                </div>
-                <span className="text-sm font-semibold tabular-nums text-gray-700 dark:text-gray-200">{money(e.total)}</span>
-              </div>
-              <table className="w-full text-sm">
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr>
+                    <th className={`${TH} text-left w-28`}>Date</th>
+                    <th className={`${TH} text-left w-36`}>Type</th>
+                    <th className={`${TH} text-left w-20`}>Code</th>
+                    <th className={`${TH} text-left`}>Account</th>
+                    <th className={`${TH} text-right w-36`}>Debit</th>
+                    <th className={`${TH} text-right w-36`}>Credit</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {e.lines.map((l, i) => (
-                    <tr key={i} className="border-t border-gray-100 dark:border-gray-700/50">
-                      <td className={`py-1.5 ${l.credit ? "pl-12" : "pl-4"} pr-3`}>
-                        <span className="text-gray-400 tabular-nums mr-2">{l.code}</span>
-                        <span className="text-gray-800 dark:text-gray-200">{l.account_name}</span>
-                        {(l.party_name || l.detail) && (
-                          <span className="text-gray-400"> <ArrowRight className="w-3 h-3 inline -mt-0.5" /> {l.party_name || l.detail}</span>
-                        )}
-                      </td>
-                      <td className="py-1.5 px-3 text-right tabular-nums w-32">{l.debit ? money(l.debit) : ""}</td>
-                      <td className="py-1.5 px-4 text-right tabular-nums w-32 text-gray-500">{l.credit ? money(l.credit) : ""}</td>
-                    </tr>
+                  {data.entries.map((e) => (
+                    <React.Fragment key={`${e.source}-${e.source_id}-${e.entry_at}`}>
+                      <tr className="bg-gray-50 dark:bg-gray-800/60">
+                        <td className={`${TD} whitespace-nowrap text-gray-700 dark:text-gray-200`}>{when(e.entry_at)}</td>
+                        <td className={`${TD} whitespace-nowrap text-gray-700 dark:text-gray-200`}>{sourceLabel(e.source)}</td>
+                        <td colSpan={4} className={`${TD} font-semibold text-gray-900 dark:text-white`}>{e.memo}</td>
+                      </tr>
+                      {e.lines.map((l, i) => (
+                        <tr key={i} className="hover:bg-blue-50/60 dark:hover:bg-gray-800/40">
+                          <td className={TD} />
+                          <td className={TD} />
+                          <td className={`${TD} text-gray-500 tabular-nums`}>{l.code}</td>
+                          <td className={`${TD} ${l.credit ? "pl-8" : ""}`}>
+                            <span className="text-gray-800 dark:text-gray-200">{l.account_name}</span>
+                            {(l.party_name || l.detail) && (
+                              <span className="text-gray-400"> <ArrowRight className="w-3 h-3 inline -mt-0.5" /> {l.party_name || l.detail}</span>
+                            )}
+                          </td>
+                          <td className={NUM}>{l.debit ? money(l.debit) : ""}</td>
+                          <td className={NUM}>{l.credit ? money(l.credit) : ""}</td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
-            </Card>
-          ))}
+            </div>
+          </Card>
           {data.meta.totalPages > 1 && <Pagination page={page} totalPages={data.meta.totalPages} onChange={setPage} />}
         </div>
       )}

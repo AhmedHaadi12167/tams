@@ -62,6 +62,14 @@ const ticketValidation = [
     .isArray()
     .withMessage("passengers must be a list"),
   body("passengers.*.passenger_name").optional().trim(),
+  body("passengers.*.passenger_type")
+    .optional()
+    .isIn(["adult", "child", "infant"])
+    .withMessage("Passenger type must be adult, child, or infant"),
+  body("passenger_type")
+    .optional()
+    .isIn(["adult", "child", "infant"])
+    .withMessage("Passenger type must be adult, child, or infant"),
   body("from_city").trim().notEmpty().withMessage("Departure city is required"),
   body("to_city").trim().notEmpty().withMessage("Destination city is required"),
   body("flight_date")
@@ -136,6 +144,12 @@ const extractFromFile = async (req, res, next) => {
       "Data extracted successfully",
     );
   } catch (err) {
+    if (err?.status === 401)
+      return response.error(
+        res,
+        "AI extraction is not configured: the Anthropic API key in server/.env is invalid or revoked. Put a valid key in ANTHROPIC_API_KEY and restart the server.",
+        503,
+      );
     next(err);
   }
 };
@@ -363,9 +377,9 @@ const createTicket = async (req, res, next) => {
           trip_type, return_date, agent_commission,
           amount_paid, payment_status, booked_by_customer_id,
           passport_number, nationality, date_of_birth,
-          passport_expiry_date, visa_type, visa_expiry_date
+          passport_expiry_date, visa_type, visa_expiry_date, passenger_type
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-                  $24,$25,$26,$27,$28,$29)
+                  $24,$25,$26,$27,$28,$29,$30)
         RETURNING *`,
         [
           businessId,
@@ -400,6 +414,7 @@ const createTicket = async (req, res, next) => {
           nullIfBlank(passport_expiry_date),
           nullIfBlank(visa_type),
           nullIfBlank(visa_expiry_date),
+          req.body.passenger_type || "adult",
         ],
       );
 
@@ -788,7 +803,8 @@ const updateTicket = async (req, res, next) => {
           amount_paid=$17, payment_status=$18,
           booked_by_customer_id=COALESCE($19, booked_by_customer_id),
           passport_number=$22, nationality=$23, date_of_birth=$24,
-          passport_expiry_date=$25, visa_type=$26, visa_expiry_date=$27
+          passport_expiry_date=$25, visa_type=$26, visa_expiry_date=$27,
+          passenger_type=$28
          WHERE id=$20 AND business_id=$21 RETURNING *`,
         [
           ticket_type,
@@ -818,6 +834,7 @@ const updateTicket = async (req, res, next) => {
           nullIfBlank(passport_expiry_date),
           nullIfBlank(visa_type),
           nullIfBlank(visa_expiry_date),
+          req.body.passenger_type || "adult",
         ],
       );
       const ticket = result.rows[0];
